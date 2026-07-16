@@ -1,0 +1,577 @@
+# build-day-app — the reusable build workflow for conventional Day projects.
+#
+# Call it from a Day app repository to build, exercise, and package the app for a set of
+# platform-toolkit targets. The recipes are a subset of daybrite/day's own ci.yml showcase
+# pipeline, reduced to: install the day CLI, build the project, run its dayscripts (capturing
+# screenshots), and `day pack` a distributable. On a semantic-version tag (vX.Y.Z), a final job
+# attaches every package and a per-target screenshot zip to the GitHub release.
+#
+# Example caller (.github/workflows/ci.yml in the app repo):
+#
+#   jobs:
+#     app:
+#       uses: daybrite/actions/.github/workflows/build-day-app.yml@main
+#       secrets: inherit          # forwards optional DAY_* signing secrets
+#       permissions:
+#         contents: write         # release-asset upload on tag builds
+#       with:
+#         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-widget
+#
+# Signing: pack degrades to the dev tier (ad-hoc / dev keystore / self-signed) when the DAY_*
+# secrets are absent — it never fails for that reason. On semantic-version tags, the same secret
+# names daybrite/day's ci.yml uses (DAY_SIGN_MACOS_IDENTITY, DAY_APPLE_CERT_P12, …) light up
+# release signing when configured and forwarded with `secrets: inherit`.
+
+name: build-day-app
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: >-
+          Platform-toolkit pairs to build, comma- or space-separated. Supported:
+          macos-appkit, macos-gtk, macos-qt, ios-uikit, linux-gtk, linux-qt,
+          android-widget, ohos-arkui, windows-winui, windows-qt, windows-gtk.
+        type: string
+        required: true
+      day-version:
+        description: >-
+          Which day CLI to install: "latest" (newest crates.io release), a semantic version
+          ("v1.2.3" or "1.2.3", from crates.io), a 40-hex commit, or a branch name of the day
+          repository (built from git).
+        type: string
+        default: latest
+      day-git:
+        description: Git URL of the day repository, for branch/commit installs.
+        type: string
+        default: https://github.com/daybrite/day.git
+      project-path:
+        description: Directory of the Day project within the repository.
+        type: string
+        default: "."
+      setup-command:
+        description: >-
+          Optional shell command run at the repository root after the day CLI is installed and
+          before anything else (e.g. `day new app …` to scaffold the project under test).
+        type: string
+        default: ""
+      scripts:
+        description: >-
+          Dayscripts to run on each target, comma- or space-separated paths relative to the
+          project. "auto" (default) runs every dayscript/*.yaml or scripts/*.yaml in the project;
+          "none" skips scripts entirely.
+        type: string
+        default: auto
+      launch-env:
+        description: >-
+          Space-separated KEY=VALUE pairs passed to every scripted launch as `--env` (values must
+          not contain spaces). Example: "WEATHER_MOCK=1".
+        type: string
+        default: ""
+      locales:
+        description: >-
+          Locales to run each dayscript under, comma- or space-separated (e.g. "en fr ar zh-CN").
+          Each locale's screenshots land in their own variant directory. Empty = one run in the
+          default locale.
+        type: string
+        default: ""
+    # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
+    # absent secrets degrade pack to the dev tier. Forward them all with `secrets: inherit`.
+    secrets:
+      DAY_SIGN_MACOS_IDENTITY: { required: false }
+      DAY_NOTARY_KEY_ID: { required: false }
+      DAY_NOTARY_ISSUER: { required: false }
+      DAY_NOTARY_KEY_B64: { required: false }
+      DAY_APPLE_TEAM: { required: false }
+      DAY_ASC_KEY_ID: { required: false }
+      DAY_ASC_ISSUER: { required: false }
+      DAY_ASC_KEY_B64: { required: false }
+      DAY_APPLE_CERT_P12: { required: false }
+      DAY_APPLE_CERT_PASSWORD: { required: false }
+      DAY_ANDROID_KEYSTORE_B64: { required: false }
+      DAY_ANDROID_KEY_ALIAS: { required: false }
+      DAY_KS_PASS: { required: false }
+      DAY_KEY_PASS: { required: false }
+      DAY_OHOS_KEYSTORE_B64: { required: false }
+      DAY_OHOS_CERT_B64: { required: false }
+      DAY_OHOS_PROFILE_B64: { required: false }
+      DAY_OHOS_KEY_ALIAS: { required: false }
+      DAY_OHOS_KS_PASS: { required: false }
+      DAY_OHOS_KEY_PASS: { required: false }
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Turn the `targets` input into a build matrix (target → runner, doctor toolkit, extra rust
+  # std targets) and decide whether this run is a semantic-version release.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - name: Plan the matrix
+        id: plan
+        env:
+          TARGETS_IN: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          rows=()
+          for t in ${TARGETS_IN//,/ }; do
+            # tier=extra marks the portable non-primary combos (GTK/Qt off their home OS):
+            # their pack + script steps are best-effort, mirroring their walkthrough-coverage
+            # role in daybrite/day's own CI.
+            case "$t" in
+              macos-appkit)   row='{"target":"macos-appkit","os":"macos-latest","toolkit":"appkit","rust_targets":"","tier":"primary"}' ;;
+              macos-gtk)      row='{"target":"macos-gtk","os":"macos-latest","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
+              macos-qt)       row='{"target":"macos-qt","os":"macos-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
+              ios-uikit)      row='{"target":"ios-uikit","os":"macos-latest","toolkit":"uikit","rust_targets":"aarch64-apple-ios-sim,aarch64-apple-ios","tier":"primary"}' ;;
+              linux-gtk)      row='{"target":"linux-gtk","os":"ubuntu-latest","toolkit":"gtk","rust_targets":"","tier":"primary"}' ;;
+              linux-qt)       row='{"target":"linux-qt","os":"ubuntu-latest","toolkit":"qt","rust_targets":"","tier":"primary"}' ;;
+              android-widget) row='{"target":"android-widget","os":"ubuntu-latest","toolkit":"android","rust_targets":"aarch64-linux-android,x86_64-linux-android","tier":"primary"}' ;;
+              ohos-arkui)     row='{"target":"ohos-arkui","os":"ubuntu-latest","toolkit":"harmonyos","rust_targets":"aarch64-unknown-linux-ohos,x86_64-unknown-linux-ohos","tier":"primary"}' ;;
+              windows-winui)  row='{"target":"windows-winui","os":"windows-latest","toolkit":"winui","rust_targets":"","tier":"primary"}' ;;
+              windows-qt)     row='{"target":"windows-qt","os":"windows-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
+              windows-gtk)    row='{"target":"windows-gtk","os":"windows-latest","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
+              *)
+                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-widget ohos-arkui windows-winui windows-qt windows-gtk"
+                exit 1 ;;
+            esac
+            rows+=("$row")
+          done
+          [ ${#rows[@]} -gt 0 ] || { echo "::error::inputs.targets is empty"; exit 1; }
+          matrix="{\"include\":[$(IFS=,; echo "${rows[*]}")]}"
+          echo "matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
+          rel=false
+          if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            rel=true
+          fi
+          echo "release=$rel" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: [plan]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      # Release signing, active on semantic-version tags only — branch/PR packs stay dev-signed
+      # even when the repository secrets exist. Absent/empty secrets degrade to the dev tier.
+      # The names match daybrite/day's ci.yml; forward them with `secrets: inherit`.
+      DAY_SIGN_MACOS_IDENTITY: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_SIGN_MACOS_IDENTITY || '' }}
+      DAY_NOTARY_KEY_ID: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_NOTARY_KEY_ID || '' }}
+      DAY_NOTARY_ISSUER: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_NOTARY_ISSUER || '' }}
+      DAY_APPLE_TEAM: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_APPLE_TEAM || '' }}
+      DAY_ASC_KEY_ID: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ASC_KEY_ID || '' }}
+      DAY_ASC_ISSUER: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ASC_ISSUER || '' }}
+      DAY_ANDROID_KEY_ALIAS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
+      DAY_KS_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_KS_PASS || '' }}
+      DAY_KEY_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_KEY_PASS || '' }}
+      DAY_OHOS_KEY_ALIAS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_OHOS_KEY_ALIAS || '' }}
+      DAY_OHOS_KS_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_OHOS_KS_PASS || '' }}
+      DAY_OHOS_KEY_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_OHOS_KEY_PASS || '' }}
+      HAS_APPLE_CERT: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_APPLE_CERT_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: Swatinem/rust-cache@v2
+
+      # --- the day CLI (cargo install, per the day-version input) -------------------------
+      - name: Install the day CLI (${{ inputs.day-version }})
+        env:
+          VERSION_IN: ${{ inputs.day-version }}
+          GIT_URL: ${{ inputs.day-git }}
+        run: |
+          set -euo pipefail
+          V="${VERSION_IN:-latest}"
+          if [ "$V" = latest ]; then
+            cargo install day-cli --locked
+          elif [[ "$V" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            cargo install day-cli --locked --version "${V#v}"
+          elif [[ "$V" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            cargo install day-cli --locked --git "$GIT_URL" --rev "$V"
+          else
+            cargo install day-cli --locked --git "$GIT_URL" --branch "$V"
+          fi
+          day version
+
+      # --- optional project bootstrap (the validation workflow scaffolds here) ------------
+      - name: Setup command
+        if: inputs.setup-command != ''
+        run: ${{ inputs.setup-command }}
+
+      # --- per-target toolkit prerequisites (the recipes from daybrite/day's CI) ----------
+      - name: Toolkit deps (brew)
+        if: runner.os == 'macOS' && (matrix.toolkit == 'gtk' || matrix.toolkit == 'qt')
+        run: |
+          case "${{ matrix.toolkit }}" in
+            qt) brew install qt pkg-config ;;
+            gtk) brew install gtk4 libadwaita pkg-config ;;
+          esac
+
+      - name: Toolkit deps (apt)
+        if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
+        run: |
+          sudo apt-get update
+          # fonts-noto-cjk: without it zh-CN screenshots render Han glyphs as tofu boxes.
+          # xvfb + imagemagick: the linux-gtk dayscripts run under a virtual display, with an
+          # ImageMagick root capture as the screenshot fallback.
+          case "${{ matrix.toolkit }}" in
+            qt) sudo apt-get install -y --no-install-recommends qt6-base-dev pkg-config fonts-noto-cjk ;;
+            gtk) sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev pkg-config xvfb imagemagick fonts-noto-cjk ;;
+          esac
+
+      - name: Java 21 (android / ohos)
+        if: matrix.target == 'android-widget' || matrix.target == 'ohos-arkui'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Gradle (android)
+        if: matrix.target == 'android-widget'
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.6.1"
+          add-job-summary: "never"
+      - name: Android NDK env
+        if: matrix.target == 'android-widget'
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: cargo-ndk (android)
+        if: matrix.target == 'android-widget'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      # The OpenHarmony SDK (NDK for the Rust cross-compile) + hvigor/ohpm from the
+      # command-line-tools — the same recipe daybrite/day's ohos-arkui CI job uses.
+      - name: OHOS SDK
+        if: matrix.target == 'ohos-arkui'
+        uses: openharmony-rs/setup-ohos-sdk@v1
+        id: ohos-sdk
+        with:
+          version: "5.1.0"
+      - name: OHOS toolchain env
+        if: matrix.target == 'ohos-arkui'
+        run: |
+          set -euo pipefail
+          NATIVE="${{ steps.ohos-sdk.outputs.ohos_sdk_native }}"
+          echo "$(dirname "$NATIVE")/toolchains" >> "$GITHUB_PATH"
+          echo "OHOS_NDK_HOME=$NATIVE" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER=$NATIVE/llvm/bin/aarch64-unknown-linux-ohos-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_OHOS_LINKER=$NATIVE/llvm/bin/x86_64-unknown-linux-ohos-clang" >> "$GITHUB_ENV"
+          # hvigor's OpenHarmony mode wants the versioned SDK view (<base>/<api>/…).
+          OH="$(dirname "$NATIVE")"
+          BASE="$HOME/ohos-ohsdk"
+          mkdir -p "$BASE"
+          ln -sfn "$OH" "$BASE/18"
+          echo "OHOS_BASE_SDK_HOME=$BASE" >> "$GITHUB_ENV"
+      - name: Cache the OpenHarmony command-line-tools (hvigor / ohpm)
+        if: matrix.target == 'ohos-arkui'
+        uses: actions/cache@v4
+        with:
+          path: ~/ohos-clt
+          key: ohos-clt-5.1.0.840
+      - name: Install hvigor/ohpm (node wrappers)
+        if: matrix.target == 'ohos-arkui'
+        env:
+          CLT_URL: https://repo.huaweicloud.com/harmonyos/ohpm/5.1.0/commandline-tools-linux-x64-5.1.0.840.zip
+        run: |
+          set -euo pipefail
+          C="$HOME/ohos-clt/command-line-tools"
+          if [ ! -f "$C/hvigor/bin/hvigorw.js" ]; then
+            mkdir -p ~/ohos-clt && cd ~/ohos-clt
+            curl -fSL -o clt.zip "$CLT_URL"
+            unzip -q -o clt.zip && rm -f clt.zip
+          fi
+          # hvigor/ohpm are pure JS — run them with the runner's node.
+          mkdir -p "$HOME/ohos-bin"
+          printf '#!/usr/bin/env bash\nexec node "%s/hvigor/bin/hvigorw.js" "$@"\n' "$C" > "$HOME/ohos-bin/hvigorw"
+          printf '#!/usr/bin/env bash\nexec node "%s/ohpm/bin/pm-cli.js" "$@"\n' "$C" > "$HOME/ohos-bin/ohpm"
+          chmod +x "$HOME/ohos-bin/hvigorw" "$HOME/ohos-bin/ohpm"
+          echo "$HOME/ohos-bin" >> "$GITHUB_PATH"
+          echo "DEVECO_SDK_HOME=$C/sdk" >> "$GITHUB_ENV"
+
+      # windows-qt / windows-gtk build against MSYS2's MINGW64 libraries with the windows-gnu
+      # toolchain (daybrite/day's windows-msys2 recipe).
+      - name: MSYS2 (windows qt/gtk)
+        if: matrix.target == 'windows-qt' || matrix.target == 'windows-gtk'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            ${{ matrix.target == 'windows-qt' && 'mingw-w64-x86_64-qt6-base' || 'mingw-w64-x86_64-gtk4 mingw-w64-x86_64-libadwaita' }}
+      - name: Pin the MSYS2 mingw toolchain
+        if: matrix.target == 'windows-qt' || matrix.target == 'windows-gtk'
+        shell: msys2 {0}
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu
+          rustup default stable-x86_64-pc-windows-gnu
+          cygpath -w "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
+          GCC="$(cygpath -m "$MINGW_PREFIX/bin/gcc.exe")"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$GCC" >> "$GITHUB_ENV"
+          echo "CC=$GCC" >> "$GITHUB_ENV"
+          echo "CXX=$(cygpath -m "$MINGW_PREFIX/bin/g++.exe")" >> "$GITHUB_ENV"
+
+      # --- validate the environment, then build ---------------------------------------------
+      - name: Doctor (${{ matrix.toolkit }})
+        run: day doctor --toolkit ${{ matrix.toolkit }}
+
+      - name: Build (${{ matrix.target }})
+        working-directory: ${{ inputs.project-path }}
+        run: day build -p ${{ matrix.target }}
+
+      # --- distribution packaging (before scripts, so packages survive a script flake) ------
+      - name: Import the Apple signing certificate
+        if: env.HAS_APPLE_CERT == 'true' && runner.os == 'macOS'
+        uses: apple-actions/import-codesign-certs@v5
+        with:
+          p12-file-base64: ${{ secrets.DAY_APPLE_CERT_P12 }}
+          p12-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
+      - name: Materialize signing material
+        if: needs.plan.outputs.release == 'true'
+        env:
+          NOTARY_KEY_B64: ${{ secrets.DAY_NOTARY_KEY_B64 }}
+          ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
+          ANDROID_KEYSTORE_B64: ${{ secrets.DAY_ANDROID_KEYSTORE_B64 }}
+          OHOS_KEYSTORE_B64: ${{ secrets.DAY_OHOS_KEYSTORE_B64 }}
+          OHOS_CERT_B64: ${{ secrets.DAY_OHOS_CERT_B64 }}
+          OHOS_PROFILE_B64: ${{ secrets.DAY_OHOS_PROFILE_B64 }}
+        run: |
+          set -euo pipefail
+          put() { # $1=b64 secret value, $2=file name, $3=env var to export
+            if [ -n "$1" ]; then
+              echo "$1" | base64 --decode > "$RUNNER_TEMP/$2"
+              echo "$3=$RUNNER_TEMP/$2" >> "$GITHUB_ENV"
+            fi
+          }
+          case "${{ matrix.target }}" in
+            macos-*) put "${NOTARY_KEY_B64:-}" notary.p8 DAY_NOTARY_KEY ;;
+            ios-uikit) put "${ASC_KEY_B64:-}" asc.p8 DAY_ASC_KEY ;;
+            android-widget) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
+            ohos-arkui)
+              put "${OHOS_KEYSTORE_B64:-}" ohos.p12 DAY_OHOS_KEYSTORE
+              put "${OHOS_CERT_B64:-}" ohos.cer DAY_OHOS_CERT
+              put "${OHOS_PROFILE_B64:-}" ohos.p7b DAY_OHOS_PROFILE ;;
+          esac
+
+      - name: Flatpak tooling (linux pack)
+        if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
+        run: |
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: NSIS (windows-winui pack)
+        if: matrix.target == 'windows-winui'
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Pack (${{ matrix.target }})
+        # Best-effort on the non-primary combos — they exist for coverage, not distribution.
+        continue-on-error: ${{ matrix.tier == 'extra' }}
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            android-widget) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-arm64-v8a}" ;;
+            ohos-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
+          esac
+          day pack -p ${{ matrix.target }} --format json
+
+      - name: Upload packages
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: ${{ inputs.project-path }}/build/day/dist/
+          if-no-files-found: ${{ matrix.tier == 'primary' && 'error' || 'warn' }}
+
+      # --- dayscripts + screenshots ----------------------------------------------------------
+      # ohos-arkui is pack-only here: driving the OHOS emulator is still experimental even in
+      # daybrite/day's own CI, so this workflow doesn't attempt it.
+      - name: Prepare the dayscript runner
+        id: scripts
+        if: matrix.target != 'ohos-arkui'
+        working-directory: ${{ inputs.project-path }}
+        env:
+          SCRIPTS_IN: ${{ inputs.scripts }}
+          LOCALES_IN: ${{ inputs.locales }}
+          LAUNCH_ENV_IN: ${{ inputs.launch-env }}
+          COMBO: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          LIST=""
+          case "${SCRIPTS_IN:-auto}" in
+            none) ;;
+            ""|auto) LIST="$( (ls dayscript/*.yaml scripts/*.yaml 2>/dev/null || true) | tr '\n' ' ')" ;;
+            *) LIST="${SCRIPTS_IN//,/ }" ;;
+          esac
+          if [ -z "${LIST// /}" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "no dayscripts to run"
+            exit 0
+          fi
+          LOCALES="${LOCALES_IN//,/ }"
+          ENVS=""
+          for kv in $LAUNCH_ENV_IN; do ENVS="$ENVS --env $kv"; done
+          # Per-target launch wrapper: linux-gtk renders under xvfb sized to the app window
+          # (so the root-capture screenshot fallback is exactly the app); linux-qt uses the
+          # offscreen platform; ios retries once on the known simulator app-death flake.
+          PREFIX=""
+          case "$COMBO" in
+            linux-gtk)
+              W=$(sed -n 's/^width *= *\([0-9][0-9]*\).*/\1/p' Day.toml | head -1)
+              H=$(sed -n 's/^height *= *\([0-9][0-9]*\).*/\1/p' Day.toml | head -1)
+              PREFIX="xvfb-run -a -s \"-screen 0 ${W:-1024}x${H:-768}x24\""
+              ENVS="$ENVS --env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 --env WEBKIT_DISABLE_COMPOSITING_MODE=1" ;;
+            linux-qt)
+              ENVS="$ENVS --env QT_QPA_PLATFORM=offscreen" ;;
+          esac
+          RETRY=false
+          [ "$COMBO" = ios-uikit ] && RETRY=true
+          OUT="$RUNNER_TEMP/run-dayscripts.sh"
+          cat > "$OUT" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          cd "$PWD"
+          LOG="\${RUNNER_TEMP:-/tmp}/dayscript.log"
+          run_one() {
+            if $PREFIX day launch -p $COMBO --script "\$@"$ENVS 2>&1 | tee "\$LOG"; then return 0; fi
+            if $RETRY && grep -q "engine connection lost" "\$LOG" && ! grep -q "✗" "\$LOG"; then
+              echo "::warning::engine connection lost (flaky simulator app-death) — retrying the script once"
+              $PREFIX day launch -p $COMBO --script "\$@"$ENVS
+            else
+              return 1
+            fi
+          }
+          EOF
+          for f in $LIST; do
+            if [ -z "${LOCALES// /}" ]; then
+              echo "run_one \"$f\"" >> "$OUT"
+            else
+              for L in $LOCALES; do
+                echo "run_one \"$f\" --locale $L --variant $L" >> "$OUT"
+              done
+            fi
+          done
+          chmod +x "$OUT"
+          echo "generated $OUT:"
+          cat "$OUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Boot an iOS Simulator
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'ios-uikit'
+        run: |
+          UDID=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices[] | .[] | select(.name | test("^iPhone"))][0].udid')
+          echo "booting $UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Run dayscripts (${{ matrix.target }})
+        if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-widget' && matrix.target != 'ohos-arkui'
+        continue-on-error: ${{ matrix.tier == 'extra' }}
+        run: bash "$RUNNER_TEMP/run-dayscripts.sh"
+
+      - name: Enable KVM group perms (android emulator)
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-widget'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run dayscripts (android emulator)
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-widget'
+        # Best-effort: the emulator has a known intermittent app-start flake; packages are
+        # already uploaded and must not be blocked by a screenshot run.
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          DAY_ANDROID_ABI: x86_64
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_5
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: bash ${{ runner.temp }}/run-dayscripts.sh
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: screenshots-${{ matrix.target }}
+          path: ${{ inputs.project-path }}/build/day/screenshots/
+          if-no-files-found: ignore
+
+  # --- release assets (semantic-version tags only) ------------------------------------------
+  # Attaches every package and a per-target screenshot zip to the GitHub release for the tag,
+  # creating the release (as a draft, then un-drafting) if it doesn't exist yet. The caller
+  # needs `permissions: contents: write`.
+  release:
+    name: release assets
+    needs: [plan, build]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: dist-*
+          path: dist-in
+      - name: Download screenshots
+        uses: actions/download-artifact@v7
+        with:
+          pattern: screenshots-*
+          path: shots-in
+      - name: Assemble release assets
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          # Flatten the per-target package dirs; prefix the target on a file-name collision
+          # (e.g. two flatpaks with the same name from linux-gtk and linux-qt).
+          for d in dist-in/dist-*/; do
+            [ -d "$d" ] || continue
+            combo="$(basename "$d")"; combo="${combo#dist-}"
+            find "$d" -type f | while read -r f; do
+              base="$(basename "$f")"
+              if [ -e "assets/$base" ]; then base="${combo}-${base}"; fi
+              cp "$f" "assets/$base"
+            done
+          done
+          # One zip of screenshots per target.
+          for d in shots-in/screenshots-*/; do
+            [ -d "$d" ] || continue
+            combo="$(basename "$d")"; combo="${combo#screenshots-}"
+            if [ -n "$(find "$d" -type f -print -quit)" ]; then
+              (cd "$d" && zip -qr "$GITHUB_WORKSPACE/assets/screenshots-${combo}.zip" .)
+            fi
+          done
+          (cd assets && sha256sum -- * > SHA256SUMS)
+          ls -la assets
+      - name: Attach to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Create as a draft, attach everything, then un-draft — never publicly visible in a
+          # half-uploaded state; --clobber + --draft=false keep re-runs idempotent.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+                 --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" assets/* --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false

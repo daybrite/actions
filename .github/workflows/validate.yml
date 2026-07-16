@@ -1,0 +1,34 @@
+# validate — prove the reusable build-day-app workflow works before anyone depends on it.
+#
+# Scaffolds a fresh app with `day new app` (via the reusable workflow's setup-command input) and
+# builds it for all 7 primary platform-toolkit pairs. This exercises the whole surface a real
+# caller uses: the target matrix and runner mapping, the day CLI install path, every per-target
+# toolchain recipe, `day build`, `day pack`, the dayscript runner (the scaffold ships
+# dayscript/smoke.yaml), and the artifact uploads. The release-assets job stays skipped — this
+# repo doesn't tag app releases.
+#
+# day-version is "main" so the CLI and the scaffold's git framework dependency come from the same
+# tree. ("latest" would pair the released CLI's template with the framework's main branch, which
+# can skew between releases.)
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-scaffold:
+    uses: ./.github/workflows/build-day-app.yml
+    with:
+      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-widget, ohos-arkui
+      day-version: main
+      project-path: ci-app
+      setup-command: >-
+        day new app ci-app
+        --toolkit windows-winui,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-widget,ohos-arkui
+        --appid dev.daybrite.ciapp --git --no-input
