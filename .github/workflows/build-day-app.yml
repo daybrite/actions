@@ -517,15 +517,18 @@ jobs:
 
   # --- release assets (semantic-version tags only) ------------------------------------------
   # Attaches every package and a per-target screenshot zip to the GitHub release for the tag,
-  # creating the release (as a draft, then un-drafting) if it doesn't exist yet. The caller
-  # needs `permissions: contents: write`.
+  # creating the release (as a draft, then un-drafting) if it doesn't exist yet.
+  #
+  # No job-level `permissions:` block here, deliberately: GitHub validates a nested job's
+  # requested permissions against the CALLER's grant even when the job is skipped, so requesting
+  # `contents: write` would break every read-only caller (validate.yml, app repos that never
+  # tag). Instead the job inherits the caller's token — tag builds need the caller to grant
+  # `permissions: contents: write`, or the release upload fails with a 403.
   release:
     name: release assets
     needs: [plan, build]
     if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Download packages
         uses: actions/download-artifact@v7
