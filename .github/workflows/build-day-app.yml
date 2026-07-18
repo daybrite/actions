@@ -541,9 +541,30 @@ jobs:
           pattern: screenshots-*
           path: shots-in
       - name: Assemble release assets
+        env:
+          TARGETS_IN: ${{ inputs.targets }}
         run: |
           set -euo pipefail
           mkdir -p assets
+          # actions/download-artifact extracts a SINGLE pattern match FLAT into `path` — only
+          # multiple matches get `<path>/<artifact-name>/` subdirectories. A one-target app (e.g.
+          # an android-widget-only release) therefore lands its files directly in dist-in/ and
+          # shots-in/, and the per-target loops below would find nothing. Normalize the flat shape
+          # into the per-artifact layout first; in flat mode the one matched artifact belongs to
+          # the workflow's (single) target, so name the synthesized dir after it.
+          combo_fallback="$(echo "${TARGETS_IN%%,*}" | xargs)"
+          normalize() { # $1 = download dir, $2 = artifact-name prefix
+            local dir="$1" prefix="$2"
+            [ -d "$dir" ] || return 0
+            if ! compgen -G "$dir/$prefix-*/" >/dev/null \
+               && [ -n "$(find "$dir" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+              mkdir "$dir/$prefix-${combo_fallback}"
+              find "$dir" -mindepth 1 -maxdepth 1 ! -name "$prefix-${combo_fallback}" \
+                -exec mv {} "$dir/$prefix-${combo_fallback}/" \;
+            fi
+          }
+          normalize dist-in dist
+          normalize shots-in screenshots
           # Flatten the per-target package dirs; prefix the target on a file-name collision
           # (e.g. two flatpaks with the same name from linux-gtk and linux-qt).
           for d in dist-in/dist-*/; do
@@ -563,6 +584,7 @@ jobs:
               (cd "$d" && zip -qr "$GITHUB_WORKSPACE/assets/screenshots-${combo}.zip" .)
             fi
           done
+          [ -n "$(ls -A assets)" ] || { echo "::error::no release assets found under dist-in/ or shots-in/ — artifact download layout mismatch?"; exit 1; }
           (cd assets && sha256sum -- * > SHA256SUMS)
           ls -la assets
       - name: Attach to the GitHub release
