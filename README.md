@@ -43,6 +43,7 @@ jobs:
 | `scripts` | `auto` | Dayscripts to run per target; `auto` = every `dayscript/*.yaml` or `scripts/*.yaml`; `none` disables. |
 | `launch-env` | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`. |
 | `locales` | — | Locales to run each dayscript under (each gets its own screenshot variant). |
+| `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-widget` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 
 ### Targets and runners
 

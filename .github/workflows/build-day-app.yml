@@ -75,6 +75,14 @@ on:
           default locale.
         type: string
         default: ""
+      android-abis:
+        description: >-
+          Android ABIs to build into the android-widget package (APK/AAB), comma- or
+          space-separated. Each ABI adds its own lib/<abi>/ slice, and its rustup target is
+          installed automatically. Supported: arm64-v8a, armeabi-v7a, x86, x86_64. Applies only to
+          the android-widget target; ignored by every other target.
+        type: string
+        default: arm64-v8a x86_64
     # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
     # absent secrets degrade pack to the dev tier. Forward them all with `secrets: inherit`.
     secrets:
@@ -117,8 +125,25 @@ jobs:
         id: plan
         env:
           TARGETS_IN: ${{ inputs.targets }}
+          ANDROID_ABIS_IN: ${{ inputs.android-abis }}
         run: |
           set -euo pipefail
+          # Map the requested Android ABIs (inputs.android-abis) to their rustup targets, so the
+          # android-widget leg installs exactly what `day pack` cross-compiles into the package.
+          # x86_64-linux-android is always kept on top for the x86_64 emulator screenshot leg,
+          # regardless of which ABIs ship in the package.
+          ABIS="${ANDROID_ABIS_IN:-arm64-v8a x86_64}"
+          android_rust="x86_64-linux-android"
+          for one in ${ABIS//,/ }; do
+            case "$one" in
+              arm64-v8a)   rt=aarch64-linux-android ;;
+              armeabi-v7a) rt=armv7-linux-androideabi ;;
+              x86)         rt=i686-linux-android ;;
+              x86_64)      rt=x86_64-linux-android ;;
+              *) echo "::error::unknown android ABI '$one' in inputs.android-abis — supported: arm64-v8a armeabi-v7a x86 x86_64"; exit 1 ;;
+            esac
+            case ",$android_rust," in *",$rt,"*) ;; *) android_rust="$android_rust,$rt" ;; esac
+          done
           rows=()
           for t in ${TARGETS_IN//,/ }; do
             # tier=extra marks the portable non-primary combos (GTK/Qt off their home OS):
@@ -131,7 +156,7 @@ jobs:
               ios-uikit)      row='{"target":"ios-uikit","os":"macos-latest","toolkit":"uikit","rust_targets":"aarch64-apple-ios-sim,aarch64-apple-ios","tier":"primary"}' ;;
               linux-gtk)      row='{"target":"linux-gtk","os":"ubuntu-latest","toolkit":"gtk","rust_targets":"","tier":"primary"}' ;;
               linux-qt)       row='{"target":"linux-qt","os":"ubuntu-latest","toolkit":"qt","rust_targets":"","tier":"primary"}' ;;
-              android-widget) row='{"target":"android-widget","os":"ubuntu-latest","toolkit":"android","rust_targets":"aarch64-linux-android,x86_64-linux-android","tier":"primary"}' ;;
+              android-widget) row="{\"target\":\"android-widget\",\"os\":\"ubuntu-latest\",\"toolkit\":\"android\",\"rust_targets\":\"$android_rust\",\"tier\":\"primary\"}" ;;
               ohos-arkui)     row='{"target":"ohos-arkui","os":"ubuntu-latest","toolkit":"harmonyos","rust_targets":"aarch64-unknown-linux-ohos,x86_64-unknown-linux-ohos","tier":"primary"}' ;;
               windows-winui)  row='{"target":"windows-winui","os":"windows-latest","toolkit":"winui","rust_targets":"","tier":"primary"}' ;;
               windows-qt)     row='{"target":"windows-qt","os":"windows-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
@@ -381,10 +406,15 @@ jobs:
         # Best-effort on the non-primary combos — they exist for coverage, not distribution.
         continue-on-error: ${{ matrix.tier == 'extra' }}
         working-directory: ${{ inputs.project-path }}
+        env:
+          ANDROID_ABIS_IN: ${{ inputs.android-abis }}
         run: |
           set -euo pipefail
           case "${{ matrix.target }}" in
-            android-widget) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-arm64-v8a}" ;;
+            # DAY_ANDROID_ABI is authoritative for `day pack`: it packs a lib/<abi>/ slice for every
+            # listed ABI (inputs.android-abis, default both arm64-v8a and x86_64), whatever devices
+            # are attached. The plan job installed the matching rustup targets.
+            android-widget) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
             ohos-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
           esac
           day pack -p ${{ matrix.target }} --format json
