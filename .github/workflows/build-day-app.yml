@@ -17,7 +17,7 @@
 #       permissions:
 #         contents: write         # release-asset upload on tag builds
 #       with:
-#         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-widget
+#         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc
 #
 # Signing: pack degrades to the dev tier (ad-hoc / dev keystore / self-signed) when the DAY_*
 # secrets are absent — it never fails for that reason. On semantic-version tags, the same secret
@@ -33,7 +33,7 @@ on:
         description: >-
           Platform-toolkit pairs to build, comma- or space-separated. Supported:
           macos-appkit, macos-gtk, macos-qt, ios-uikit, linux-gtk, linux-qt,
-          android-widget, ohos-arkui, windows-winui, windows-qt, windows-gtk.
+          android-mdc, ohos-arkui, windows-winui, windows-qt, windows-gtk.
         type: string
         required: true
       day-version:
@@ -79,10 +79,10 @@ on:
         default: ""
       android-abis:
         description: >-
-          Android ABIs to build into the android-widget package (APK/AAB), comma- or
+          Android ABIs to build into the android-mdc package (APK/AAB), comma- or
           space-separated. Each ABI adds its own lib/<abi>/ slice, and its rustup target is
           installed automatically. Supported: arm64-v8a, armeabi-v7a, x86, x86_64. Applies only to
-          the android-widget target; ignored by every other target.
+          the android-mdc target; ignored by every other target.
         type: string
         default: arm64-v8a x86_64
     # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
@@ -131,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           # Map the requested Android ABIs (inputs.android-abis) to their rustup targets, so the
-          # android-widget leg installs exactly what `day pack` cross-compiles into the package.
+          # android-mdc leg installs exactly what `day pack` cross-compiles into the package.
           # x86_64-linux-android is always kept on top for the x86_64 emulator screenshot leg,
           # regardless of which ABIs ship in the package.
           ABIS="${ANDROID_ABIS_IN:-arm64-v8a x86_64}"
@@ -158,13 +158,13 @@ jobs:
               ios-uikit)      row='{"target":"ios-uikit","os":"macos-latest","toolkit":"uikit","rust_targets":"aarch64-apple-ios-sim,aarch64-apple-ios","tier":"primary"}' ;;
               linux-gtk)      row='{"target":"linux-gtk","os":"ubuntu-latest","toolkit":"gtk","rust_targets":"","tier":"primary"}' ;;
               linux-qt)       row='{"target":"linux-qt","os":"ubuntu-latest","toolkit":"qt","rust_targets":"","tier":"primary"}' ;;
-              android-widget) row="{\"target\":\"android-widget\",\"os\":\"ubuntu-latest\",\"toolkit\":\"android\",\"rust_targets\":\"$android_rust\",\"tier\":\"primary\"}" ;;
+              android-mdc) row="{\"target\":\"android-mdc\",\"os\":\"ubuntu-latest\",\"toolkit\":\"android\",\"rust_targets\":\"$android_rust\",\"tier\":\"primary\"}" ;;
               ohos-arkui)     row='{"target":"ohos-arkui","os":"ubuntu-latest","toolkit":"harmonyos","rust_targets":"aarch64-unknown-linux-ohos,x86_64-unknown-linux-ohos","tier":"primary"}' ;;
               windows-winui)  row='{"target":"windows-winui","os":"windows-latest","toolkit":"winui","rust_targets":"","tier":"primary"}' ;;
               windows-qt)     row='{"target":"windows-qt","os":"windows-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
               windows-gtk)    row='{"target":"windows-gtk","os":"windows-latest","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
               *)
-                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-widget ohos-arkui windows-winui windows-qt windows-gtk"
+                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-mdc ohos-arkui windows-winui windows-qt windows-gtk"
                 exit 1 ;;
             esac
             rows+=("$row")
@@ -257,23 +257,23 @@ jobs:
           esac
 
       - name: Java 21 (android / ohos)
-        if: matrix.target == 'android-widget' || matrix.target == 'ohos-arkui'
+        if: matrix.target == 'android-mdc' || matrix.target == 'ohos-arkui'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Gradle (android)
-        if: matrix.target == 'android-widget'
+        if: matrix.target == 'android-mdc'
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "9.6.1"
           add-job-summary: "never"
       - name: Android NDK env
-        if: matrix.target == 'android-widget'
+        if: matrix.target == 'android-mdc'
         run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - name: cargo-ndk (android)
-        if: matrix.target == 'android-widget'
+        if: matrix.target == 'android-mdc'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
@@ -387,7 +387,7 @@ jobs:
           case "${{ matrix.target }}" in
             macos-*) put "${NOTARY_KEY_B64:-}" notary.p8 DAY_NOTARY_KEY ;;
             ios-uikit) put "${ASC_KEY_B64:-}" asc.p8 DAY_ASC_KEY ;;
-            android-widget) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
+            android-mdc) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
             ohos-arkui)
               put "${OHOS_KEYSTORE_B64:-}" ohos.p12 DAY_OHOS_KEYSTORE
               put "${OHOS_CERT_B64:-}" ohos.cer DAY_OHOS_CERT
@@ -416,7 +416,7 @@ jobs:
             # DAY_ANDROID_ABI is authoritative for `day pack`: it packs a lib/<abi>/ slice for every
             # listed ABI (inputs.android-abis, default both arm64-v8a and x86_64), whatever devices
             # are attached. The plan job installed the matching rustup targets.
-            android-widget) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
+            android-mdc) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
             ohos-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
           esac
           # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
@@ -514,19 +514,19 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
 
       - name: Run dayscripts (${{ matrix.target }})
-        if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-widget' && matrix.target != 'ohos-arkui'
+        if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'ohos-arkui'
         continue-on-error: ${{ matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       - name: Enable KVM group perms (android emulator)
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-widget'
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: Run dayscripts (android emulator)
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-widget'
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
         # Best-effort: the emulator has a known intermittent app-start flake; packages are
         # already uploaded and must not be blocked by a screenshot run.
         continue-on-error: true
@@ -582,7 +582,7 @@ jobs:
           mkdir -p assets
           # actions/download-artifact extracts a SINGLE pattern match FLAT into `path` — only
           # multiple matches get `<path>/<artifact-name>/` subdirectories. A one-target app (e.g.
-          # an android-widget-only release) therefore lands its files directly in dist-in/ and
+          # an android-mdc-only release) therefore lands its files directly in dist-in/ and
           # shots-in/, and the per-target loops below would find nothing. Normalize the flat shape
           # into the per-artifact layout first; in flat mode the one matched artifact belongs to
           # the workflow's (single) target, so name the synthesized dir after it.

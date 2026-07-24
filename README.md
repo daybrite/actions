@@ -31,7 +31,7 @@ jobs:
     uses: daybrite/actions/.github/workflows/build-day-app.yml@main
     secrets: inherit
     with:
-      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-widget, ohos-arkui
+      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, ohos-arkui
       scripts: dayscript/walkthrough.yaml
       locales: en fr
 ```
@@ -48,7 +48,7 @@ jobs:
 | `scripts` | `auto` | Dayscripts to run per target; `auto` = every `dayscript/*.yaml` or `scripts/*.yaml`; `none` disables. |
 | `launch-env` | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`. |
 | `locales` | — | Locales to run each dayscript under (each gets its own screenshot variant). |
-| `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-widget` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
+| `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 
 ### Targets and runners
 
@@ -57,7 +57,7 @@ jobs:
 | `macos-appkit` | macos-latest | packs a `.dmg` |
 | `ios-uikit` | macos-latest | Simulator scripts; packs the Simulator `.app` (a device `.ipa` with signing secrets) |
 | `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` |
-| `android-widget` | ubuntu-latest | scripts on a KVM emulator (best-effort); packs `.apk` + `.aab` |
+| `android-mdc` | ubuntu-latest | scripts on a KVM emulator (best-effort); packs `.apk` + `.aab` |
 | `ohos-arkui` | ubuntu-latest | build + pack (`.hap`) only — no emulator scripts yet |
 | `windows-winui` | windows-latest | packs `.msix` + NSIS installer |
 | `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds; pack and scripts are best-effort |

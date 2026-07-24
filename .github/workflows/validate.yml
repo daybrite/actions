@@ -25,10 +25,10 @@ jobs:
   build-scaffold:
     uses: ./.github/workflows/build-day-app.yml
     with:
-      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-widget, ohos-arkui
+      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, ohos-arkui
       day-version: main
       project-path: ci-app
       setup-command: >-
         day new app ci-app
-        --toolkit windows-winui,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-widget,ohos-arkui
+        --toolkit windows-winui,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-mdc,ohos-arkui
         --appid dev.daybrite.ciapp --git --no-input
