@@ -4,7 +4,9 @@
 # platform-toolkit targets. The recipes are a subset of daybrite/day's own ci.yml showcase
 # pipeline, reduced to: install the day CLI, build the project, run its dayscripts (capturing
 # screenshots), and `day pack` a distributable. On a semantic-version tag (vX.Y.Z), a final job
-# attaches every package and a per-target screenshot zip to the GitHub release.
+# attaches every package and a per-target screenshot zip to the GitHub release. Packages are
+# packed with `--no-version-in-name` (version-less filenames like app-fair.aab), so each is
+# reachable at a stable .../releases/latest/download/<name> URL.
 #
 # Example caller (.github/workflows/ci.yml in the app repo):
 #
@@ -417,7 +419,9 @@ jobs:
             android-widget) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
             ohos-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
           esac
-          day pack -p ${{ matrix.target }} --format json
+          # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
+          # so each release asset is reachable at a stable .../releases/latest/download/<name> URL.
+          day pack -p ${{ matrix.target }} --no-version-in-name --format json
 
       - name: Upload packages
         if: always()
