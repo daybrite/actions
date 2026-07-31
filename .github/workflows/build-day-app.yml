@@ -1,28 +1,42 @@
 # build-day-app — the reusable build workflow for conventional Day projects.
 #
-# Call it from a Day app repository to build, exercise, and package the app for a set of
-# platform-toolkit targets. The recipes are a subset of daybrite/day's own ci.yml showcase
-# pipeline, reduced to: install the day CLI, build the project, run its dayscripts (capturing
-# screenshots), and `day pack` a distributable. On a semantic-version tag (vX.Y.Z), a final job
-# attaches every package and a per-target screenshot zip to the GitHub release. Packages are
-# packed with `--no-version-in-name` (version-less filenames like app-fair.aab), so each is
+# Call it from a Day app repository to build, exercise, package, and (for web-dom) deploy the app
+# for a set of platform-toolkit targets. The recipes are a subset of daybrite/day's own ci.yml
+# showcase pipeline, reduced to: install the day CLI, build the project, run its dayscripts
+# (capturing screenshots), and `day pack` a distributable. On a semantic-version tag (vX.Y.Z), a
+# final job attaches every package and a per-target screenshot zip to the GitHub release. Packages
+# are packed with `--no-version-in-name` (version-less filenames like app-fair.aab), so each is
 # reachable at a stable .../releases/latest/download/<name> URL.
 #
-# Example caller (.github/workflows/ci.yml in the app repo):
+# Example caller (.github/workflows/ci.yml in the app repo) — build every target, and also publish
+# the web build to this repo's GitHub Pages on each push to the default branch:
 #
+#   permissions:
+#     contents: write         # release-asset upload on tag builds
+#     pages: write            # web-dom → GitHub Pages (only used when deploy-web is set)
+#     id-token: write         # deploy-pages OIDC token (only used when deploy-web is set)
 #   jobs:
 #     app:
 #       uses: daybrite/actions/.github/workflows/build-day-app.yml@main
 #       secrets: inherit          # forwards optional DAY_* signing secrets
-#       permissions:
-#         contents: write         # release-asset upload on tag builds
 #       with:
-#         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc
+#         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, web-dom
+#         deploy-web: true        # publish the web-dom build to the repo's GitHub Pages
 #
-# Signing: pack degrades to the dev tier (ad-hoc / dev keystore / self-signed) when the DAY_*
+# Signing: pack degrades to the dev tier (ad-hoc / unsigned device .ipa / dev keystore /
+# self-signed) when the DAY_*
 # secrets are absent — it never fails for that reason. On semantic-version tags, the same secret
 # names daybrite/day's ci.yml uses (DAY_SIGN_MACOS_IDENTITY, DAY_APPLE_CERT_P12, …) light up
 # release signing when configured and forwarded with `secrets: inherit`.
+#
+# Web deploy: with `deploy-web: true` (and web-dom among the targets), a final `pages` job
+# publishes the web-dom build to the CALLER's own GitHub Pages — reusing the release-profile dist
+# the build job already produced, so there is no second build. The dist is relative-path, so it
+# serves from a project-Pages subpath (https://<owner>.github.io/<repo>/) with no `<base>` tag. By
+# default it deploys on a push to the repo's default branch; set `web-deploy-tag-pattern` to a
+# regex (e.g. `^v[0-9]+\.[0-9]+\.[0-9]+$`) to publish only on matching tags instead. The caller
+# must grant `pages: write` + `id-token: write` (shown above) and, one time, set Settings → Pages
+# → Source = "GitHub Actions"; no secrets are involved (the deploy uses the workflow's OIDC token).
 
 name: build-day-app
 
@@ -33,7 +47,7 @@ on:
         description: >-
           Platform-toolkit pairs to build, comma- or space-separated. Supported:
           macos-appkit, macos-gtk, macos-qt, ios-uikit, linux-gtk, linux-qt,
-          android-mdc, ohos-arkui, windows-winui, windows-qt, windows-gtk.
+          android-mdc, harmony-arkui, windows-xaml, windows-qt, windows-gtk, web-dom.
         type: string
         required: true
       day-version:
@@ -85,6 +99,21 @@ on:
           the android-mdc target; ignored by every other target.
         type: string
         default: arm64-v8a x86_64
+      deploy-web:
+        description: >-
+          Publish the web-dom build to the CALLER's GitHub Pages after the build matrix (reusing
+          the dist the build job already produced — no second build). Requires `web-dom` in
+          `targets`, and the caller to grant `pages: write` + `id-token: write` (see the header).
+          Off by default.
+        type: boolean
+        default: false
+      web-deploy-tag-pattern:
+        description: >-
+          When deploy-web is set: empty (default) deploys on a push to the repository's default
+          branch; a bash regex (e.g. `^v[0-9]+\.[0-9]+\.[0-9]+$`) deploys only on a tag matching
+          it. Ignored unless deploy-web is true.
+        type: string
+        default: ""
     # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
     # absent secrets degrade pack to the dev tier. Forward them all with `secrets: inherit`.
     secrets:
@@ -122,12 +151,16 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       release: ${{ steps.plan.outputs.release }}
+      deploy_web: ${{ steps.plan.outputs.deploy_web }}
     steps:
       - name: Plan the matrix
         id: plan
         env:
           TARGETS_IN: ${{ inputs.targets }}
           ANDROID_ABIS_IN: ${{ inputs.android-abis }}
+          DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
+          WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           # Map the requested Android ABIs (inputs.android-abis) to their rustup targets, so the
@@ -159,12 +192,13 @@ jobs:
               linux-gtk)      row='{"target":"linux-gtk","os":"ubuntu-latest","toolkit":"gtk","rust_targets":"","tier":"primary"}' ;;
               linux-qt)       row='{"target":"linux-qt","os":"ubuntu-latest","toolkit":"qt","rust_targets":"","tier":"primary"}' ;;
               android-mdc) row="{\"target\":\"android-mdc\",\"os\":\"ubuntu-latest\",\"toolkit\":\"android\",\"rust_targets\":\"$android_rust\",\"tier\":\"primary\"}" ;;
-              ohos-arkui)     row='{"target":"ohos-arkui","os":"ubuntu-latest","toolkit":"harmonyos","rust_targets":"aarch64-unknown-linux-ohos,x86_64-unknown-linux-ohos","tier":"primary"}' ;;
-              windows-winui)  row='{"target":"windows-winui","os":"windows-latest","toolkit":"winui","rust_targets":"","tier":"primary"}' ;;
+              harmony-arkui)     row='{"target":"harmony-arkui","os":"ubuntu-latest","toolkit":"harmonyos","rust_targets":"aarch64-unknown-linux-ohos,x86_64-unknown-linux-ohos","tier":"primary"}' ;;
+              windows-xaml)  row='{"target":"windows-xaml","os":"windows-latest","toolkit":"xaml","rust_targets":"","tier":"primary"}' ;;
+              web-dom)        row='{"target":"web-dom","os":"ubuntu-latest","toolkit":"dom","rust_targets":"wasm32-unknown-unknown","tier":"primary"}' ;;
               windows-qt)     row='{"target":"windows-qt","os":"windows-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
               windows-gtk)    row='{"target":"windows-gtk","os":"windows-latest","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
               *)
-                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-mdc ohos-arkui windows-winui windows-qt windows-gtk"
+                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-mdc harmony-arkui windows-xaml windows-qt windows-gtk web-dom"
                 exit 1 ;;
             esac
             rows+=("$row")
@@ -177,6 +211,27 @@ jobs:
             rel=true
           fi
           echo "release=$rel" | tee -a "$GITHUB_OUTPUT"
+
+          # Web-dom → GitHub Pages deploy gate (inputs.deploy-web + web-deploy-tag-pattern). The
+          # pages job reuses the dist-web-dom artifact, so web-dom must be a target.
+          deploy_web=false
+          if [ "$DEPLOY_WEB_IN" = true ]; then
+            case " ${TARGETS_IN//,/ } " in
+              *" web-dom "*) ;;
+              *) echo "::error::deploy-web is set but 'web-dom' is not in inputs.targets — add it to publish the web build"; exit 1 ;;
+            esac
+            if [ -n "${WEB_PATTERN// /}" ]; then
+              # $WEB_PATTERN is unquoted on purpose — quoting it makes `=~` a literal, not a regex.
+              if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ $WEB_PATTERN ]]; then
+                deploy_web=true
+              fi
+            elif [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; then
+              deploy_web=true
+            fi
+            [ "$deploy_web" = true ] \
+              || echo "::notice::deploy-web is set but ref '$GITHUB_REF_NAME' ($GITHUB_REF_TYPE) does not qualify (web-deploy-tag-pattern='${WEB_PATTERN}', default branch='${DEFAULT_BRANCH}') — skipping the Pages deploy."
+          fi
+          echo "deploy_web=$deploy_web" | tee -a "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.target }}
@@ -257,7 +312,7 @@ jobs:
           esac
 
       - name: Java 21 (android / ohos)
-        if: matrix.target == 'android-mdc' || matrix.target == 'ohos-arkui'
+        if: matrix.target == 'android-mdc' || matrix.target == 'harmony-arkui'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -279,15 +334,15 @@ jobs:
           tool: cargo-ndk
 
       # The OpenHarmony SDK (NDK for the Rust cross-compile) + hvigor/ohpm from the
-      # command-line-tools — the same recipe daybrite/day's ohos-arkui CI job uses.
+      # command-line-tools — the same recipe daybrite/day's harmony-arkui CI job uses.
       - name: OHOS SDK
-        if: matrix.target == 'ohos-arkui'
+        if: matrix.target == 'harmony-arkui'
         uses: openharmony-rs/setup-ohos-sdk@v1
         id: ohos-sdk
         with:
           version: "5.1.0"
       - name: OHOS toolchain env
-        if: matrix.target == 'ohos-arkui'
+        if: matrix.target == 'harmony-arkui'
         run: |
           set -euo pipefail
           NATIVE="${{ steps.ohos-sdk.outputs.ohos_sdk_native }}"
@@ -302,13 +357,13 @@ jobs:
           ln -sfn "$OH" "$BASE/18"
           echo "OHOS_BASE_SDK_HOME=$BASE" >> "$GITHUB_ENV"
       - name: Cache the OpenHarmony command-line-tools (hvigor / ohpm)
-        if: matrix.target == 'ohos-arkui'
+        if: matrix.target == 'harmony-arkui'
         uses: actions/cache@v6
         with:
           path: ~/ohos-clt
           key: ohos-clt-5.1.0.840
       - name: Install hvigor/ohpm (node wrappers)
-        if: matrix.target == 'ohos-arkui'
+        if: matrix.target == 'harmony-arkui'
         env:
           CLT_URL: https://repo.huaweicloud.com/harmonyos/ohpm/5.1.0/commandline-tools-linux-x64-5.1.0.840.zip
         run: |
@@ -388,7 +443,7 @@ jobs:
             macos-*) put "${NOTARY_KEY_B64:-}" notary.p8 DAY_NOTARY_KEY ;;
             ios-uikit) put "${ASC_KEY_B64:-}" asc.p8 DAY_ASC_KEY ;;
             android-mdc) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
-            ohos-arkui)
+            harmony-arkui)
               put "${OHOS_KEYSTORE_B64:-}" ohos.p12 DAY_OHOS_KEYSTORE
               put "${OHOS_CERT_B64:-}" ohos.cer DAY_OHOS_CERT
               put "${OHOS_PROFILE_B64:-}" ohos.p7b DAY_OHOS_PROFILE ;;
@@ -399,12 +454,26 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-      - name: NSIS (windows-winui pack)
-        if: matrix.target == 'windows-winui'
+      - name: NSIS (windows-xaml pack)
+        if: matrix.target == 'windows-xaml'
         shell: pwsh
         run: choco install nsis -y --no-progress
 
+      # web-dom has no `day pack`: `day build` already emits the deployable static dist/.
+      # Build it in release and stage it under build/day/dist/ so the artifact upload below
+      # picks it up like any other package.
+      - name: Stage the web dist (web-dom)
+        if: matrix.target == 'web-dom'
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          day build -p web-dom --profile release
+          mkdir -p build/day/dist
+          cp -R build/day/cargo/web-dom/release/dist build/day/dist/web
+          (cd build/day/dist && zip -qr web-dom-dist.zip web && rm -rf web)
+
       - name: Pack (${{ matrix.target }})
+        if: matrix.target != 'web-dom'
         # Best-effort on the non-primary combos — they exist for coverage, not distribution.
         continue-on-error: ${{ matrix.tier == 'extra' }}
         working-directory: ${{ inputs.project-path }}
@@ -417,7 +486,7 @@ jobs:
             # listed ABI (inputs.android-abis, default both arm64-v8a and x86_64), whatever devices
             # are attached. The plan job installed the matching rustup targets.
             android-mdc) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
-            ohos-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
+            harmony-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
           esac
           # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
           # so each release asset is reachable at a stable .../releases/latest/download/<name> URL.
@@ -432,11 +501,13 @@ jobs:
           if-no-files-found: ${{ matrix.tier == 'primary' && 'error' || 'warn' }}
 
       # --- dayscripts + screenshots ----------------------------------------------------------
-      # ohos-arkui is pack-only here: driving the OHOS emulator is still experimental even in
-      # daybrite/day's own CI, so this workflow doesn't attempt it.
+      # harmony-arkui is pack-only here: driving the OHOS emulator is still experimental even in
+      # daybrite/day's own CI, so this workflow doesn't attempt it. web-dom is build-only too:
+      # scripted web runs need a DAY_WEB_DRIVER browser (daybrite/day's own CI carries one), which
+      # this workflow doesn't ship yet.
       - name: Prepare the dayscript runner
         id: scripts
-        if: matrix.target != 'ohos-arkui'
+        if: matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
         working-directory: ${{ inputs.project-path }}
         env:
           SCRIPTS_IN: ${{ inputs.scripts }}
@@ -514,7 +585,7 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
 
       - name: Run dayscripts (${{ matrix.target }})
-        if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'ohos-arkui'
+        if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
         continue-on-error: ${{ matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
@@ -634,3 +705,54 @@ jobs:
                  --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" assets/* --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false
+
+  # --- web-dom → GitHub Pages (opt-in: inputs.deploy-web) -----------------------------------
+  # Publishes the web-dom build — already built in release profile and uploaded by the build job
+  # as dist-web-dom — to the caller's own GitHub Pages. Whether it runs is decided entirely in the
+  # plan job (deploy-web set, web-dom in targets, and the ref qualifies per web-deploy-tag-pattern).
+  #
+  # Like the release job, this declares NO job-level `permissions:` block on purpose: GitHub
+  # validates a nested job's requested permissions against the CALLER's grant even when the job is
+  # skipped, so requesting pages/id-token here would break every caller that doesn't deploy web (it
+  # would fail the whole workflow at validation). It inherits the caller's token instead — a web
+  # deploy needs the caller to grant `permissions: { pages: write, id-token: write }` (plus the
+  # contents: read that checkout always has), or the deploy fails with a 403. One-time repo setting:
+  # Settings → Pages → "Build and deployment" → Source = "GitHub Actions".
+  pages:
+    name: deploy web
+    needs: [plan, build]
+    # !cancelled() so a cancelled run doesn't publish; an unrelated target failing does not block
+    # the web deploy (the artifact is per-target), but a failed web build leaves no dist-web-dom
+    # artifact and the download step below fails loudly.
+    if: ${{ needs.plan.outputs.deploy_web == 'true' && !cancelled() }}
+    runs-on: ubuntu-latest
+    # Bind the run to the repo's github-pages environment so the live URL shows in the UI.
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # Serialize Pages deploys for this repo and never cancel one in flight — a half-published site
+    # is worse than a slightly stale one.
+    concurrency:
+      group: day-pages-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Download the web-dom dist
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-web-dom
+          path: web-in
+      - name: Unpack the dist
+        run: |
+          set -euo pipefail
+          # The build job staged the release dist as web-dom-dist.zip containing a top-level web/.
+          unzip -q web-in/web-dom-dist.zip -d web-unpacked
+          test -f web-unpacked/web/index.html
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # The whole self-contained static site (index.html + shim.js + day.css + app.wasm +
+          # bundled assets), all relative — the directory IS the Pages site.
+          path: web-unpacked/web
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
