@@ -5,9 +5,10 @@
 # showcase pipeline, reduced to: install the day CLI, build the project, run its dayscripts
 # (capturing screenshots), and `day pack` a distributable. On a semantic-version tag (vX.Y.Z), a
 # final job attaches every package and a per-target screenshot zip to the GitHub release. Packages
-# are packed with `--no-version-in-name` (version-less filenames like app-fair.aab), and asset
-# names are normalized to lowercase-kebab with pack's `-unsigned` .ipa marker dropped
-# (Day Skies.dmg → day-skies.dmg, day-skies-unsigned.ipa → day-skies.ipa), so each is
+# are packed with `--no-version-in-name` (version-less filenames like app-fair.aab); each asset
+# name is normalized to lowercase-kebab, tagged with its platform-toolkit combo, and stripped of
+# pack's `-unsigned` .ipa marker (Day Skies.dmg → day-skies-macos-appkit.dmg; day-skies-setup.exe →
+# day-skies-windows-xaml-setup.exe; day-skies.hap → day-skies-harmony-arkui.hap), so each is
 # reachable at a stable .../releases/latest/download/<name> URL.
 #
 # Example caller (.github/workflows/ci.yml in the app repo) — build every target, and also publish
@@ -681,11 +682,11 @@ jobs:
           }
           normalize dist-in dist
           normalize shots-in screenshots
-          # Flatten the per-target package dirs; prefix the target on a file-name collision
-          # (e.g. two flatpaks with the same name from linux-gtk and linux-qt).
+          # Flatten the per-target package dirs, tagging each asset with its platform-toolkit combo.
           for d in dist-in/dist-*/; do
             [ -d "$d" ] || continue
             combo="$(basename "$d")"; combo="${combo#dist-}"
+            tk="${combo#*-}"   # the toolkit half of the combo (linux-gtk → gtk), for the flatpak fold
             find "$d" -type f | while read -r f; do
               base="$(basename "$f")"
               # Normalize for stable release-asset URLs: GitHub mangles spaces into dots on
@@ -694,7 +695,22 @@ jobs:
               # name whether or not the release run had signing secrets.
               base="$(printf '%s' "$base" | tr '[:upper:] ' '[:lower:]-')"
               case "$base" in *-unsigned.ipa) base="${base%-unsigned.ipa}.ipa" ;; esac
-              if [ -e "assets/$base" ]; then base="${combo}-${base}"; fi
+              # Put the platform-toolkit combo in every asset name, so a release lists one clearly
+              # labelled file per target (day-skies.hap → day-skies-harmony-arkui.hap;
+              # day-skies-setup.exe → day-skies-windows-xaml-setup.exe). pack already embeds the
+              # toolkit in flatpak names (…-gtk-<arch>.flatpak) — fold that token into the whole
+              # combo rather than doubling it. The combo also makes names unique across targets, so
+              # the old collision prefix is no longer needed.
+              stem="${base%.*}"; ext="${base##*.}"
+              if [ "$ext" = flatpak ] && [ "$stem" != "${stem/-$tk-/}" ]; then
+                base="${stem/-$tk-/-$combo-}.$ext"
+              else
+                case "$stem" in
+                  *-setup) base="${stem%-setup}-${combo}-setup.$ext" ;;
+                  *)       base="${stem}-${combo}.$ext" ;;
+                esac
+              fi
+              [ ! -e "assets/$base" ] || { echo "::error::two packages both map to assets/$base"; exit 1; }
               cp "$f" "assets/$base"
             done
           done

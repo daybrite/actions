@@ -10,9 +10,12 @@ tag (`vX.Y.Z`), a final job attaches every package and a per-target screenshot z
 `SHA256SUMS` manifest — to the GitHub release for that tag.
 
 Release assets are packed with `day pack --no-version-in-name`, so their filenames carry no
-version (`app-fair.aab`, not `app-fair-1.0.0.aab`). Each one is therefore reachable at a stable
-"latest release" URL — `https://github.com/<owner>/<repo>/releases/latest/download/<name>` (e.g.
-`.../releases/latest/download/app-fair.aab`) — that always redirects to the newest tagged release.
+version, and each is tagged with its platform-toolkit combo — `app-fair-android-mdc.aab`,
+`app-fair-linux-gtk-x86_64.flatpak`, `app-fair-windows-xaml-setup.exe`, `app-fair-harmony-arkui.hap`.
+Each is therefore reachable at a stable "latest release" URL —
+`https://github.com/<owner>/<repo>/releases/latest/download/<name>` (e.g.
+`.../releases/latest/download/app-fair-android-mdc.aab`) — that always redirects to the newest
+tagged release.
 
 Call it from your app repository:
 
