@@ -782,10 +782,10 @@ jobs:
           unzip -q web-in/web-dom-dist.zip -d web-dist
           test -f web-dist/index.html
       - name: Upload the Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           # The whole self-contained static site, all relative — the directory IS the Pages site.
           path: web-dist
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
