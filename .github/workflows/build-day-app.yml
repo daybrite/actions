@@ -468,9 +468,18 @@ jobs:
         run: |
           set -euo pipefail
           day build -p web-dom --profile release
-          mkdir -p build/day/dist
-          cp -R build/day/cargo/web-dom/release/dist build/day/dist/web
-          (cd build/day/dist && zip -qr web-dom-dist.zip web && rm -rf web)
+          dist="build/day/cargo/web-dom/release/dist"
+          if [ ! -f "$dist/index.html" ]; then
+            echo "::error::web-dom release build produced no dist at $dist — does the app's Cargo.toml declare the 'dom = [\"day/dom\"]' feature? (day new app scaffolds it.)"
+            find build/day/cargo/web-dom -maxdepth 3 2>/dev/null || true
+            exit 1
+          fi
+          # The web artifact IS the built dist folder, zipped: index.html + shim.js + day.css +
+          # app.wasm + assets/… at the zip root. Recurse from inside dist so the assets/ subtree is
+          # preserved (a flat `zip -j` would drop it).
+          out="$PWD/build/day/dist"
+          mkdir -p "$out"
+          ( cd "$dist" && zip -qr "$out/web-dom-dist.zip" . )
 
       - name: Pack (${{ matrix.target }})
         if: matrix.target != 'web-dom'
@@ -744,15 +753,15 @@ jobs:
       - name: Unpack the dist
         run: |
           set -euo pipefail
-          # The build job staged the release dist as web-dom-dist.zip containing a top-level web/.
-          unzip -q web-in/web-dom-dist.zip -d web-unpacked
-          test -f web-unpacked/web/index.html
+          # The build job staged the release dist as web-dom-dist.zip with the dist files at the
+          # zip root (index.html + shim.js + day.css + app.wasm + assets/…).
+          unzip -q web-in/web-dom-dist.zip -d web-dist
+          test -f web-dist/index.html
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # The whole self-contained static site (index.html + shim.js + day.css + app.wasm +
-          # bundled assets), all relative — the directory IS the Pages site.
-          path: web-unpacked/web
+          # The whole self-contained static site, all relative — the directory IS the Pages site.
+          path: web-dist
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v4
