@@ -1,11 +1,13 @@
 # validate — prove the reusable build-day-app workflow works before anyone depends on it.
 #
 # Scaffolds a fresh app with `day new app` (via the reusable workflow's setup-command input) and
-# builds it for all 7 primary platform-toolkit pairs. This exercises the whole surface a real
-# caller uses: the target matrix and runner mapping, the day CLI install path, every per-target
-# toolchain recipe, `day build`, `day pack`, the dayscript runner (the scaffold ships
-# dayscript/smoke.yaml), and the artifact uploads. The release-assets job stays skipped — this
-# repo doesn't tag app releases.
+# builds it for all 8 primary platform-toolkit pairs, web-dom included — so the web build + staging
+# path is exercised too. This covers the whole surface a real caller uses: the target matrix and
+# runner mapping, the day CLI install path, every per-target toolchain recipe, `day build`,
+# `day pack` (and the web-dom dist staging), the dayscript runner (the scaffold ships
+# dayscript/smoke.yaml), and the artifact uploads. The release-assets and Pages-deploy jobs stay
+# skipped — this repo doesn't tag app releases, and deploy-web is off (it publishes to a live
+# Pages site, which a validation run must not do).
 #
 # day-version is "main" so the CLI and the scaffold's git framework dependency come from the same
 # tree. ("latest" would pair the released CLI's template with the framework's main branch, which
@@ -25,10 +27,10 @@ jobs:
   build-scaffold:
     uses: ./.github/workflows/build-day-app.yml
     with:
-      targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui
+      targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
       day-version: main
       project-path: ci-app
       setup-command: >-
         day new app ci-app
-        --toolkit windows-xaml,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-mdc,harmony-arkui
+        --toolkit windows-xaml,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-mdc,harmony-arkui,web-dom
         --appid dev.daybrite.ciapp --git --no-input
