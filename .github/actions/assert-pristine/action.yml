@@ -8,11 +8,26 @@ inputs:
     description: Directory to check (defaults to the workspace root).
     required: false
     default: "."
+  skip-reason:
+    description: >-
+      When set, skip the check and say why. The guarantee this enforces — that the artifact can be
+      rebuilt from its commit — does not exist for a project that is in no commit, so a caller that
+      GENERATES the project it builds passes its reason here instead of getting a failure it cannot
+      act on.
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
-    - shell: bash
+    - name: Skipped
+      if: inputs.skip-reason != ''
+      shell: bash
+      run: echo "::notice::pristine check skipped — ${{ inputs.skip-reason }}"
+
+    - name: Check
+      if: inputs.skip-reason == ''
+      shell: bash
       run: |
         set -euo pipefail
         # `day pack` records HEAD and a `dirty` flag in the SBOM, and `day rebuild` refuses an
