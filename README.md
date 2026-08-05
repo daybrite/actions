@@ -124,3 +124,24 @@ and drives it through the reusable workflow for all 7 primary platform-toolkit p
 `day-version: main` so the CLI and the framework come from the same tree. (It exercises
 `build-day-app`'s build/pack path; the web deploy publishes to a live Pages site and so isn't part
 of the validation run.)
+
+## Project website (daysite)
+
+Add a `website/site.toml` to your repository and the same workflow builds and deploys a full
+project site to your GitHub Pages — landing page, screenshot gallery, and download links — using
+the [daybrite/daysite](https://github.com/daybrite/daysite) template, with the web-dom build
+hosted under the site's `webapp/` subdirectory (`site.toml` `webapp` key names it). The content
+comes from what the repo already maintains: `Day.toml`, the `store/` listings, the screenshots
+your dayscripts capture in this very workflow, and the latest release's assets.
+
+```toml
+# website/site.toml — the only required key:
+host = "https://<owner>.github.io/<repo>"
+```
+
+Deploys follow the same ref rule as `deploy-web` (pushes to the default branch, or
+`web-deploy-tag-pattern` when set) and need the same one-time setup: grant `pages: write` +
+`id-token: write` and set Settings → Pages → Source = "GitHub Actions". Pin the template with
+`daysite-version` (default `main`). Without a `website/` directory, `deploy-web: true` keeps its
+original behavior — the bare web app at the Pages root.
+

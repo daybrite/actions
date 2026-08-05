@@ -172,6 +172,13 @@ on:
           Off by default.
         type: boolean
         default: false
+      daysite-version:
+        description: >-
+          Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Only
+          used when the repository has a website/ directory.
+        type: string
+        required: false
+        default: "main"
       web-deploy-tag-pattern:
         description: >-
           When deploy-web is set: empty (default) deploys on a push to the repository's default
@@ -222,7 +229,15 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       release: ${{ steps.plan.outputs.release }}
       deploy_web: ${{ steps.plan.outputs.deploy_web }}
+      website: ${{ steps.plan.outputs.website }}
     steps:
+      # Only website/site.toml is needed to decide the website gate — a sparse checkout keeps
+      # the plan job as light as it was.
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            ${{ inputs.project-path }}/website
+          sparse-checkout-cone-mode: false
       - name: Plan the matrix
         id: plan
         env:
@@ -231,6 +246,7 @@ jobs:
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROJECT_PATH: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
           # Map the requested Android ABIs (inputs.android-abis) to their rustup targets, so the
@@ -302,6 +318,24 @@ jobs:
               || echo "::notice::deploy-web is set but ref '$GITHUB_REF_NAME' ($GITHUB_REF_TYPE) does not qualify (web-deploy-tag-pattern='${WEB_PATTERN}', default branch='${DEFAULT_BRANCH}') — skipping the Pages deploy."
           fi
           echo "deploy_web=$deploy_web" | tee -a "$GITHUB_OUTPUT"
+
+          # Website gate: a website/site.toml in the repo is the opt-in (no separate input), and
+          # the ref rule is deploy-web's — default branch, or web-deploy-tag-pattern when set.
+          # When it fires, the website job deploys the full daysite (with the web-dom build under
+          # its webapp/ subdirectory) and the root-deploy pages job stands down.
+          website=false
+          if [ -f "${PROJECT_PATH:-.}/website/site.toml" ]; then
+            if [ -n "${WEB_PATTERN// /}" ]; then
+              if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ $WEB_PATTERN ]]; then
+                website=true
+              fi
+            elif [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; then
+              website=true
+            fi
+            [ "$website" = true ] \
+              || echo "::notice::website/site.toml present but ref '$GITHUB_REF_NAME' does not qualify — skipping the website deploy."
+          fi
+          echo "website=$website" | tee -a "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.target }}
@@ -482,6 +516,7 @@ jobs:
         run: $DAY_BIN doctor --toolkit ${{ matrix.toolkit }}
 
       - name: Build (${{ matrix.target }})
+        id: build
         working-directory: ${{ inputs.project-path }}
         run: $DAY_BIN build -p ${{ matrix.target }}
 
@@ -610,11 +645,13 @@ jobs:
           if-no-files-found: error
 
       - name: Upload packages
-        # `always()` so a later script flake still ships the packages, but not after a FAILED pack:
-        # `if-no-files-found: error` would then report an empty directory as a second failure and
-        # bury the build error that caused it. `skipped` (web-dom, which stages a zip instead)
-        # still uploads.
-        if: always() && steps.pack.outcome != 'failure'
+        # `always()` so a later script flake still ships the packages, but not when there is
+        # nothing to ship: `if-no-files-found: error` would report the empty directory as a second
+        # failure and bury the real one. So the build must have SUCCEEDED (a failure anywhere
+        # before it — lint, doctor — skips it, and skipping this too keeps the log honest), and
+        # pack must not have failed. A skipped pack still uploads: that is web-dom, which stages a
+        # zip of the dist instead of packing.
+        if: always() && steps.build.outcome == 'success' && steps.pack.outcome != 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
@@ -1098,7 +1135,7 @@ jobs:
     # !cancelled() so a cancelled run doesn't publish; an unrelated target failing does not block
     # the web deploy (the artifact is per-target), but a failed web build leaves no dist-web-dom
     # artifact and the download step below fails loudly.
-    if: ${{ needs.plan.outputs.deploy_web == 'true' && !cancelled() }}
+    if: ${{ needs.plan.outputs.deploy_web == 'true' && needs.plan.outputs.website != 'true' && !cancelled() }}
     runs-on: ubuntu-latest
     # Bind the run to the repo's github-pages environment so the live URL shows in the UI.
     environment:
@@ -1127,6 +1164,97 @@ jobs:
         with:
           # The whole self-contained static site, all relative — the directory IS the Pages site.
           path: web-dist
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
+
+  # --- Project website (daysite) -------------------------------------------------------------
+  # When the repository has website/site.toml, this job replaces the bare root deploy above: it
+  # builds the daybrite/daysite template against the repo's own data — Day.toml, store/ listings,
+  # the screenshot artifacts the build matrix just captured, and the latest release's assets —
+  # and deploys the result to the repo's GitHub Pages, with the web-dom build hosted under the
+  # site's webapp/ subdirectory (site.toml `webapp`, default "webapp"). Same permissions story
+  # as the pages job: the caller grants `pages: write` + `id-token: write` and points
+  # Settings → Pages at "GitHub Actions".
+  website:
+    name: deploy website
+    needs: [plan, build]
+    if: ${{ needs.plan.outputs.website == 'true' && !cancelled() }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: day-pages-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: app
+      - uses: actions/checkout@v7
+        with:
+          repository: daybrite/daysite
+          ref: ${{ inputs.daysite-version }}
+          path: daysite
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install the template
+        working-directory: daysite
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png, so merging them
+      # into one directory reassembles exactly the capture tree the gallery assembler reads.
+      # Tolerated-absent: a run whose dayscripts captured nothing still publishes a site — the
+      # gallery page is simply not generated.
+      - name: Download screenshots
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: screenshots-*
+          path: shots
+          merge-multiple: true
+      - name: Generate the site data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          SITE_DIR="$GITHUB_WORKSPACE/app/${PROJECT_PATH:-.}/website"
+          node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" --repo "$GITHUB_REPOSITORY"
+          node daysite/scripts/assemble-gallery.mjs shots "$SITE_DIR"
+          echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
+      # The hosted web build: reuse the dist the build matrix produced, staged under the
+      # directory site.toml names (default "webapp"). Absent when web-dom is not a target —
+      # the site then simply has no "Open the web app" button.
+      - name: Download the web-dom dist
+        id: webdist
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-web-dom
+          path: web-in
+      - name: Stage the web app inside the site
+        if: ${{ steps.webdist.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          WEBAPP="$(node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { parse } from "./daysite/node_modules/smol-toml/dist/index.js";
+            const t = parse(readFileSync(process.env.SITE_DIR + "/site.toml", "utf8"));
+            console.log(t.webapp ?? "webapp");
+          ')"
+          unzip -q web-in/web-dom-dist.zip -d "daysite/public/$WEBAPP"
+          test -f "daysite/public/$WEBAPP/index.html"
+          echo "web app staged under /$WEBAPP/"
+      - name: Build the site
+        working-directory: daysite
+        env:
+          DAYSITE_CONFIG: ${{ env.SITE_DIR }}/site.toml
+        run: npx astro build
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: daysite/dist
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v5
