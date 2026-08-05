@@ -102,6 +102,57 @@ on:
           the android-mdc target; ignored by every other target.
         type: string
         default: arm64-v8a x86_64
+      day-source:
+        description: >-
+          Where the day CLI comes from. `install` (default) builds it with cargo, from crates.io or
+          from git, per `day-version`. `artifact` downloads the `day-<os>-<arch>` artifact an
+          EARLIER JOB IN THE SAME RUN uploaded — which is how the day repository tests its own CLI
+          against its own app, and how any caller can stop compiling the CLI once per matrix leg.
+        type: string
+        required: false
+        default: install
+      artifact-prefix:
+        description: >-
+          Prefix for the package artifact names, so a repository that already publishes
+          `dist-<target>` from another workflow does not collide. `showcase-` yields
+          `showcase-dist-macos-appkit`. Screenshot artifacts are always `screenshots-<target>`.
+        type: string
+        required: false
+        default: ""
+      themes:
+        description: >-
+          Themes to run each dayscript under (e.g. `light dark`), expanded against `locales` into
+          one run per combination. Empty runs the system default only.
+        type: string
+        required: false
+        default: ""
+      app-id:
+        description: >-
+          The app's bundle id. When set, the linux legs verify the packed flatpak actually installs
+          and reports that id — a bundle that builds but will not install is worth catching here
+          rather than on a user's machine.
+        type: string
+        required: false
+        default: ""
+      lint:
+        description: Run `day lint` before building (fluent coverage, ids, routes, store listings).
+        type: boolean
+        required: false
+        default: true
+      assert-pristine:
+        description: >-
+          Fail if the checkout has uncommitted changes before packing. An artifact packed from a
+          dirty tree records a commit that does not describe it, and `day rebuild` refuses it.
+        type: boolean
+        required: false
+        default: true
+      validate-rebuild:
+        description: >-
+          After packing, rebuild each artifact from its own recorded provenance and compare
+          (`day rebuild --strict`). Off by default: it costs a second full build per target.
+        type: boolean
+        required: false
+        default: false
       deploy-web:
         description: >-
           Publish the web-dom build to the CALLER's GitHub Pages after the build matrix (reusing
@@ -270,25 +321,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # --- the day CLI (cargo install, per the day-version input) -------------------------
-      - name: Install the day CLI (${{ inputs.day-version }})
-        env:
-          VERSION_IN: ${{ inputs.day-version }}
-          GIT_URL: ${{ inputs.day-git }}
-        run: |
-          set -euo pipefail
-          V="${VERSION_IN:-latest}"
-          if [ "$V" = latest ]; then
-            cargo install day-cli --locked
-          elif [[ "$V" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            cargo install day-cli --locked --version "${V#v}"
-          elif [[ "$V" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            cargo install day-cli --locked --git "$GIT_URL" --rev "$V"
-          else
-            cargo install day-cli --locked --git "$GIT_URL" --branch "$V"
-          fi
-          day version
+      - name: Set up the day CLI
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
 
-      # --- optional project bootstrap (the validation workflow scaffolds here) ------------
       - name: Setup command
         if: inputs.setup-command != ''
         run: ${{ inputs.setup-command }}
@@ -411,12 +450,19 @@ jobs:
           echo "CXX=$(cygpath -m "$MINGW_PREFIX/bin/g++.exe")" >> "$GITHUB_ENV"
 
       # --- validate the environment, then build ---------------------------------------------
+      # Source-level checks before anything is built: fluent coverage, duplicate ids, unknown
+      # routes, permission drift, and the store listing's per-store rules (docs/store.md).
+      - name: Lint
+        if: inputs.lint
+        working-directory: ${{ inputs.project-path }}
+        run: $DAY_BIN lint
+
       - name: Doctor (${{ matrix.toolkit }})
-        run: day doctor --toolkit ${{ matrix.toolkit }}
+        run: $DAY_BIN doctor --toolkit ${{ matrix.toolkit }}
 
       - name: Build (${{ matrix.target }})
         working-directory: ${{ inputs.project-path }}
-        run: day build -p ${{ matrix.target }}
+        run: $DAY_BIN build -p ${{ matrix.target }}
 
       # --- distribution packaging (before scripts, so packages survive a script flake) ------
       - name: Import the Apple signing certificate
@@ -470,7 +516,7 @@ jobs:
         working-directory: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
-          day build -p web-dom --profile release
+          $DAY_BIN build -p web-dom --profile release
           dist="build/day/cargo/web-dom/release/dist"
           if [ ! -f "$dist/index.html" ]; then
             echo "::error::web-dom release build produced no dist at $dist — does the app's Cargo.toml declare the 'dom = [\"day/dom\"]' feature? (day new app scaffolds it.)"
@@ -483,6 +529,12 @@ jobs:
           out="$PWD/build/day/dist"
           mkdir -p "$out"
           ( cd "$dist" && zip -qr "$out/web-dom-dist.zip" . )
+
+      # The commit in the SBOM only describes the artifact if the tree it was built from matches
+      # that commit exactly — see the action.
+      - name: Assert the checkout is pristine
+        if: inputs.assert-pristine
+        uses: daybrite/actions/.github/actions/assert-pristine@main
 
       - name: Pack (${{ matrix.target }})
         if: matrix.target != 'web-dom'
@@ -502,13 +554,13 @@ jobs:
           esac
           # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
           # so each release asset is reachable at a stable .../releases/latest/download/<name> URL.
-          day pack -p ${{ matrix.target }} --no-version-in-name --format json
+          $DAY_BIN pack -p ${{ matrix.target }} --no-version-in-name --format json
 
       - name: Upload packages
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: dist-${{ matrix.target }}
+          name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
           path: ${{ inputs.project-path }}/build/day/dist/
           if-no-files-found: ${{ matrix.tier == 'primary' && 'error' || 'warn' }}
 
@@ -524,6 +576,7 @@ jobs:
         env:
           SCRIPTS_IN: ${{ inputs.scripts }}
           LOCALES_IN: ${{ inputs.locales }}
+          THEMES_IN: ${{ inputs.themes }}
           LAUNCH_ENV_IN: ${{ inputs.launch-env }}
           COMBO: ${{ matrix.target }}
         run: |
@@ -540,6 +593,7 @@ jobs:
             exit 0
           fi
           LOCALES="${LOCALES_IN//,/ }"
+          THEMES="${THEMES_IN//,/ }"
           ENVS=""
           for kv in $LAUNCH_ENV_IN; do ENVS="$ENVS --env $kv"; done
           OUT="$RUNNER_TEMP/run-dayscripts.sh"
@@ -553,23 +607,28 @@ jobs:
           # LEGACY (released CLIs without --locales): the previous inline wrapper, kept
           # verbatim so `day-version: latest` keeps working. DELETE this branch when the
           # first release carrying --locales ships and `latest` resolves to it.
-          if day launch --help 2>/dev/null | grep -q -- --locales; then
+          if $DAY_BIN launch --help 2>/dev/null | grep -q -- --locales; then
             # Computed before the heredoc: quotes nested inside \${var:+…} would be eaten by
             # quote removal during expansion, splitting a two-locale list into two arguments.
             LOCFLAG=""
             [ -n "${LOCALES// /}" ] && LOCFLAG=" --locales \"$LOCALES\""
+            THEMEFLAG=""
+            [ -n "${THEMES// /}" ] && THEMEFLAG=" --themes \"$THEMES\""
             cat > "$OUT" <<EOF
           #!/usr/bin/env bash
           set -euo pipefail
           cd "$PWD"
           run_one() {
-            day launch -p $COMBO --script "\$1"$LOCFLAG$ENVS
+            $DAY_BIN launch -p $COMBO --script "\$1"$THEMEFLAG$LOCFLAG$ENVS
           }
           EOF
             for f in $LIST; do
               echo "run_one \"$f\"" >> "$OUT"
             done
           else
+            if [ -n "${THEMES// /}" ]; then
+              echo "::warning::themes: ignored — the installed day CLI predates --themes (day > 0.1.2)"
+            fi
             # Per-target launch wrapper: linux-gtk renders under xvfb sized to the app window
             # (so the root-capture screenshot fallback is exactly the app); linux-qt uses the
             # offscreen platform; ios retries once on the known simulator app-death flake.
@@ -652,6 +711,18 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: bash ${{ runner.temp }}/run-dayscripts.sh
 
+      # A bundle that builds but will not install is worth catching here rather than on a user's
+      # machine. Only possible when the caller tells us what id to expect.
+      - name: Install + inspect the flatpak
+        if: ${{ inputs.app-id != '' && (matrix.target == 'linux-gtk' || matrix.target == 'linux-qt') }}
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          BUNDLE="$(find build/day/dist -maxdepth 1 -name '*.flatpak' | head -1)"
+          [ -n "$BUNDLE" ] || { echo "::error::no .flatpak in build/day/dist"; exit 1; }
+          flatpak install --user --noninteractive --bundle "$BUNDLE"
+          flatpak info ${{ inputs.app-id }}
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v7
@@ -669,6 +740,50 @@ jobs:
   # `contents: write` would break every read-only caller (validate.yml, app repos that never
   # tag). Instead the job inherits the caller's token — tag builds need the caller to grant
   # `permissions: contents: write`, or the release upload fails with a 403.
+  # --- Rebuild the shipped artifact from its own provenance (opt-in) ---------------------------
+  # `day rebuild` reads the SBOM and .buildinfo shipped beside the artifact, checks this machine's
+  # toolchain against what built it, clones the recorded commit, packs it again, and compares the
+  # compiled payload. Off by default because it costs a second full build per target; worth turning
+  # on for a release branch, where "the tag is what it says it is" is the claim being made.
+  validate:
+    name: validate (${{ matrix.target }})
+    needs: [plan, build]
+    if: ${{ inputs.validate-rebuild && !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
+          path: shipped
+      - name: Set up the day CLI
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      - name: Rebuild from the artifact's own provenance
+        # web-dom ships a zip of static files, not a packaged app: nothing to rebuild-and-compare.
+        if: matrix.target != 'web-dom'
+        run: |
+          set -euo pipefail
+          # The container `day pack` produced for this target, whatever it is called.
+          ART="$(find shipped -maxdepth 1 -type f \
+            \( -name '*.dmg' -o -name '*.ipa' -o -name '*.apk' -o -name '*.flatpak' \
+               -o -name '*.msix' -o -name '*.hap' \) | head -1)"
+          if [ -z "$ART" ]; then
+            echo "::warning::no packaged artifact for ${{ matrix.target }} — nothing to verify"
+            exit 0
+          fi
+          echo "verifying $ART"
+          "$DAY_BIN" rebuild --strict "$ART"
+
   release:
     name: release assets
     needs: [plan, build]

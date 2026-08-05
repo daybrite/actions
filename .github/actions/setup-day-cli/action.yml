@@ -1,0 +1,73 @@
+name: Set up the day CLI
+description: >-
+  Put a `day` CLI on the runner and export DAY_BIN, from crates.io, from git, or from an artifact
+  this run already built.
+
+inputs:
+  version:
+    description: >-
+      `latest` (newest crates.io release), a semver (`v1.2.3` / `1.2.3`), a 40-hex commit, or a
+      branch of the day repository. Ignored when `source` is `artifact`.
+    required: false
+    default: latest
+  git:
+    description: Git URL of the day repository, for branch/commit installs.
+    required: false
+    default: https://github.com/daybrite/day.git
+  source:
+    description: >-
+      `install` builds the CLI with cargo (crates.io or git). `artifact` downloads the
+      `day-<os>-<arch>` artifact an earlier job in THIS run uploaded — which is how the day
+      repository tests its own CLI against its own apps, and how any caller can avoid compiling
+      the CLI once per matrix leg.
+    required: false
+    default: install
+
+runs:
+  using: composite
+  steps:
+    - name: Download the day CLI (${{ runner.os }})
+      if: inputs.source == 'artifact'
+      uses: actions/download-artifact@v8
+      with:
+        name: day-${{ runner.os == 'macOS' && 'macos' || runner.os == 'Windows' && 'windows' || 'linux' }}-${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
+        path: ${{ runner.temp }}/day-cli
+
+    - name: Locate the day CLI (exports DAY_BIN)
+      if: inputs.source == 'artifact'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The binary stays in the runner temp dir, NOT the workspace: the workspace is the
+        # checkout, and an untracked directory in it makes `day pack` record a dirty tree, which
+        # `day rebuild` then refuses. On Windows $RUNNER_TEMP is a DOS path, which cygpath turns
+        # into one `find` can walk.
+        TMP="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")"
+        BIN="$(find "$TMP/day-cli" -maxdepth 1 -type f | head -1)"
+        [ -n "$BIN" ] || { echo "::error::no day binary in the day-* artifact"; exit 1; }
+        # upload-artifact drops the executable bit.
+        chmod +x "$BIN" 2>/dev/null || true
+        echo "DAY_BIN=$BIN" >> "$GITHUB_ENV"
+        "$BIN" version
+
+    - name: Install the day CLI (${{ inputs.version }})
+      if: inputs.source != 'artifact'
+      shell: bash
+      env:
+        VERSION_IN: ${{ inputs.version }}
+        GIT_URL: ${{ inputs.git }}
+      run: |
+        set -euo pipefail
+        V="${VERSION_IN:-latest}"
+        if [ "$V" = latest ]; then
+          cargo install day-cli --locked
+        elif [[ "$V" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          cargo install day-cli --locked --version "${V#v}"
+        elif [[ "$V" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          cargo install day-cli --locked --git "$GIT_URL" --rev "$V"
+        else
+          cargo install day-cli --locked --git "$GIT_URL" --branch "$V"
+        fi
+        # An installed CLI is on PATH; export DAY_BIN anyway so every caller can use one spelling.
+        echo "DAY_BIN=day" >> "$GITHUB_ENV"
+        day version
