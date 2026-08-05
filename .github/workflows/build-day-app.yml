@@ -542,23 +542,50 @@ jobs:
           LOCALES="${LOCALES_IN//,/ }"
           ENVS=""
           for kv in $LAUNCH_ENV_IN; do ENVS="$ENVS --env $kv"; done
-          # Per-target launch wrapper: linux-gtk renders under xvfb sized to the app window
-          # (so the root-capture screenshot fallback is exactly the app); linux-qt uses the
-          # offscreen platform; ios retries once on the known simulator app-death flake.
-          PREFIX=""
-          case "$COMBO" in
-            linux-gtk)
-              W=$(sed -n 's/^width *= *\([0-9][0-9]*\).*/\1/p' Day.toml | head -1)
-              H=$(sed -n 's/^height *= *\([0-9][0-9]*\).*/\1/p' Day.toml | head -1)
-              PREFIX="xvfb-run -a -s \"-screen 0 ${W:-1024}x${H:-768}x24\""
-              ENVS="$ENVS --env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 --env WEBKIT_DISABLE_COMPOSITING_MODE=1" ;;
-            linux-qt)
-              ENVS="$ENVS --env QT_QPA_PLATFORM=offscreen" ;;
-          esac
-          RETRY=false
-          [ "$COMBO" = ios-uikit ] && RETRY=true
           OUT="$RUNNER_TEMP/run-dayscripts.sh"
-          cat > "$OUT" <<EOF
+          # Two runner shapes, chosen by what the installed CLI supports:
+          #
+          # NEW (day > 0.1.2): `day launch --locales` owns the per-locale loop, the variant
+          # naming, the linux headless plumbing (xvfb sized from Day.toml + WebKit flags,
+          # QT_QPA_PLATFORM=offscreen), and the iOS app-death retry — the knowledge this step
+          # used to inline, now shared with day's own CI through the CLI.
+          #
+          # LEGACY (released CLIs without --locales): the previous inline wrapper, kept
+          # verbatim so `day-version: latest` keeps working. DELETE this branch when the
+          # first release carrying --locales ships and `latest` resolves to it.
+          if day launch --help 2>/dev/null | grep -q -- --locales; then
+            # Computed before the heredoc: quotes nested inside \${var:+…} would be eaten by
+            # quote removal during expansion, splitting a two-locale list into two arguments.
+            LOCFLAG=""
+            [ -n "${LOCALES// /}" ] && LOCFLAG=" --locales \"$LOCALES\""
+            cat > "$OUT" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          cd "$PWD"
+          run_one() {
+            day launch -p $COMBO --script "\$1"$LOCFLAG$ENVS
+          }
+          EOF
+            for f in $LIST; do
+              echo "run_one \"$f\"" >> "$OUT"
+            done
+          else
+            # Per-target launch wrapper: linux-gtk renders under xvfb sized to the app window
+            # (so the root-capture screenshot fallback is exactly the app); linux-qt uses the
+            # offscreen platform; ios retries once on the known simulator app-death flake.
+            PREFIX=""
+            case "$COMBO" in
+              linux-gtk)
+                W=$(sed -n 's/^width *= *\([0-9][0-9]*\).*/\1/p' Day.toml | head -1)
+                H=$(sed -n 's/^height *= *\([0-9][0-9]*\).*/\1/p' Day.toml | head -1)
+                PREFIX="xvfb-run -a -s \"-screen 0 ${W:-1024}x${H:-768}x24\""
+                ENVS="$ENVS --env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 --env WEBKIT_DISABLE_COMPOSITING_MODE=1" ;;
+              linux-qt)
+                ENVS="$ENVS --env QT_QPA_PLATFORM=offscreen" ;;
+            esac
+            RETRY=false
+            [ "$COMBO" = ios-uikit ] && RETRY=true
+            cat > "$OUT" <<EOF
           #!/usr/bin/env bash
           set -euo pipefail
           cd "$PWD"
@@ -573,15 +600,16 @@ jobs:
             fi
           }
           EOF
-          for f in $LIST; do
-            if [ -z "${LOCALES// /}" ]; then
-              echo "run_one \"$f\"" >> "$OUT"
-            else
-              for L in $LOCALES; do
-                echo "run_one \"$f\" --locale $L --variant $L" >> "$OUT"
-              done
-            fi
-          done
+            for f in $LIST; do
+              if [ -z "${LOCALES// /}" ]; then
+                echo "run_one \"$f\"" >> "$OUT"
+              else
+                for L in $LOCALES; do
+                  echo "run_one \"$f\" --locale $L --variant $L" >> "$OUT"
+                done
+              fi
+            done
+          fi
           chmod +x "$OUT"
           echo "generated $OUT:"
           cat "$OUT"
