@@ -912,6 +912,38 @@ jobs:
       # An ephemeral keychain holding only the Developer ID identity, auto-locking after 15
       # minutes and deleted below. The p12 carries its own chain (Developer ID CA G2), so the
       # signature verifies without touching the runner's login keychain.
+      # A missing certificate is a MISCONFIGURATION, not a mode: reaching this job means the caller
+      # asked for signing by setting `signing-environment`. Degrading to a dev-signed .dmg here
+      # would ship a release macOS refuses to open, so it fails — and says which secret and which
+      # environment, because the Security.framework error for an absent secret is indistinguishable
+      # from the one for a corrupt certificate. To NOT sign, leave `signing-environment` empty.
+      - name: Check the signing material is present
+        env:
+          CERT_P12: ${{ secrets.DAY_MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DAY_MACOS_CERT_PASSWORD }}
+          IDENTITY: ${{ secrets.DAY_SIGN_MACOS_IDENTITY }}
+          NOTARY_KEY_B64: ${{ secrets.DAY_NOTARY_KEY_B64 }}
+          NOTARY_KEY_ID: ${{ secrets.DAY_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.DAY_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          MISSING=""
+          for name in CERT_P12 CERT_PASSWORD IDENTITY NOTARY_KEY_B64 NOTARY_KEY_ID NOTARY_ISSUER; do
+            case "$name" in
+              CERT_P12)      value="$CERT_P12";      secret=DAY_MACOS_CERT_P12 ;;
+              CERT_PASSWORD) value="$CERT_PASSWORD"; secret=DAY_MACOS_CERT_PASSWORD ;;
+              IDENTITY)      value="$IDENTITY";      secret=DAY_SIGN_MACOS_IDENTITY ;;
+              NOTARY_KEY_B64) value="$NOTARY_KEY_B64"; secret=DAY_NOTARY_KEY_B64 ;;
+              NOTARY_KEY_ID) value="$NOTARY_KEY_ID"; secret=DAY_NOTARY_KEY_ID ;;
+              NOTARY_ISSUER) value="$NOTARY_ISSUER"; secret=DAY_NOTARY_ISSUER ;;
+            esac
+            [ -n "$value" ] || MISSING="$MISSING $secret"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::empty in this job:$MISSING — set them in the '${{ inputs.signing-environment }}' environment of $GITHUB_REPOSITORY (Settings → Environments), or as repository/organization secrets the repository can read. Leave the signing-environment input empty to skip signing instead."
+            exit 1
+          fi
+
       - name: Create an ephemeral signing keychain
         env:
           CERT_P12: ${{ secrets.DAY_MACOS_CERT_P12 }}
@@ -926,6 +958,17 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
           umask 077
           printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          # macOS `base64 --decode` does not reliably reject bad input — some non-base64 text
+          # decodes to garbage with status 0 — and `security import` then reports only "Unable to
+          # decode the provided data", the same message an EMPTY secret produces. PKCS#12 is DER: a
+          # SEQUENCE with a two-byte length, so the first two bytes are 30 82. (A wrong PASSWORD is
+          # a different case — `security` names that one itself.)
+          MAGIC="$(head -c 2 "$RUNNER_TEMP/cert.p12" | xxd -p)"
+          if [ "$MAGIC" != 3082 ]; then
+            echo "::error::DAY_MACOS_CERT_P12 decoded to $(wc -c < "$RUNNER_TEMP/cert.p12" | tr -d ' ') byte(s) that are not a PKCS#12 certificate (expected DER 30 82, got '${MAGIC:-nothing}'). The secret must hold the output of \`base64 -i Certificates.p12\`, not the certificate itself."
+            rm -f "$RUNNER_TEMP/cert.p12"
+            exit 1
+          fi
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
             -T /usr/bin/codesign -f pkcs12
           rm -f "$RUNNER_TEMP/cert.p12"
