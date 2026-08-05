@@ -147,6 +147,16 @@ on:
         type: boolean
         required: false
         default: true
+      signing-environment:
+        description: >-
+          GitHub environment holding the macOS release-signing secrets (DAY_MACOS_CERT_P12,
+          DAY_MACOS_CERT_PASSWORD, DAY_SIGN_MACOS_IDENTITY, DAY_NOTARY_KEY_B64, DAY_NOTARY_KEY_ID,
+          DAY_NOTARY_ISSUER). When set, a tag build signs and notarizes the .dmg in a SEPARATE job
+          that checks out nothing and runs only Apple's own tools — the Developer ID is never
+          present in the job that builds repository code. Empty (default) ships a dev-signed .dmg.
+        type: string
+        required: false
+        default: ""
       validate-rebuild:
         description: >-
           After packing, rebuild each artifact from its own recorded provenance and compare
@@ -172,6 +182,11 @@ on:
     # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
     # absent secrets degrade pack to the dev tier. Forward them all with `secrets: inherit`.
     secrets:
+      # The Developer ID used to sign and notarize the macOS .dmg, consumed ONLY by `sign-macos`.
+      # Distinct from DAY_APPLE_CERT_P12 below, which is the distribution certificate the iOS
+      # build uses during pack.
+      DAY_MACOS_CERT_P12: { required: false }
+      DAY_MACOS_CERT_PASSWORD: { required: false }
       DAY_SIGN_MACOS_IDENTITY: { required: false }
       DAY_NOTARY_KEY_ID: { required: false }
       DAY_NOTARY_ISSUER: { required: false }
@@ -301,9 +316,10 @@ jobs:
       # Release signing, active on semantic-version tags only — branch/PR packs stay dev-signed
       # even when the repository secrets exist. Absent/empty secrets degrade to the dev tier.
       # The names match daybrite/day's ci.yml; forward them with `secrets: inherit`.
-      DAY_SIGN_MACOS_IDENTITY: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_SIGN_MACOS_IDENTITY || '' }}
-      DAY_NOTARY_KEY_ID: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_NOTARY_KEY_ID || '' }}
-      DAY_NOTARY_ISSUER: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_NOTARY_ISSUER || '' }}
+      # NO macOS signing material reaches this job on any ref. It builds arbitrary repository code
+      # — cargo, every dependency's build.rs, the app's own dayscripts — so it packs the .dmg at
+      # the DEV tier even on a tag. The Developer ID and the notary key live in `sign-macos`,
+      # which runs no repository code at all.
       DAY_APPLE_TEAM: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_APPLE_TEAM || '' }}
       DAY_ASC_KEY_ID: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ASC_KEY_ID || '' }}
       DAY_ASC_ISSUER: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ASC_ISSUER || '' }}
@@ -471,7 +487,10 @@ jobs:
 
       # --- distribution packaging (before scripts, so packages survive a script flake) ------
       - name: Import the Apple signing certificate
-        if: env.HAS_APPLE_CERT == 'true' && runner.os == 'macOS'
+        # ios-uikit only: its signing happens inside `xcodebuild -exportArchive` during pack and is
+        # not separable from the build the way the macOS .dmg is. The macOS desktop combos get no
+        # certificate here — `sign-macos` signs their .app after the fact.
+        if: env.HAS_APPLE_CERT == 'true' && matrix.target == 'ios-uikit'
         uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.DAY_APPLE_CERT_P12 }}
@@ -479,7 +498,6 @@ jobs:
       - name: Materialize signing material
         if: needs.plan.outputs.release == 'true'
         env:
-          NOTARY_KEY_B64: ${{ secrets.DAY_NOTARY_KEY_B64 }}
           ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
           ANDROID_KEYSTORE_B64: ${{ secrets.DAY_ANDROID_KEYSTORE_B64 }}
           OHOS_KEYSTORE_B64: ${{ secrets.DAY_OHOS_KEYSTORE_B64 }}
@@ -494,7 +512,7 @@ jobs:
             fi
           }
           case "${{ matrix.target }}" in
-            macos-*) put "${NOTARY_KEY_B64:-}" notary.p8 DAY_NOTARY_KEY ;;
+            # macos-*: nothing — the Developer ID and notary key live in `sign-macos`.
             ios-uikit) put "${ASC_KEY_B64:-}" asc.p8 DAY_ASC_KEY ;;
             android-mdc) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
             harmony-arkui)
@@ -566,6 +584,30 @@ jobs:
           # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
           # so each release asset is reachable at a stable .../releases/latest/download/<name> URL.
           $DAY_BIN pack -p ${{ matrix.target }} --no-version-in-name --format json
+
+      # The handoff to `sign-macos`: the built .app, its entitlements, and the provenance sidecars,
+      # so the signing job can produce a notarized .dmg without ever seeing this build tree.
+      - name: Stage the unsigned .app for signing
+        if: matrix.target == 'macos-appkit'
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/appstage"; mkdir -p "$STAGE"
+          # ditto, not cp — the bundle-aware copy, which keeps permissions and symlinks intact.
+          for a in build/day/pack/macos-appkit/*.app; do ditto "$a" "$STAGE/$(basename "$a")"; done
+          ENT="$(sed -n 's/^entitlements = "\(.*\)".*/\1/p' Day.toml | head -1)"
+          if [ -n "$ENT" ] && [ -f "$ENT" ]; then cp "$ENT" "$STAGE/entitlements.plist"; fi
+          mkdir -p "$RUNNER_TEMP/appout"
+          ditto -c -k "$STAGE" "$RUNNER_TEMP/appout/app.zip"
+          cp build/day/dist/*.json "$RUNNER_TEMP/appout/" 2>/dev/null || true
+
+      - name: Upload the unsigned .app
+        if: matrix.target == 'macos-appkit'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}app-macos-appkit
+          path: ${{ runner.temp }}/appout/
+          if-no-files-found: error
 
       - name: Upload packages
         # `always()` so a later script flake still ships the packages, but not after a FAILED pack:
@@ -799,9 +841,150 @@ jobs:
           echo "verifying $ART"
           "$DAY_BIN" rebuild --strict "$ART"
 
+  sign-macos:
+    name: sign + notarize (macos-appkit)
+    needs: [plan, build]
+    # `!cancelled()` rather than a bare condition: `needs` waits on the WHOLE `macos` matrix, so
+    # without it an unrelated leg (macos-gtk's walkthrough, say) failing would silently SKIP the
+    # release signing. Skipping is the one outcome a release must never take quietly — if the
+    # appkit leg itself failed, this job fails at download-artifact instead, which is honest.
+    if: ${{ !cancelled() && inputs.signing-environment != '' && needs.plan.outputs.release == 'true' }}
+    runs-on: macos-26
+    environment: ${{ inputs.signing-environment }}
+    permissions:
+      contents: read
+    steps:
+      - name: Download the unsigned .app
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}app-macos-appkit
+          path: ${{ runner.temp }}/incoming
+      - name: Unpack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stage"
+          ditto -x -k "$RUNNER_TEMP/incoming/app.zip" "$RUNNER_TEMP/stage"
+          APP="$(find "$RUNNER_TEMP/stage" -maxdepth 1 -name '*.app' | head -1)"
+          [ -n "$APP" ] || { echo "::error::no .app in the artifact"; exit 1; }
+          {
+            echo "APP=$APP"
+            echo "TITLE=$(basename "$APP" .app)"
+            echo "APPID=$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
+          } >> "$GITHUB_ENV"
+
+      # An ephemeral keychain holding only the Developer ID identity, auto-locking after 15
+      # minutes and deleted below. The p12 carries its own chain (Developer ID CA G2), so the
+      # signature verifies without touching the runner's login keychain.
+      - name: Create an ephemeral signing keychain
+        env:
+          CERT_P12: ${{ secrets.DAY_MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DAY_MACOS_CERT_PASSWORD }}
+          IDENTITY: ${{ secrets.DAY_SIGN_MACOS_IDENTITY }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASS="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          umask 077
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -f pkcs12
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Let codesign use the key without an interactive prompt, then put the keychain on the
+          # search list ahead of the runner's own.
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
+          # shellcheck disable=SC2046 # word splitting is the point: one argument per keychain path
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+          security find-identity -v -p codesigning "$KEYCHAIN"
+          # Sign by SHA-1, never by common name. Two Developer ID certificates can share a name —
+          # this team has exactly that — and `codesign -s <name>` then fails as "ambiguous" or,
+          # worse, picks the wrong one. The hash pins signing to the cert that came out of OUR p12.
+          COUNT="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -c '^[[:space:]]*[0-9][0-9]*)')"
+          [ "$COUNT" = 1 ] || { echo "::error::expected exactly 1 identity in the keychain, found $COUNT"; exit 1; }
+          SIGN_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/^[[:space:]]*1\)/ {print $2; exit}')"
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -qF "$IDENTITY" \
+            || { echo "::error::the imported certificate is not '$IDENTITY'"; exit 1; }
+          {
+            echo "KEYCHAIN=$KEYCHAIN"
+            echo "SIGN_ID=$SIGN_ID"
+          } >> "$GITHUB_ENV"
+
+      # Inside-out, never `--deep` — nested code first, the bundle last (DESIGN.md §16.5).
+      - name: Sign the .app (Developer ID)
+        run: |
+          set -euo pipefail
+          xattr -crs "$APP"
+          ENT_ARG=""
+          if [ -f "$RUNNER_TEMP/stage/entitlements.plist" ]; then
+            ENT_ARG="--entitlements $RUNNER_TEMP/stage/entitlements.plist"
+          fi
+          if [ -d "$APP/Contents/Frameworks" ]; then
+            find "$APP/Contents/Frameworks" -mindepth 1 -maxdepth 1 -print0 | while IFS= read -r -d '' item; do
+              codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" -s "$SIGN_ID" "$item"
+            done
+          fi
+          # shellcheck disable=SC2086 # ENT_ARG is an intentional two-token flag or empty
+          codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" -s "$SIGN_ID" $ENT_ARG "$APP"
+          codesign -vvv --strict --verify "$APP"
+
+      - name: Build and sign the .dmg
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dist"
+          rm -f "$RUNNER_TEMP/stage/entitlements.plist"
+          ln -sfn /Applications "$RUNNER_TEMP/stage/Applications"
+          DMG="$RUNNER_TEMP/dist/$TITLE.dmg"
+          hdiutil create -quiet -volname "$TITLE" -srcfolder "$RUNNER_TEMP/stage" -ov -format UDZO "$DMG"
+          codesign --force --timestamp --keychain "$KEYCHAIN" -s "$SIGN_ID" -i "$APPID.dmg" "$DMG"
+          hdiutil verify "$DMG"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Notarize and staple
+        env:
+          NOTARY_KEY_B64: ${{ secrets.DAY_NOTARY_KEY_B64 }}
+          NOTARY_KEY_ID: ${{ secrets.DAY_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.DAY_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$NOTARY_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          trap 'rm -f "$RUNNER_TEMP/notary.p8"' EXIT
+          xcrun notarytool submit "$DMG" \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" \
+            --wait --timeout 30m
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          # The ticket must satisfy Gatekeeper on a machine that has never seen this app.
+          spctl -a -vvv -t open --context context:primary-signature "$DMG"
+
+      # The .dmg is assembled in RUNNER_TEMP, but the SBOM and .buildinfo were written next to the
+      # unsigned output back in the packing job. `day rebuild` reads both from beside the artifact,
+      # so they have to travel with it (§20.4).
+      - name: Stage the provenance beside the .dmg
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/incoming"/*.json "$RUNNER_TEMP/dist/" 2>/dev/null || true
+          ls -1 "$RUNNER_TEMP/dist"
+      - name: Upload the notarized package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}dist-macos-appkit
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+
+      - name: Destroy the signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/cert.p12"
+
+  # --- iOS Simulator: uikit -------------------------------------------------
+
   release:
     name: release assets
-    needs: [plan, build]
+    needs: [plan, build, sign-macos]
     if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
