@@ -3,7 +3,10 @@
 # Call it from a Day app repository to build, exercise, package, and (for web-dom) deploy the app
 # for a set of platform-toolkit targets. The recipes are a subset of daybrite/day's own ci.yml
 # showcase pipeline, reduced to: install the day CLI, build the project, run its dayscripts
-# (capturing screenshots), and `day pack` a distributable. On a semantic-version tag (vX.Y.Z), a
+# (capturing screenshots), and `day pack` a distributable. Everything waits on a `preflight` job
+# that runs cheap Rust first-pass checks (inputs.preflight-checks — `cargo fmt --all -- --check`
+# by default, clippy/check/test opt-in) so a formatting slip fails one ubuntu job, not every
+# runner in the matrix. On a semantic-version tag (vX.Y.Z), a
 # final job attaches every package and a per-target screenshot zip to the GitHub release. Packages
 # are packed with `--no-version-in-name` (version-less filenames like app-fair.aab); each asset
 # name is normalized to lowercase-kebab, tagged with its platform-toolkit combo, and stripped of
@@ -31,6 +34,13 @@
 # secrets are absent — it never fails for that reason. On semantic-version tags, the same secret
 # names daybrite/day's ci.yml uses (DAY_SIGN_MACOS_IDENTITY, DAY_APPLE_CERT_P12, …) light up
 # release signing when configured and forwarded with `secrets: inherit`.
+#
+# Store uploads: on the same semantic-version tags, three independent jobs can hand the packed
+# .ipa / macOS build products / .aab to the app's own fastlane lanes (App Store Connect, Mac App
+# Store, Google Play). Each is auto-enabled when the repo carries a Fastfile with the matching
+# `platform :ios` / `platform :mac` / `platform :android` block, or forced with the
+# upload-ios/-macos/-play inputs. The Fastfile owns credentials and store policy; the workflow
+# hands it the artifact via DAY_IPA / DAY_PKG_OR_APP / DAY_AAB.
 #
 # Web deploy: with `deploy-web: true` (and web-dom among the targets), a final `pages` job
 # publishes the web-dom build to the CALLER's own GitHub Pages — reusing the release-profile dist
@@ -186,6 +196,58 @@ on:
           it. Ignored unless deploy-web is true.
         type: string
         default: ""
+      preflight-checks:
+        description: >-
+          Rust checks the preflight job runs before the matrix starts, comma- or space-separated
+          from: fmt, clippy, check, test. The default `fmt` (cargo fmt --all -- --check) takes
+          seconds and needs no build; clippy/check/test compile the whole workspace on the
+          preflight runner and delay every matrix leg behind them, which is why they are opt-in.
+          Empty skips the checks. Any failure fails the run before a single runner builds.
+        type: string
+        required: false
+        default: fmt
+      upload-ios:
+        description: >-
+          Upload the packed .ipa to App Store Connect on semantic-version tags, via the app's own
+          fastlane lane (ios-upload-lane). Empty (default) auto-detects: on when a
+          fastlane/Fastfile (or platform/ios/fastlane/Fastfile) under project-path contains
+          `platform :ios`. "true"/"false" override the detection.
+        type: string
+        required: false
+        default: ""
+      upload-macos:
+        description: >-
+          Upload the macos-appkit build products to the Mac App Store on semantic-version tags,
+          via the app's own fastlane lane (macos-upload-lane). Empty (default) auto-detects: on
+          when a fastlane/Fastfile under project-path contains `platform :mac`. "true"/"false"
+          override the detection.
+        type: string
+        required: false
+        default: ""
+      upload-play:
+        description: >-
+          Upload the packed .aab to Google Play on semantic-version tags, via the app's own
+          fastlane lane (play-upload-lane). Empty (default) auto-detects: on when a
+          fastlane/Fastfile (or platform/android/fastlane/Fastfile) under project-path contains
+          `platform :android`. "true"/"false" override the detection.
+        type: string
+        required: false
+        default: ""
+      ios-upload-lane:
+        description: The fastlane arguments the appstore-ios job runs (platform + lane).
+        type: string
+        required: false
+        default: ios upload
+      macos-upload-lane:
+        description: The fastlane arguments the appstore-macos job runs (platform + lane).
+        type: string
+        required: false
+        default: mac upload
+      play-upload-lane:
+        description: The fastlane arguments the playstore-android job runs (platform + lane).
+        type: string
+        required: false
+        default: android upload
     # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
     # absent secrets degrade pack to the dev tier. Forward them all with `secrets: inherit`.
     secrets:
@@ -220,24 +282,54 @@ defaults:
     shell: bash
 
 jobs:
-  # Turn the `targets` input into a build matrix (target → runner, doctor toolkit, extra rust
-  # std targets) and decide whether this run is a semantic-version release.
-  plan:
-    name: plan
+  # The gate every other job waits on: run the cheap Rust first-pass checks, turn the `targets`
+  # input into a build matrix (target → runner, doctor toolkit, extra rust std targets), decide
+  # whether this run is a semantic-version release, and decide which store uploads it ends with.
+  preflight:
+    name: preflight
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       release: ${{ steps.plan.outputs.release }}
       deploy_web: ${{ steps.plan.outputs.deploy_web }}
       website: ${{ steps.plan.outputs.website }}
+      upload_ios: ${{ steps.stores.outputs.upload_ios }}
+      upload_macos: ${{ steps.stores.outputs.upload_macos }}
+      upload_play: ${{ steps.stores.outputs.upload_play }}
     steps:
-      # Only website/site.toml is needed to decide the website gate — a sparse checkout keeps
-      # the plan job as light as it was.
+      # A full checkout, not the old website/site.toml sparse one: the first-pass checks read the
+      # whole workspace and the store-upload detection greps the repo's Fastfiles.
       - uses: actions/checkout@v7
+
+      # Rust first-pass checks (inputs.preflight-checks). The entire matrix waits on this job, so
+      # a formatting slip or a clippy lint fails the run in one ubuntu job instead of N runners
+      # deep into their builds — that is the point of a preflight. Skipped for setup-command
+      # callers: their project is generated later, so there is no source here to check.
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.setup-command == '' && inputs.preflight-checks != ''
         with:
-          sparse-checkout: |
-            ${{ inputs.project-path }}/website
-          sparse-checkout-cone-mode: false
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        if: inputs.setup-command == '' && inputs.preflight-checks != ''
+        with:
+          workspaces: ${{ inputs.project-path }}
+      - name: First-pass checks
+        if: inputs.setup-command == '' && inputs.preflight-checks != ''
+        working-directory: ${{ inputs.project-path }}
+        env:
+          CHECKS_IN: ${{ inputs.preflight-checks }}
+        run: |
+          set -euo pipefail
+          for c in ${CHECKS_IN//,/ }; do
+            case "$c" in
+              fmt)    cargo fmt --all -- --check ;;
+              clippy) cargo clippy --workspace --all-targets --locked -- -D warnings ;;
+              check)  cargo check --workspace --locked ;;
+              test)   cargo test --workspace --locked ;;
+              *) echo "::error::unknown check '$c' in inputs.preflight-checks — supported: fmt clippy check test"; exit 1 ;;
+            esac
+          done
+
       - name: Plan the matrix
         id: plan
         env:
@@ -337,14 +429,48 @@ jobs:
           fi
           echo "website=$website" | tee -a "$GITHUB_OUTPUT"
 
+      # Which store uploads run if this build is a release tag. An explicit upload-* input wins;
+      # empty (auto) enables an upload exactly when the repo carries a fastlane config for that
+      # platform — a fastlane/Fastfile under project-path (or the platform/ios / platform/android
+      # convention directory) containing the literal `platform :ios` / `platform :mac` /
+      # `platform :android` block. Each auto decision is a ::notice so the run explains itself.
+      - name: Decide the store uploads
+        id: stores
+        env:
+          UPLOAD_IOS_IN: ${{ inputs.upload-ios }}
+          UPLOAD_MACOS_IN: ${{ inputs.upload-macos }}
+          UPLOAD_PLAY_IN: ${{ inputs.upload-play }}
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          PP="${PROJECT_PATH:-.}"
+          decide() { # $1=output name, $2=explicit input, $3=Fastfile marker, $4…=candidate Fastfiles
+            local name="$1" explicit="$2" marker="$3"; shift 3
+            local on=false
+            case "$explicit" in
+              true|false) on="$explicit" ;;
+              "")
+                for f in "$@"; do
+                  if [ -f "$f" ] && grep -qF "$marker" "$f"; then on=true; break; fi
+                done
+                echo "::notice::$name=$on (auto) — looked for '$marker' in: $*"
+                ;;
+              *) echo "::error::$name: inputs.upload-* accept '' (auto), 'true', or 'false' — got '$explicit'"; exit 1 ;;
+            esac
+            echo "$name=$on" | tee -a "$GITHUB_OUTPUT"
+          }
+          decide upload_ios   "$UPLOAD_IOS_IN"   'platform :ios'     "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile"
+          decide upload_macos "$UPLOAD_MACOS_IN" 'platform :mac'     "$PP/fastlane/Fastfile"
+          decide upload_play  "$UPLOAD_PLAY_IN"  'platform :android' "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile"
+
   build:
     name: ${{ matrix.target }}
-    needs: [plan]
+    needs: [preflight]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       # Release signing, active on semantic-version tags only — branch/PR packs stay dev-signed
@@ -354,16 +480,16 @@ jobs:
       # — cargo, every dependency's build.rs, the app's own dayscripts — so it packs the .dmg at
       # the DEV tier even on a tag. The Developer ID and the notary key live in `sign-macos`,
       # which runs no repository code at all.
-      DAY_APPLE_TEAM: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_APPLE_TEAM || '' }}
-      DAY_ASC_KEY_ID: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ASC_KEY_ID || '' }}
-      DAY_ASC_ISSUER: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ASC_ISSUER || '' }}
-      DAY_ANDROID_KEY_ALIAS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
-      DAY_KS_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_KS_PASS || '' }}
-      DAY_KEY_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_KEY_PASS || '' }}
-      DAY_OHOS_KEY_ALIAS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_OHOS_KEY_ALIAS || '' }}
-      DAY_OHOS_KS_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_OHOS_KS_PASS || '' }}
-      DAY_OHOS_KEY_PASS: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_OHOS_KEY_PASS || '' }}
-      HAS_APPLE_CERT: ${{ needs.plan.outputs.release == 'true' && secrets.DAY_APPLE_CERT_P12 != '' }}
+      DAY_APPLE_TEAM: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_APPLE_TEAM || '' }}
+      DAY_ASC_KEY_ID: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_ASC_KEY_ID || '' }}
+      DAY_ASC_ISSUER: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_ASC_ISSUER || '' }}
+      DAY_ANDROID_KEY_ALIAS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
+      DAY_KS_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_KS_PASS || '' }}
+      DAY_KEY_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_KEY_PASS || '' }}
+      DAY_OHOS_KEY_ALIAS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KEY_ALIAS || '' }}
+      DAY_OHOS_KS_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KS_PASS || '' }}
+      DAY_OHOS_KEY_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KEY_PASS || '' }}
+      HAS_APPLE_CERT: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_APPLE_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -531,7 +657,7 @@ jobs:
           p12-file-base64: ${{ secrets.DAY_APPLE_CERT_P12 }}
           p12-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
       - name: Materialize signing material
-        if: needs.plan.outputs.release == 'true'
+        if: needs.preflight.outputs.release == 'true'
         env:
           ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
           ANDROID_KEYSTORE_B64: ${{ secrets.DAY_ANDROID_KEYSTORE_B64 }}
@@ -612,7 +738,7 @@ jobs:
           case "${{ matrix.target }}" in
             # DAY_ANDROID_ABI is authoritative for `day pack`: it packs a lib/<abi>/ slice for every
             # listed ABI (inputs.android-abis, default both arm64-v8a and x86_64), whatever devices
-            # are attached. The plan job installed the matching rustup targets.
+            # are attached. The preflight job's matrix installed the matching rustup targets.
             android-mdc) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
             harmony-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
           esac
@@ -841,12 +967,12 @@ jobs:
   # on for a release branch, where "the tag is what it says it is" is the claim being made.
   validate:
     name: validate (${{ matrix.target }})
-    needs: [plan, build]
+    needs: [preflight, build]
     if: ${{ inputs.validate-rebuild && !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -880,12 +1006,12 @@ jobs:
 
   sign-macos:
     name: sign + notarize (macos-appkit)
-    needs: [plan, build]
+    needs: [preflight, build]
     # `!cancelled()` rather than a bare condition: `needs` waits on the WHOLE `macos` matrix, so
     # without it an unrelated leg (macos-gtk's walkthrough, say) failing would silently SKIP the
     # release signing. Skipping is the one outcome a release must never take quietly — if the
     # appkit leg itself failed, this job fails at download-artifact instead, which is honest.
-    if: ${{ !cancelled() && inputs.signing-environment != '' && needs.plan.outputs.release == 'true' }}
+    if: ${{ !cancelled() && inputs.signing-environment != '' && needs.preflight.outputs.release == 'true' }}
     runs-on: macos-26
     environment: ${{ inputs.signing-environment }}
     permissions:
@@ -1064,8 +1190,8 @@ jobs:
 
   release:
     name: release assets
-    needs: [plan, build, sign-macos]
-    if: needs.plan.outputs.release == 'true'
+    needs: [preflight, build, sign-macos]
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download packages
@@ -1160,10 +1286,141 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" assets/* --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false
 
+  # --- store uploads (semantic-version tags only) ---------------------------------------------
+  # Three independent jobs that hand the packed artifacts to the APP'S OWN fastlane config. The
+  # workflow moves build products; the Fastfile owns the policy — which track, what metadata, how
+  # a Mac App Store .pkg gets produced. Credentials never touch these jobs' env: `secrets:
+  # inherit` puts the caller's secrets in scope, and the Fastfile reads its own (App Store
+  # Connect API key envs, the Play JSON key). The artifact arrives as DAY_IPA / DAY_PKG_OR_APP /
+  # DAY_AAB. Whether each job runs was decided in preflight (explicit upload-* input, or a
+  # Fastfile with the platform's block); like sign-macos, `!cancelled()` keeps an unrelated
+  # matrix leg's failure from silently skipping a release upload — if the leg that feeds a job
+  # failed, its download-artifact step fails loudly instead.
+  appstore-ios:
+    name: upload (ios app store)
+    needs: [preflight, build]
+    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_ios == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}dist-ios-uikit
+          path: dist
+      - name: Point DAY_IPA at the .ipa
+        run: |
+          set -euo pipefail
+          IPA="$(find dist -type f -name '*.ipa' | head -1)"
+          [ -n "$IPA" ] || { echo "::error::no .ipa in the ${{ inputs.artifact-prefix }}dist-ios-uikit artifact — is ios-uikit in inputs.targets?"; exit 1; }
+          echo "DAY_IPA=$PWD/$IPA" | tee -a "$GITHUB_ENV"
+      - name: Run the app's fastlane lane
+        working-directory: ${{ inputs.project-path }}
+        env:
+          LANE: ${{ inputs.ios-upload-lane }}
+        run: |
+          set -euo pipefail
+          # fastlane resolves its config upward from the working directory, so run from the one
+          # that holds fastlane/ — the project root, or the platform/ios convention directory.
+          if [ ! -f fastlane/Fastfile ] && [ -f platform/ios/fastlane/Fastfile ]; then
+            cd platform/ios
+          fi
+          read -ra lane <<< "$LANE" # "ios upload" is two fastlane arguments
+          if [ -f Gemfile ]; then
+            # Vendor the gems into RUNNER_TEMP: the runner's system gem dir is root-owned, and
+            # this tree is never packed, so a .bundle/config in it costs nothing.
+            bundle config set --local path "$RUNNER_TEMP/bundle"
+            bundle install
+            bundle exec fastlane "${lane[@]}"
+          else
+            # macOS runners ship fastlane; ubuntu does not.
+            command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+            fastlane "${lane[@]}"
+          fi
+
+  # sign-macos re-uploads its notarized output under the same dist-macos-appkit name, so having
+  # it in `needs` means this job downloads the signed .dmg when signing is configured and the
+  # build job's dev-tier dist when it is not (the skipped job costs nothing under !cancelled()).
+  appstore-macos:
+    name: upload (mac app store)
+    needs: [preflight, build, sign-macos]
+    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_macos == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}dist-macos-appkit
+          path: dist
+      # A Mac App Store submission needs a .pkg signed with the MAS installer identity. Producing
+      # or re-signing that .pkg is the lane's job, not this workflow's: DAY_PKG_OR_APP points at
+      # whatever the build shipped — a .pkg if pack made one, else the .app or .dmg.
+      - name: Point DAY_PKG_OR_APP at the build product
+        run: |
+          set -euo pipefail
+          FOUND=""
+          for pat in '*.pkg' '*.app' '*.dmg'; do
+            FOUND="$(find dist -maxdepth 3 -name "$pat" | head -1)"
+            [ -n "$FOUND" ] && break
+          done
+          [ -n "$FOUND" ] || { echo "::error::no .pkg/.app/.dmg in the ${{ inputs.artifact-prefix }}dist-macos-appkit artifact — is macos-appkit in inputs.targets?"; exit 1; }
+          echo "DAY_PKG_OR_APP=$PWD/$FOUND" | tee -a "$GITHUB_ENV"
+      - name: Run the app's fastlane lane
+        working-directory: ${{ inputs.project-path }}
+        env:
+          LANE: ${{ inputs.macos-upload-lane }}
+        run: |
+          set -euo pipefail
+          read -ra lane <<< "$LANE"
+          if [ -f Gemfile ]; then
+            bundle config set --local path "$RUNNER_TEMP/bundle"
+            bundle install
+            bundle exec fastlane "${lane[@]}"
+          else
+            command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+            fastlane "${lane[@]}"
+          fi
+
+  playstore-android:
+    name: upload (google play)
+    needs: [preflight, build]
+    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_play == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}dist-android-mdc
+          path: dist
+      - name: Point DAY_AAB at the .aab
+        run: |
+          set -euo pipefail
+          AAB="$(find dist -type f -name '*.aab' | head -1)"
+          [ -n "$AAB" ] || { echo "::error::no .aab in the ${{ inputs.artifact-prefix }}dist-android-mdc artifact — is android-mdc in inputs.targets?"; exit 1; }
+          echo "DAY_AAB=$PWD/$AAB" | tee -a "$GITHUB_ENV"
+      - name: Run the app's fastlane lane
+        working-directory: ${{ inputs.project-path }}
+        env:
+          LANE: ${{ inputs.play-upload-lane }}
+        run: |
+          set -euo pipefail
+          if [ ! -f fastlane/Fastfile ] && [ -f platform/android/fastlane/Fastfile ]; then
+            cd platform/android
+          fi
+          read -ra lane <<< "$LANE"
+          if [ -f Gemfile ]; then
+            bundle config set --local path "$RUNNER_TEMP/bundle"
+            bundle install
+            bundle exec fastlane "${lane[@]}"
+          else
+            command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+            fastlane "${lane[@]}"
+          fi
+
   # --- web-dom → GitHub Pages (opt-in: inputs.deploy-web) -----------------------------------
   # Publishes the web-dom build — already built in release profile and uploaded by the build job
   # as dist-web-dom — to the caller's own GitHub Pages. Whether it runs is decided entirely in the
-  # plan job (deploy-web set, web-dom in targets, and the ref qualifies per web-deploy-tag-pattern).
+  # preflight job (deploy-web set, web-dom in targets, and the ref qualifies per
+  # web-deploy-tag-pattern).
   #
   # Like the release job, this declares NO job-level `permissions:` block on purpose: GitHub
   # validates a nested job's requested permissions against the CALLER's grant even when the job is
@@ -1174,11 +1431,11 @@ jobs:
   # Settings → Pages → "Build and deployment" → Source = "GitHub Actions".
   pages:
     name: deploy web
-    needs: [plan, build]
+    needs: [preflight, build]
     # !cancelled() so a cancelled run doesn't publish; an unrelated target failing does not block
     # the web deploy (the artifact is per-target), but a failed web build leaves no dist-web-dom
     # artifact and the download step below fails loudly.
-    if: ${{ needs.plan.outputs.deploy_web == 'true' && needs.plan.outputs.website != 'true' && !cancelled() }}
+    if: ${{ needs.preflight.outputs.deploy_web == 'true' && needs.preflight.outputs.website != 'true' && !cancelled() }}
     runs-on: ubuntu-latest
     # Bind the run to the repo's github-pages environment so the live URL shows in the UI.
     environment:
@@ -1221,8 +1478,8 @@ jobs:
   # Settings → Pages at "GitHub Actions".
   website:
     name: deploy website
-    needs: [plan, build]
-    if: ${{ needs.plan.outputs.website == 'true' && !cancelled() }}
+    needs: [preflight, build]
+    if: ${{ needs.preflight.outputs.website == 'true' && !cancelled() }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages

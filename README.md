@@ -5,9 +5,13 @@ Reusable GitHub workflows for [Day](https://daybrite.dev) projects.
 ## build-day-app
 
 Builds a conventional Day project for a set of platform-toolkit targets, runs its dayscripts
-(capturing screenshots), and packages it for distribution with `day pack`. On a semantic-version
-tag (`vX.Y.Z`), a final job attaches every package and a per-target screenshot zip — plus a
-`SHA256SUMS` manifest — to the GitHub release for that tag.
+(capturing screenshots), and packages it for distribution with `day pack`. A `preflight` job runs
+first and gates the whole matrix: `cargo fmt --all -- --check` by default, with clippy, check, and
+test available through the `preflight-checks` input — so a formatting slip fails one small ubuntu
+job before any build runner starts. On a semantic-version tag (`vX.Y.Z`), a final job attaches
+every package and a per-target screenshot zip — plus a `SHA256SUMS` manifest — to the GitHub
+release for that tag, and [store-upload jobs](#store-uploads) can hand the packed artifacts to the
+app's own fastlane lanes.
 
 Release assets are packed with `day pack --no-version-in-name`, so their filenames carry no
 version, and each is tagged with its platform-toolkit combo — `app-fair-android-mdc.aab`,
@@ -37,6 +41,7 @@ jobs:
       targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
       scripts: dayscript/walkthrough.yaml
       locales: en fr
+      # preflight-checks: fmt clippy   # opt into clippy before the matrix (fmt alone is the default)
 ```
 
 ### Inputs
@@ -48,6 +53,7 @@ jobs:
 | `day-git` | `https://github.com/daybrite/day.git` | Day repo URL for branch/commit installs. |
 | `project-path` | `.` | Directory of the Day project within the repository. |
 | `setup-command` | — | Shell command run at the repo root after the CLI installs (e.g. `day new app …`). |
+| `preflight-checks` | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt clippy check test` (comma- or space-separated). `fmt` needs no build and takes seconds; the others compile the whole workspace and delay every matrix leg, which is why they are opt-in. Empty skips the checks. |
 | `scripts` | `auto` | Dayscripts to run per target; `auto` = every `dayscript/*.yaml` or `scripts/*.yaml`; `none` disables. |
 | `launch-env` | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`. |
 | `locales` | — | Locales to run each dayscript under (each gets its own screenshot variant). |
@@ -74,6 +80,55 @@ absent — it never fails for that reason. On semantic-version tags, the same `D
 [daybrite/day's ci.yml](https://github.com/daybrite/day) uses light up release signing when they
 exist and the caller forwards them with `secrets: inherit`. Branch and PR builds always pack
 dev-signed, even when the secrets exist.
+
+### Store uploads
+
+On semantic-version tags, three independent jobs upload the packed artifacts to the stores by
+running a lane from the app's own fastlane config:
+
+| job | store | artifact it downloads | env it sets |
+|---|---|---|---|
+| `appstore-ios` | App Store Connect | `dist-ios-uikit` (the `.ipa`) | `DAY_IPA` |
+| `appstore-macos` | Mac App Store | `dist-macos-appkit` (notarized when `signing-environment` is set) | `DAY_PKG_OR_APP` |
+| `playstore-android` | Google Play | `dist-android-mdc` (the `.aab`) | `DAY_AAB` |
+
+| input | default | meaning |
+|---|---|---|
+| `upload-ios` | `""` | `""` auto-detects from the Fastfile (see below); `"true"`/`"false"` force the iOS upload on or off. |
+| `upload-macos` | `""` | Same, for the Mac App Store upload. |
+| `upload-play` | `""` | Same, for the Google Play upload. |
+| `ios-upload-lane` | `ios upload` | The fastlane arguments the iOS job runs (platform + lane). |
+| `macos-upload-lane` | `mac upload` | The fastlane arguments the macOS job runs. |
+| `play-upload-lane` | `android upload` | The fastlane arguments the Play job runs. |
+
+With an `upload-*` input left empty, the upload runs exactly when the repo has a fastlane config
+for that platform — a `fastlane/Fastfile` under `project-path` (for iOS also
+`platform/ios/fastlane/Fastfile`, for Play also `platform/android/fastlane/Fastfile`) containing
+the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). The
+`preflight` job prints a `::notice` for each auto decision.
+
+Each job checks out the repo, downloads the built artifact, points its `DAY_*` variable at it
+(an absolute path), and runs the lane from the directory holding `fastlane/` — with
+`bundle install && bundle exec fastlane <lane>` when a `Gemfile` is present, plain
+`fastlane <lane>` otherwise (installed with `gem install fastlane` on ubuntu; macOS runners ship
+it). The workflow sets no store credentials: forward yours with `secrets: inherit` and have the
+Fastfile read its own — the App Store Connect API key envs for `upload_to_app_store`/`deliver`,
+the JSON key for `upload_to_play_store`/`supply`. A Mac App Store submission needs a `.pkg`
+signed with the MAS installer identity; producing or re-signing it from `DAY_PKG_OR_APP` is the
+lane's job — the workflow hands over build products, not store policy. Caller permissions are
+unchanged: the upload jobs need nothing beyond what the workflow already uses.
+
+```ruby
+# fastlane/Fastfile
+platform :ios do
+  lane :upload do
+    upload_to_app_store(ipa: ENV.fetch("DAY_IPA"), skip_screenshots: true, skip_metadata: true)
+  end
+end
+platform :android do
+  lane(:upload) { upload_to_play_store(aab: ENV.fetch("DAY_AAB"), track: "internal") }
+end
+```
 
 ### Web deploy
 
