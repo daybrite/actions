@@ -15,11 +15,47 @@ app's own fastlane lanes.
 
 Release assets are packed with `day pack --no-version-in-name`, so their filenames carry no
 version, and each is tagged with its platform-toolkit combo — `app-fair-android-mdc.aab`,
-`app-fair-linux-gtk-x86_64.flatpak`, `app-fair-windows-xaml-setup.exe`, `app-fair-harmony-arkui.hap`.
+`app-fair-linux-gtk-x86_64.appimage`, `app-fair-windows-xaml-setup.exe`, `app-fair-harmony-arkui.hap`.
 Each is therefore reachable at a stable "latest release" URL —
 `https://github.com/<owner>/<repo>/releases/latest/download/<name>` (e.g.
 `.../releases/latest/download/app-fair-android-mdc.aab`) — that always redirects to the newest
 tagged release.
+
+Each package's provenance travels beside it, named after the package so a release directory
+holding seven targets says which file each document describes:
+`app-fair-macos-appkit.dmg.buildinfo.json`, `.sbom-cdx.json`, `.sbom-spdx.json`. That is what
+`day rebuild <downloaded-package>` reads.
+
+### Try it in one line
+
+Every release that ships a desktop build also gets a launcher beside the packages, so the app has
+a try-it path that needs no toolchain and leaves nothing behind:
+
+```sh
+# macOS and Linux
+curl -fsSL https://github.com/<owner>/<repo>/releases/latest/download/launch.sh | bash
+```
+
+```powershell
+# Windows
+irm https://github.com/<owner>/<repo>/releases/latest/download/launch.ps1 | iex
+```
+
+Both are generated per release and pinned to their own tag, so the URL picks the version:
+`latest/download/…` runs the newest release, `download/v1.2.0/…` runs that one, and running two of
+them gives two versions to compare rather than the same one twice. Each prints what it is about to
+download and where, and asks before doing anything.
+
+| | what it downloads | what it does |
+| --- | --- | --- |
+| macOS | the signed, notarized `.dmg` | copies the `.app` into a temporary directory and opens it |
+| Linux | the `.appimage` | `chmod +x` and runs it — no package manager, no runtime, no root |
+| Windows | the per-user `-setup.exe` | installs it silently into a temporary folder (no admin prompt) and runs it, printing the uninstall line |
+
+`launch.sh` detects macOS versus Linux, and on Linux reads the desktop to choose the GNOME or KDE
+build; `--target <combo>` overrides it and `--yes` skips the prompt (when piping, pass them after
+`bash -s --`). `launch.ps1` takes `-Yes`, or `DAY_LAUNCH_YES=1` under `| iex`, which cannot pass
+arguments. Neither script is generated when a release ships nothing they can run.
 
 Call it from your app repository:
 
@@ -67,7 +103,7 @@ jobs:
 |---|---|---|
 | `macos-appkit` | macos-latest | packs a `.dmg` |
 | `ios-uikit` | macos-latest | Simulator scripts; packs an unsigned device `.ipa` for sideloading/self-signing (a signed `.ipa` with signing secrets) |
-| `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` |
+| `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` **and** a `.appimage`, and the release check installs the one and runs the other |
 | `android-mdc` | ubuntu-latest | scripts on a KVM emulator (best-effort); packs `.apk` + `.aab` |
 | `harmony-arkui` | ubuntu-latest | build + pack (`.hap`) only — no emulator scripts yet |
 | `windows-xaml` | windows-latest | packs `.msix` + NSIS installer |

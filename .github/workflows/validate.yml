@@ -24,6 +24,54 @@ permissions:
   contents: read
 
 jobs:
+  # The launch scripts are generated from an asset list, so the interesting failure is not "does
+  # the template parse" but "does the RENDERED file parse, and did it pick the right assets".
+  # A fixture release is cheap and catches both — including on a macOS-only workstation, where
+  # neither pwsh nor an AppImage is available to check by hand.
+  launch-scripts:
+    name: launch scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fake a release's assets
+        run: |
+          set -euo pipefail
+          mkdir -p assets && cd assets
+          # Every shape the generator has to choose between: two Linux formats where only the
+          # AppImage is wanted, an .msix beside the installer the Windows script wants, mobile
+          # artifacts that neither script can run, and a provenance sidecar per artifact whose
+          # name contains both the target and the package extension.
+          touch demo-app-macos-appkit.dmg demo-app-macos-appkit.dmg.buildinfo.json \
+                demo-app-linux-gtk-x86_64.flatpak demo-app-linux-gtk-x86_64.appimage \
+                demo-app-linux-qt-x86_64.flatpak demo-app-linux-qt-x86_64.appimage \
+                demo-app-windows-xaml.msix demo-app-windows-xaml-setup.exe \
+                demo-app-windows-xaml-setup.exe.sbom-cdx.json \
+                demo-app-android-mdc.aab demo-app-ios-uikit.ipa screenshots-macos-appkit.zip
+      - name: Generate them
+        uses: ./.github/actions/launch-script
+        with:
+          assets-dir: assets
+          repo: daybrite/demo-app
+          tag: v9.9.9
+      - name: Check what they picked
+        run: |
+          set -euo pipefail
+          cd assets
+          # Linux must take the AppImage, never the flatpak; Windows the installer, never the msix;
+          # and no sidecar may be mistaken for the artifact it describes.
+          grep -qx 'linux-gtk=demo-app-linux-gtk-x86_64.appimage' launch.sh
+          grep -qx 'linux-qt=demo-app-linux-qt-x86_64.appimage' launch.sh
+          grep -qx 'macos-appkit=demo-app-macos-appkit.dmg' launch.sh
+          ! grep -q 'flatpak' launch.sh
+          ! grep -q '\.json' launch.sh
+          grep -qx '$Asset = "demo-app-windows-xaml-setup.exe"' launch.ps1
+          ! grep -q 'msix' launch.ps1
+          [ -x launch.sh ] || { echo "launch.sh is not executable"; exit 1; }
+          # --help runs the whole option-parsing path without downloading anything.
+          ./launch.sh --help
+          ./launch.sh --target android-mdc && { echo "expected a failure for a target it cannot run"; exit 1; } || true
+          pwsh -NoProfile -File ./launch.ps1 -Help
+
   build-scaffold:
     uses: ./.github/workflows/build-day-app.yml
     with:

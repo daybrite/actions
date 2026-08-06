@@ -682,11 +682,53 @@ jobs:
               put "${OHOS_PROFILE_B64:-}" ohos.p7b DAY_OHOS_PROFILE ;;
           esac
 
+      # The linux legs pack BOTH formats (day pack, §16.5), so both toolchains are installed.
       - name: Flatpak tooling (linux pack)
         if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
         run: |
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      # linuxdeploy builds the .appimage: it walks the binary's library closure, its toolkit plugin
+      # adds the parts a naive ldd walk misses (GTK's loaders/GIO modules/schemas, Qt's platform
+      # plugins) so the image is self-contained, and appimagetool seals the AppDir. These ship as
+      # downloaded AppImages/scripts, not apt packages; they land in a dir OUTSIDE the workspace (the
+      # pristine assert covers the checkout). day finds linuxdeploy + the plugin via DAY_LINUXDEPLOY*;
+      # linuxdeploy finds the plugin AND appimagetool because that dir is also on PATH.
+      - name: linuxdeploy tooling (linux pack)
+        if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
+        env:
+          TOOLKIT: ${{ matrix.toolkit }}
+        run: |
+          set -euo pipefail
+          # patchelf: linuxdeploy (and the gtk plugin) rewrite bundled-library rpaths with it — a
+          # hard dep, absent from the runner. squashfs-tools: appimagetool seals the AppDir into a
+          # squashfs. desktop-file-utils: linuxdeploy validates the AppDir's .desktop.
+          # xvfb + fuse: BOTH linux legs LAUNCH the produced AppImage (walkthrough/verify) —
+          # APPIMAGE_EXTRACT_AND_RUN (set below, and by `day pack`) is the no-FUSE path the AppImage
+          # tools use inside a runner; fuse is the fallback for launching the image itself.
+          sudo apt-get install -y --no-install-recommends patchelf squashfs-tools desktop-file-utils xvfb
+          sudo apt-get install -y --no-install-recommends fuse3 libfuse2t64 || \
+            sudo apt-get install -y --no-install-recommends fuse libfuse2 || true
+          tools="$RUNNER_TEMP/appimage-tools"; mkdir -p "$tools"
+          get() { curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"; chmod +x "$2"; }
+          get "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" "$tools/linuxdeploy"
+          get "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" "$tools/appimagetool"
+          # The Qt plugin ships as an AppImage; the GTK plugin is a shell script (there is NO
+          # linuxdeploy-plugin-gtk AppImage), so each toolkit has its own source.
+          case "$TOOLKIT" in
+            qt)  get "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" "$tools/linuxdeploy-plugin-qt" ;;
+            gtk) get "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh" "$tools/linuxdeploy-plugin-gtk" ;;
+          esac
+          echo "$tools" >> "$GITHUB_PATH"
+          {
+            echo "DAY_LINUXDEPLOY=$tools/linuxdeploy"
+            echo "DAY_LINUXDEPLOY_PLUGIN_${TOOLKIT^^}=$tools/linuxdeploy-plugin-$TOOLKIT"
+            echo "APPIMAGE_EXTRACT_AND_RUN=1"
+          } >> "$GITHUB_ENV"
+          # The Qt plugin discovers Qt's plugin/qml dirs via qmake; qt6-base-dev ships it as qmake6.
+          if [ "$TOOLKIT" = qt ]; then
+            echo "QMAKE=$(command -v qmake6 || echo /usr/lib/qt6/bin/qmake)" >> "$GITHUB_ENV"
+          fi
       - name: NSIS (windows-xaml pack)
         if: matrix.target == 'windows-xaml'
         shell: pwsh
@@ -710,9 +752,15 @@ jobs:
           # The web artifact IS the built dist folder, zipped: index.html + shim.js + day.css +
           # app.wasm + assets/… at the zip root. Recurse from inside dist so the assets/ subtree is
           # preserved (a flat `zip -j` would drop it).
+          #
+          # web-dom is the one shipped target with no `day pack`, so the release name is assembled
+          # here instead of by the CLI. `.project.artifact` is the same stem every packed artifact
+          # uses, which is what keeps this zip in the set rather than beside it.
           out="$PWD/build/day/dist"
           mkdir -p "$out"
-          ( cd "$dist" && zip -qr "$out/web-dom-dist.zip" . )
+          stem="$("$DAY_BIN" metadata --json | jq -r '.project.artifact')"
+          [ -n "$stem" ] && [ "$stem" != null ] || { echo "::error::day metadata reported no artifact stem"; exit 1; }
+          ( cd "$dist" && zip -qr "$out/$stem-web-dom.zip" . )
 
       # The commit in the SBOM only describes the artifact if the tree it was built from matches
       # that commit exactly — see the action.
@@ -761,6 +809,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/appout"
           ditto -c -k "$STAGE" "$RUNNER_TEMP/appout/app.zip"
           cp build/day/dist/*.json "$RUNNER_TEMP/appout/" 2>/dev/null || true
+          # The signing job rebuilds the .dmg from the .app, so it has to reproduce the name
+          # `day pack` chose rather than invent one from the bundle title — the sidecars staged
+          # above are named after that exact file (§20.4), and would otherwise describe nothing.
+          basename "$(find build/day/dist -maxdepth 1 -name '*.dmg' | head -1)" > "$RUNNER_TEMP/appout/dmg-name.txt"
 
       - name: Upload the unsigned .app
         if: matrix.target == 'macos-appkit'
@@ -931,8 +983,10 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: bash ${{ runner.temp }}/run-dayscripts.sh
 
-      # A bundle that builds but will not install is worth catching here rather than on a user's
-      # machine. Only possible when the caller tells us what id to expect.
+      # A package that builds but will not install is worth catching here rather than on a user's
+      # machine. Both Linux artifacts are checked, because they fail in different places: a
+      # flatpak's manifest and appstream catalog are validated at install, and an AppImage's
+      # bundling is only exercised when the thing is actually executed.
       - name: Install + inspect the flatpak
         if: ${{ inputs.app-id != '' && (matrix.target == 'linux-gtk' || matrix.target == 'linux-qt') }}
         working-directory: ${{ inputs.project-path }}
@@ -942,6 +996,42 @@ jobs:
           [ -n "$BUNDLE" ] || { echo "::error::no .flatpak in build/day/dist"; exit 1; }
           flatpak install --user --noninteractive --bundle "$BUNDLE"
           flatpak info ${{ inputs.app-id }}
+
+      # The AppImage's claim is "runs on a machine with nothing installed", and the only way to
+      # check that is to run it. Under xvfb, since a runner has no display; the app is given a few
+      # seconds to get a window up and is then killed — a crash-on-launch (a missing GTK/Qt module
+      # the bundling failed to carry) exits before that and fails here.
+      - name: Run the AppImage
+        if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          FOUND="$(find build/day/dist -maxdepth 1 -name '*.appimage' | head -1)"
+          [ -n "$FOUND" ] || { echo "::error::no .appimage in build/day/dist"; exit 1; }
+          APP="$(realpath "$FOUND")"
+          chmod +x "$APP"
+          # Its own contents first: a bad AppDir extracts to a tree missing AppRun or the desktop
+          # entry, and says so more clearly than a launch failure would.
+          ( cd "$RUNNER_TEMP" && rm -rf squashfs-root && "$APP" --appimage-extract >/dev/null )
+          for required in AppRun usr/bin; do
+            [ -e "$RUNNER_TEMP/squashfs-root/$required" ] \
+              || { echo "::error::the AppImage has no $required"; exit 1; }
+          done
+          ls "$RUNNER_TEMP/squashfs-root"/*.desktop >/dev/null \
+            || { echo "::error::the AppImage has no .desktop at its root"; exit 1; }
+          echo "bundled libraries: $(find "$RUNNER_TEMP/squashfs-root/usr/lib" -name '*.so*' 2>/dev/null | wc -l)"
+          # Then the launch. `timeout` returns 124 when it had to kill a still-running app, which
+          # is the PASSING outcome here; any other non-zero is the app dying on its own.
+          set +e
+          xvfb-run -a timeout 20s "$APP" > "$RUNNER_TEMP/appimage-run.log" 2>&1
+          code=$?
+          set -e
+          if [ "$code" != 124 ] && [ "$code" != 0 ]; then
+            echo "::error::the AppImage exited $code instead of staying up"
+            tail -40 "$RUNNER_TEMP/appimage-run.log"
+            exit 1
+          fi
+          echo "the AppImage stayed up for 20s"
 
       - name: Upload screenshots
         if: always()
@@ -993,16 +1083,24 @@ jobs:
         if: matrix.target != 'web-dom'
         run: |
           set -euo pipefail
-          # The container `day pack` produced for this target, whatever it is called.
-          ART="$(find shipped -maxdepth 1 -type f \
+          # Every container `day pack` produced for this target, not just the first: the linux
+          # legs ship a .flatpak AND a .appimage, and a release check that verified one of them
+          # would report a green target with half its downloads unexamined. Each costs a full
+          # rebuild, which is why this whole job is opt-in (`validate-rebuild`).
+          # One per target elsewhere: android's .aab and windows' -setup.exe are deliberately not
+          # listed — they are built from the same payload as the .apk / .msix beside them.
+          mapfile -t ARTS < <(find shipped -maxdepth 1 -type f \
             \( -name '*.dmg' -o -name '*.ipa' -o -name '*.apk' -o -name '*.flatpak' \
-               -o -name '*.msix' -o -name '*.hap' \) | head -1)"
-          if [ -z "$ART" ]; then
+               -o -name '*.appimage' -o -name '*.msix' -o -name '*.hap' \) | sort)
+          if [ "${#ARTS[@]}" -eq 0 ]; then
             echo "::warning::no packaged artifact for ${{ matrix.target }} — nothing to verify"
             exit 0
           fi
-          echo "verifying $ART"
-          "$DAY_BIN" rebuild --strict "$ART"
+          for ART in "${ARTS[@]}"; do
+            echo "::group::verifying $(basename "$ART")"
+            "$DAY_BIN" rebuild --strict "$ART"
+            echo "::endgroup::"
+          done
 
   sign-macos:
     name: sign + notarize (macos-appkit)
@@ -1029,9 +1127,15 @@ jobs:
           ditto -x -k "$RUNNER_TEMP/incoming/app.zip" "$RUNNER_TEMP/stage"
           APP="$(find "$RUNNER_TEMP/stage" -maxdepth 1 -name '*.app' | head -1)"
           [ -n "$APP" ] || { echo "::error::no .app in the artifact"; exit 1; }
+          # DMGNAME is what `day pack` called the container in the build job. Falling back to the
+          # bundle title only covers an artifact staged by an older day; the packed name is the
+          # one the provenance sidecars are named after.
+          DMGNAME="$(cat "$RUNNER_TEMP/incoming/dmg-name.txt" 2>/dev/null || true)"
+          [ -n "$DMGNAME" ] || DMGNAME="$(basename "$APP" .app).dmg"
           {
             echo "APP=$APP"
             echo "TITLE=$(basename "$APP" .app)"
+            echo "DMGNAME=$DMGNAME"
             echo "APPID=$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
           } >> "$GITHUB_ENV"
 
@@ -1141,7 +1245,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dist"
           rm -f "$RUNNER_TEMP/stage/entitlements.plist"
           ln -sfn /Applications "$RUNNER_TEMP/stage/Applications"
-          DMG="$RUNNER_TEMP/dist/$TITLE.dmg"
+          DMG="$RUNNER_TEMP/dist/$DMGNAME"
           hdiutil create -quiet -volname "$TITLE" -srcfolder "$RUNNER_TEMP/stage" -ov -format UDZO "$DMG"
           codesign --force --timestamp --keychain "$KEYCHAIN" -s "$SIGN_ID" -i "$APPID.dmg" "$DMG"
           hdiutil verify "$DMG"
@@ -1240,34 +1344,24 @@ jobs:
           }
           normalize dist-in dist
           normalize shots-in screenshots
-          # Flatten the per-target package dirs, tagging each asset with its platform-toolkit combo.
+          # Flatten the per-target package dirs. `day pack` already names every artifact
+          # `<stem>-<platform>-<toolkit>[-extra].<ext>` and every provenance sidecar after the
+          # artifact it describes (`…dmg.buildinfo.json`), so the packed file name IS the release
+          # asset name — nothing is spliced in here, which is what keeps a sidecar's prefix equal
+          # to its artifact.
           for d in dist-in/dist-*/; do
             [ -d "$d" ] || continue
-            combo="$(basename "$d")"; combo="${combo#dist-}"
-            tk="${combo#*-}"   # the toolkit half of the combo (linux-gtk → gtk), for the flatpak fold
             find "$d" -type f | while read -r f; do
               base="$(basename "$f")"
-              # Normalize for stable release-asset URLs: GitHub mangles spaces into dots on
-              # upload (Day Skies.dmg → Day.Skies.dmg), so pick the lowercase-kebab name
-              # ourselves; and drop pack's `-unsigned` .ipa marker so the iOS asset keeps ONE
-              # name whether or not the release run had signing secrets.
+              # Two edits survive. First: GitHub rewrites a space in an uploaded asset name to a
+              # dot (Day Skies.dmg → Day.Skies.dmg), so pick the safe name rather than let it be
+              # chosen — a no-op for anything a current `day pack` writes, and cover for a caller
+              # pinned to an older CLI.
               base="$(printf '%s' "$base" | tr '[:upper:] ' '[:lower:]-')"
-              case "$base" in *-unsigned.ipa) base="${base%-unsigned.ipa}.ipa" ;; esac
-              # Put the platform-toolkit combo in every asset name, so a release lists one clearly
-              # labelled file per target (day-skies.hap → day-skies-harmony-arkui.hap;
-              # day-skies-setup.exe → day-skies-windows-xaml-setup.exe). pack already embeds the
-              # toolkit in flatpak names (…-gtk-<arch>.flatpak) — fold that token into the whole
-              # combo rather than doubling it. The combo also makes names unique across targets, so
-              # the old collision prefix is no longer needed.
-              stem="${base%.*}"; ext="${base##*.}"
-              if [ "$ext" = flatpak ] && [ "$stem" != "${stem/-$tk-/}" ]; then
-                base="${stem/-$tk-/-$combo-}.$ext"
-              else
-                case "$stem" in
-                  *-setup) base="${stem%-setup}-${combo}-setup.$ext" ;;
-                  *)       base="${stem}-${combo}.$ext" ;;
-                esac
-              fi
+              # Second: drop pack's `-unsigned` .ipa marker (and it in the sidecar prefixes), so
+              # the iOS asset keeps ONE name whether or not the run had signing secrets and its
+              # `releases/latest/download/<name>` URL stays put.
+              base="${base/-unsigned.ipa/.ipa}"
               [ ! -e "assets/$base" ] || { echo "::error::two packages both map to assets/$base"; exit 1; }
               cp "$f" "assets/$base"
             done
@@ -1281,6 +1375,21 @@ jobs:
             fi
           done
           [ -n "$(ls -A assets)" ] || { echo "::error::no release assets found under dist-in/ or shots-in/ — artifact download layout mismatch?"; exit 1; }
+      # A curl-able `launch.sh` beside the packages, so the app has a one-line try-it path:
+      #   curl -fsSL https://github.com/<repo>/releases/latest/download/launch.sh | bash
+      # Generated per release and pinned to its own tag, so the URL a user fetches is what picks
+      # the version — `latest/download/…` gets the newest, `download/v1.2.0/…` gets that one, and
+      # two of them side by side really are two versions.
+      - name: Generate the launch script
+        uses: daybrite/actions/.github/actions/launch-script@main
+        with:
+          assets-dir: assets
+          repo: ${{ github.repository }}
+          tag: ${{ github.ref_name }}
+      - name: Checksum the assets
+        run: |
+          set -euo pipefail
+          # After launch.sh, so it is covered like every other asset.
           (cd assets && sha256sum -- * > SHA256SUMS)
           ls -la assets
       - name: Attach to the GitHub release
@@ -1466,9 +1575,12 @@ jobs:
       - name: Unpack the dist
         run: |
           set -euo pipefail
-          # The build job staged the release dist as web-dom-dist.zip with the dist files at the
-          # zip root (index.html + shim.js + day.css + app.wasm + assets/…).
-          unzip -q web-in/web-dom-dist.zip -d web-dist
+          # The build job staged the release dist as <stem>-web-dom.zip with the dist files at the
+          # zip root (index.html + shim.js + day.css + app.wasm + assets/…). Found by glob because
+          # the stem is the app's, not a fixed string — this artifact holds nothing else.
+          ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
+          [ -n "$ZIP" ] || { echo "::error::no web-dom dist zip in the dist-web-dom artifact"; exit 1; }
+          unzip -q "$ZIP" -d web-dist
           test -f web-dist/index.html
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v5
@@ -1531,6 +1643,10 @@ jobs:
         run: |
           set -euo pipefail
           SITE_DIR="$GITHUB_WORKSPACE/app/${PROJECT_PATH:-.}/website"
+          # This also copies the app's icon — the largest PNG under resource/icons/ — into the
+          # template's public/app/, which is where the build reads it to mask the favicon set and
+          # to render the app mark on the landing page. Nothing else supplies the site an icon, so
+          # a project without one gets the template's defaults and a line in this log saying why.
           node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" --repo "$GITHUB_REPOSITORY"
           node daysite/scripts/assemble-gallery.mjs shots "$SITE_DIR"
           echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
@@ -1554,7 +1670,10 @@ jobs:
             const t = parse(readFileSync(process.env.SITE_DIR + "/site.toml", "utf8"));
             console.log(t.webapp ?? "webapp");
           ')"
-          unzip -q web-in/web-dom-dist.zip -d "daysite/public/$WEBAPP"
+          # <stem>-web-dom.zip, by glob: the stem is the app's (see the build job's staging step).
+          ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
+          [ -n "$ZIP" ] || { echo "::error::no web-dom dist zip in the dist-web-dom artifact"; exit 1; }
+          unzip -q "$ZIP" -d "daysite/public/$WEBAPP"
           test -f "daysite/public/$WEBAPP/index.html"
           echo "web app staged under /$WEBAPP/"
       - name: Build the site
