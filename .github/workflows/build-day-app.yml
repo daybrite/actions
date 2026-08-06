@@ -1191,7 +1191,18 @@ jobs:
   release:
     name: release assets
     needs: [preflight, build, sign-macos]
-    if: needs.preflight.outputs.release == 'true'
+    # `!cancelled()` + explicit results, for the same reason sign-macos documents: without it,
+    # GitHub's implicit success() gate reads sign-macos's SKIP (no signing-environment
+    # configured — the common case) as "a need did not succeed" and silently skips the release.
+    # That is exactly the quiet-skip failure mode the signing job's comment warns against, and it
+    # shipped: a green v-tag run with every artifact built and no release created. Build must
+    # have succeeded (its artifacts are what gets attached); sign-macos may be success (its
+    # signed .dmg replaces the plain one) or skipped (unsigned release), never failed.
+    if: >-
+      ${{ !cancelled()
+          && needs.preflight.outputs.release == 'true'
+          && needs.build.result == 'success'
+          && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - name: Download packages
