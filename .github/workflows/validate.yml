@@ -57,19 +57,34 @@ jobs:
         run: |
           set -euo pipefail
           cd assets
-          # Linux must take the AppImage, never the flatpak; Windows the installer, never the msix;
-          # and no sidecar may be mistaken for the artifact it describes.
-          grep -qx 'linux-gtk=demo-app-linux-gtk-x86_64.appimage' launch.sh
-          grep -qx 'linux-qt=demo-app-linux-qt-x86_64.appimage' launch.sh
-          grep -qx 'macos-appkit=demo-app-macos-appkit.dmg' launch.sh
-          ! grep -q 'flatpak' launch.sh
-          ! grep -q '\.json' launch.sh
-          grep -qx '$Asset = "demo-app-windows-xaml-setup.exe"' launch.ps1
-          ! grep -q 'msix' launch.ps1
-          [ -x launch.sh ] || { echo "launch.sh is not executable"; exit 1; }
+          # Compare the generated tables EXACTLY, rather than grepping the whole file for words
+          # like "flatpak": both scripts explain in prose why they choose what they choose, so a
+          # word-absence test fails on its own documentation. What matters is the selection.
+          # awk, not a sed range: a sed `/^ASSETS="/,/"$/` cannot end on its own start line, so a
+          # one-target release would read past the table into the rest of the file.
+          table="$(awk '/^ASSETS="/ { f = 1; sub(/^ASSETS="/, "") }
+                        f { if (sub(/"$/, "")) { print; exit } print }' launch.sh)"
+          expected='macos-appkit=demo-app-macos-appkit.dmg
+          linux-gtk=demo-app-linux-gtk-x86_64.appimage
+          linux-qt=demo-app-linux-qt-x86_64.appimage'
+          if [ "$table" != "$expected" ]; then
+            echo "::error::launch.sh selected the wrong assets"
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$table") || true
+            exit 1
+          fi
+          # Windows takes the per-user installer, never the .msix (which needs a trusted cert).
+          asset="$(sed -n 's/^\$Asset = "\(.*\)"$/\1/p' launch.ps1)"
+          if [ "$asset" != "demo-app-windows-xaml-setup.exe" ]; then
+            echo "::error::launch.ps1 selected '$asset'"
+            exit 1
+          fi
+          [ -x launch.sh ] || { echo "::error::launch.sh is not executable"; exit 1; }
           # --help runs the whole option-parsing path without downloading anything.
           ./launch.sh --help
-          ./launch.sh --target android-mdc && { echo "expected a failure for a target it cannot run"; exit 1; } || true
+          if ./launch.sh --target android-mdc; then
+            echo "::error::launch.sh should refuse a target it has no build for"
+            exit 1
+          fi
           pwsh -NoProfile -File ./launch.ps1 -Help
 
   build-scaffold:
