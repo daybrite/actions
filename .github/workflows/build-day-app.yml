@@ -1580,6 +1580,7 @@ jobs:
           # the stem is the app's, not a fixed string — this artifact holds nothing else.
           ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
           [ -n "$ZIP" ] || { echo "::error::no web-dom dist zip in the dist-web-dom artifact"; exit 1; }
+          rm -rf web-dist
           unzip -q "$ZIP" -d web-dist
           test -f web-dist/index.html
       - name: Upload the Pages artifact
@@ -1673,6 +1674,12 @@ jobs:
           # <stem>-web-dom.zip, by glob: the stem is the app's (see the build job's staging step).
           ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
           [ -n "$ZIP" ] || { echo "::error::no web-dom dist zip in the dist-web-dom artifact"; exit 1; }
+          # Clear the target first. It is meant to be empty in a fresh checkout, but if anything
+          # ever ships one (a stray commit did), `unzip` asks whether to overwrite each file —
+          # and with no stdin it reads EOF, answers "[N]one", and fails the deploy on a prompt
+          # nobody saw. Removing the directory also drops files the new build no longer has,
+          # which overwriting alone would leave behind to be served.
+          rm -rf "daysite/public/$WEBAPP"
           unzip -q "$ZIP" -d "daysite/public/$WEBAPP"
           test -f "daysite/public/$WEBAPP/index.html"
           echo "web app staged under /$WEBAPP/"
