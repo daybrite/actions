@@ -1644,10 +1644,13 @@ jobs:
         run: |
           set -euo pipefail
           SITE_DIR="$GITHUB_WORKSPACE/app/${PROJECT_PATH:-.}/website"
-          # This also copies the app's icon — the largest PNG under resource/icons/ — into the
-          # template's public/app/, which is where the build reads it to mask the favicon set and
-          # to render the app mark on the landing page. Nothing else supplies the site an icon, so
-          # a project without one gets the template's defaults and a line in this log saying why.
+          # This also copies the app's icon into the template's public/app/: the SVG master
+          # (resource/icons/icon.svg or day-icon.svg) when the project ships one — the site
+          # serves it raw as the favicon and the landing-page app mark — plus the largest PNG
+          # under resource/icons/, which feeds the derived raster set (apple-touch, PWA tiles)
+          # and is the only icon for projects without an SVG master. Nothing else supplies the
+          # site an icon, so a project without either gets the template's defaults and a line
+          # in this log saying why.
           node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" --repo "$GITHUB_REPOSITORY"
           node daysite/scripts/assemble-gallery.mjs shots "$SITE_DIR"
           echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
