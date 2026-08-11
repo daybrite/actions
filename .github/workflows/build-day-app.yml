@@ -136,16 +136,37 @@ on:
         type: string
         required: false
         default: ""
-      tablet-walkthroughs:
+      ios-profiles:
         description: >-
-          Also run the dayscripts on a TABLET form factor for the mobile targets — an iPad
-          simulator for ios-uikit, a tablet AVD for android-mdc — with the same theme × locale
-          matrix, uploading the captures as `screenshots-ios-uikit-ipad` and
-          `screenshots-android-mdc-tablet` (the gallery's tablet columns). The phone runs and
-          their artifacts are unaffected. Both legs are best-effort, like the phone emulator run.
-        type: boolean
+          Device profiles to run `ios-uikit`'s dayscripts on, comma-separated. Each becomes its
+          own PARALLEL job, so two profiles cost two jobs rather than two script runs in one.
+          A profile is matched as a PREFIX against the simulators available on the runner —
+          `iPhone` takes the first iPhone, `iPad Pro` the first iPad Pro — because runner images
+          rotate exact device names, and a pinned "iPhone 15" quietly disappears with the next
+          image. An unmatched prefix fails the job loudly, listing what the image does have.
+
+          Append `=<slug>` to fix the artifact suffix for a long device name
+          (`iPad Pro 13-inch (M4)=ipad` uploads `screenshots-ios-uikit-ipad`); the default slug
+          is the device name, kebab-cased.
+
+          The FIRST profile is the primary one: it packs, uploads the packages and release
+          assets, and keeps the plain `screenshots-ios-uikit` artifact name, so every existing
+          consumer is unaffected. Later profiles build, run the scripts, and upload
+          `screenshots-ios-uikit-<slug>` — they never pack, which is what keeps a tag build from
+          racing two identical release assets. Unset = one job on the first iPhone, named
+          `ios-uikit` exactly as before.
+        type: string
         required: false
-        default: false
+        default: ""
+      android-profiles:
+        description: >-
+          The same for `android-mdc`, as AVD device profiles from `avdmanager list device`
+          (`pixel_5`, `pixel_tablet`) — passed to the emulator action verbatim, so these are
+          exact ids rather than prefixes. `=<slug>` and the first-is-primary rule work as they do
+          for ios-profiles. Unset = one job on `pixel_5`, named `android-mdc` exactly as before.
+        type: string
+        required: false
+        default: ""
       app-id:
         description: >-
           The app's bundle id. When set, the linux legs verify the packed flatpak actually installs
@@ -299,7 +320,11 @@ jobs:
     name: preflight
     runs-on: ubuntu-latest
     outputs:
+      # The BUILD matrix: one row per target, times each mobile target's device profiles.
       matrix: ${{ steps.plan.outputs.matrix }}
+      # The same rows before that expansion — one per target, the shape every job that consumes a
+      # PACKAGE wants, since only the primary profile row of a target packs one.
+      pack-matrix: ${{ steps.plan.outputs.pack_matrix }}
       release: ${{ steps.plan.outputs.release }}
       deploy_web: ${{ steps.plan.outputs.deploy_web }}
       website: ${{ steps.plan.outputs.website }}
@@ -345,6 +370,8 @@ jobs:
         env:
           TARGETS_IN: ${{ inputs.targets }}
           ANDROID_ABIS_IN: ${{ inputs.android-abis }}
+          IOS_PROFILES_IN: ${{ inputs.ios-profiles }}
+          ANDROID_PROFILES_IN: ${{ inputs.android-profiles }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -393,6 +420,57 @@ jobs:
           done
           [ ${#rows[@]} -gt 0 ] || { echo "::error::inputs.targets is empty"; exit 1; }
           matrix="{\"include\":[$(IFS=,; echo "${rows[*]}")]}"
+          # One row per target: what a PACKAGE consumer wants, since only a target's primary
+          # profile row packs one. The build matrix below may carry several rows per target.
+          echo "pack_matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
+
+          # Device profiles (inputs.ios-profiles / android-profiles) fan a mobile target out into
+          # one row — one parallel job — per profile. jq builds them rather than bash: a device
+          # name carries spaces and parentheses ("iPad Pro 13-inch (M4)"), and hand-quoting those
+          # into JSON is how a matrix ends up silently malformed.
+          IOS_P="${IOS_PROFILES_IN:-}"
+          ANDROID_P="${ANDROID_PROFILES_IN:-}"
+          case "$IOS_P$ANDROID_P" in
+            *'"'*) echo "::error::a device profile may not contain a double quote"; exit 1 ;;
+          esac
+          matrix=$(printf '%s' "$matrix" | jq -c \
+            --arg ios "$IOS_P" --arg android "$ANDROID_P" '
+            def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-")
+                         | sub("^-+"; "") | sub("-+$"; "");
+            def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+            # "iPhone 16, iPad Pro 13-inch (M4)=ipad" → [{device,slug}], slug defaulting to the
+            # kebab-cased device name.
+            def profiles($s):
+              $s | split(",") | map(trim) | map(select(length > 0))
+                 | map(split("=") | if length > 1
+                       then {device: (.[0] | trim), slug: (.[1] | trim | slugify)}
+                       else {device: .[0], slug: (.[0] | slugify)} end);
+            # What the target runs on when the caller named nothing — the devices the dedicated
+            # legs used to hard-code, so an unconfigured run is unchanged.
+            def fallback($t): if $t == "ios-uikit" then "iPhone"
+                              elif $t == "android-mdc" then "pixel_5" else "" end;
+            { include: [
+                .include[] as $r
+                | (if $r.target == "ios-uikit" then profiles($ios)
+                   elif $r.target == "android-mdc" then profiles($android)
+                   else [] end) as $named
+                | (if ($named | length) == 0
+                   then [{device: fallback($r.target), slug: ""}] else $named end) as $ps
+                | range(0; $ps | length) as $i
+                | $r + {
+                    profile: $ps[$i].device,
+                    # Only the first row of a target packs, uploads packages, and feeds the
+                    # release/signing/store jobs. The rest exist for their screenshots.
+                    primary: ($i == 0),
+                    # The job name stays the bare target when the caller named no profiles, so
+                    # required status checks configured against it keep matching.
+                    label: (if ($named | length) == 0 then $r.target
+                            else "\($r.target) · \($ps[$i].device)" end),
+                    # First profile keeps the plain name every existing consumer reads.
+                    shots_artifact: (if $i == 0 then "screenshots-\($r.target)"
+                                     else "screenshots-\($r.target)-\($ps[$i].slug)" end),
+                  }
+              ] }')
           echo "matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
           rel=false
           if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -474,7 +552,9 @@ jobs:
           decide upload_play  "$UPLOAD_PLAY_IN"  'platform :android' "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile"
 
   build:
-    name: ${{ matrix.target }}
+    # The bare target when the caller named no device profiles, `<target> · <device>` when it did
+    # — so a run that never asked for profiles keeps the job names its branch protection knows.
+    name: ${{ matrix.label }}
     needs: [preflight]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -661,13 +741,13 @@ jobs:
         # ios-uikit only: its signing happens inside `xcodebuild -exportArchive` during pack and is
         # not separable from the build the way the macOS .dmg is. The macOS desktop combos get no
         # certificate here — `sign-macos` signs their .app after the fact.
-        if: env.HAS_APPLE_CERT == 'true' && matrix.target == 'ios-uikit'
+        if: env.HAS_APPLE_CERT == 'true' && matrix.target == 'ios-uikit' && matrix.primary
         uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.DAY_APPLE_CERT_P12 }}
           p12-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
       - name: Materialize signing material
-        if: needs.preflight.outputs.release == 'true'
+        if: needs.preflight.outputs.release == 'true' && matrix.primary
         env:
           ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
           ANDROID_KEYSTORE_B64: ${{ secrets.DAY_ANDROID_KEYSTORE_B64 }}
@@ -785,7 +865,10 @@ jobs:
 
       - name: Pack (${{ matrix.target }})
         id: pack
-        if: matrix.target != 'web-dom'
+        # Only a target's PRIMARY profile row packs. A second row exists for its screenshots on
+        # another device; letting it pack too would upload a second copy of every package under
+        # the same artifact name and, on a tag, race the first for the release asset.
+        if: matrix.target != 'web-dom' && matrix.primary
         # Best-effort on the non-primary combos — they exist for coverage, not distribution.
         continue-on-error: ${{ matrix.tier == 'extra' }}
         working-directory: ${{ inputs.project-path }}
@@ -839,7 +922,7 @@ jobs:
         # before it — lint, doctor — skips it, and skipping this too keeps the log honest), and
         # pack must not have failed. A skipped pack still uploads: that is web-dom, which stages a
         # zip of the dist instead of packing.
-        if: always() && steps.build.outcome == 'success' && steps.pack.outcome != 'failure'
+        if: always() && matrix.primary && steps.build.outcome == 'success' && steps.pack.outcome != 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
@@ -956,12 +1039,30 @@ jobs:
           cat "$OUT"
           echo "found=true" >> "$GITHUB_OUTPUT"
 
-      - name: Boot an iOS Simulator
+      # The simulator this job's profile names, matched as a PREFIX: runner images retire device
+      # names every few months, so an exact "iPhone 15" would start failing the day the image
+      # moves to 16. Unmatched is a hard error listing what the image does have — silently taking
+      # some other device would upload screenshots of the wrong form factor under this job's name.
+      - name: Boot an iOS Simulator (${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'ios-uikit'
+        env:
+          PROFILE: ${{ matrix.profile }}
         run: |
-          UDID=$(xcrun simctl list devices available --json \
-            | jq -r '[.devices[] | .[] | select(.name | test("^iPhone"))][0].udid')
-          echo "booting $UDID"
+          set -euo pipefail
+          AVAILABLE=$(xcrun simctl list devices available --json)
+          UDID=$(printf '%s' "$AVAILABLE" \
+            | jq -r --arg p "$PROFILE" '[.devices[] | .[] | select(.name | startswith($p))][0].udid // empty')
+          if [ -z "$UDID" ]; then
+            echo "::error::no available simulator whose name starts with \"$PROFILE\" (ios-profiles)"
+            echo "available simulators on this image:"
+            printf '%s' "$AVAILABLE" | jq -r '[.devices[] | .[] | .name] | unique | .[]' | sed 's/^/  /'
+            exit 1
+          fi
+          NAME=$(printf '%s' "$AVAILABLE" | jq -r --arg u "$UDID" '[.devices[] | .[] | select(.udid == $u)][0].name')
+          echo "booting $NAME ($UDID) for profile \"$PROFILE\""
+          # `day launch` drives every booted simulator, so this job owns exactly one. Each profile
+          # is its own job now, so there is no sibling run whose captures could be mixed in.
+          xcrun simctl shutdown all || true
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
 
@@ -970,42 +1071,6 @@ jobs:
         continue-on-error: ${{ matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
-      # The iPad leg (inputs.tablet-walkthroughs): the SAME scripts and theme × locale matrix,
-      # on a booted iPad instead of the iPhone — `day launch` targets every booted simulator, so
-      # the phone shuts down first. The phone captures are stashed around the run (the variants
-      # share names) and restored whatever happens, so `screenshots-<target>` never carries a
-      # mix; the iPad set uploads separately below. Best-effort, like the phone emulator run.
-      - name: Run dayscripts (iPad)
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'ios-uikit' && inputs.tablet-walkthroughs
-        continue-on-error: true
-        working-directory: ${{ inputs.project-path }}
-        run: |
-          set -euo pipefail
-          SHOTS=build/day/screenshots/ios-uikit
-          if [ -d "$SHOTS" ]; then mv "$SHOTS" "$RUNNER_TEMP/shots-iphone"; fi
-          restore() {
-            rm -rf "$SHOTS"
-            if [ -d "$RUNNER_TEMP/shots-iphone" ]; then
-              mv "$RUNNER_TEMP/shots-iphone" "$SHOTS"
-            fi
-          }
-          trap restore EXIT
-          xcrun simctl shutdown all
-          UDID=$(xcrun simctl list devices available --json \
-            | jq -r '[.devices[] | .[] | select(.name | test("^iPad"))][0].udid')
-          echo "booting iPad $UDID"
-          xcrun simctl boot "$UDID"
-          xcrun simctl bootstatus "$UDID" -b
-          bash "$RUNNER_TEMP/run-dayscripts.sh"
-          mv "$SHOTS" "$RUNNER_TEMP/shots-ipad"
-      - name: Upload screenshots (iPad)
-        if: always() && matrix.target == 'ios-uikit' && inputs.tablet-walkthroughs
-        uses: actions/upload-artifact@v7
-        with:
-          name: screenshots-ios-uikit-ipad
-          path: ${{ runner.temp }}/shots-ipad/
-          if-no-files-found: ignore
-
       - name: Enable KVM group perms (android emulator)
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
         run: |
@@ -1013,7 +1078,7 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Run dayscripts (android emulator)
+      - name: Run dayscripts (android emulator · ${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
         # Best-effort: the emulator has a known intermittent app-start flake; packages are
         # already uploaded and must not be blocked by a screenshot run.
@@ -1024,60 +1089,14 @@ jobs:
         with:
           api-level: 34
           arch: x86_64
-          profile: pixel_5
+          # The AVD device profile for this job (inputs.android-profiles), passed verbatim: these
+          # are exact `avdmanager list device` ids, not prefixes, and the action fails on an
+          # unknown one. A tablet id (pixel_tablet) is 600dp+ wide, so the navigation split tiles
+          # both panes (docs/size-classes.md) — the same app, a different form factor.
+          profile: ${{ matrix.profile }}
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: bash ${{ runner.temp }}/run-dayscripts.sh
-
-      # The tablet leg (inputs.tablet-walkthroughs): the same scripts on a tablet AVD, whose
-      # 600dp+ width tiles the navigation split (docs/size-classes.md). The phone captures are
-      # stashed around the run (the variants share names) and restored whatever happens, so
-      # `screenshots-<target>` never carries a mix; the tablet set uploads separately below.
-      # The wrapper is a FILE because the emulator action runs each `script` line as its own
-      # `sh -c` — a trap or function would not survive to the next line.
-      - name: Stage the tablet walkthrough wrapper
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc' && inputs.tablet-walkthroughs
-        run: |
-          cat > "$RUNNER_TEMP/tablet-dayscripts.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          cd "${DAY_PROJECT_PATH:?}"
-          SHOTS=build/day/screenshots/android-mdc
-          if [ -d "$SHOTS" ]; then mv "$SHOTS" "$RUNNER_TEMP/shots-phone"; fi
-          restore() {
-            rm -rf "$SHOTS"
-            if [ -d "$RUNNER_TEMP/shots-phone" ]; then
-              mv "$RUNNER_TEMP/shots-phone" "$SHOTS"
-            fi
-          }
-          trap restore EXIT
-          bash "$RUNNER_TEMP/run-dayscripts.sh"
-          mv "$SHOTS" "$RUNNER_TEMP/shots-tablet"
-          EOF
-          chmod +x "$RUNNER_TEMP/tablet-dayscripts.sh"
-      - name: Run dayscripts (android tablet emulator)
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc' && inputs.tablet-walkthroughs
-        continue-on-error: true
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          DAY_ANDROID_ABI: x86_64
-          DAY_PROJECT_PATH: ${{ inputs.project-path }}
-        with:
-          api-level: 34
-          arch: x86_64
-          # The stock Pixel Tablet device definition (`avdmanager list device`); wide enough
-          # that SlidingPaneLayout tiles both panes.
-          profile: pixel_tablet
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-          script: bash $RUNNER_TEMP/tablet-dayscripts.sh
-      - name: Upload screenshots (android tablet)
-        if: always() && matrix.target == 'android-mdc' && inputs.tablet-walkthroughs
-        uses: actions/upload-artifact@v7
-        with:
-          name: screenshots-android-mdc-tablet
-          path: ${{ runner.temp }}/shots-tablet/
-          if-no-files-found: ignore
 
       # A package that builds but will not install is worth catching here rather than on a user's
       # machine. Both Linux artifacts are checked, because they fail in different places: a
@@ -1133,7 +1152,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: screenshots-${{ matrix.target }}
+          # `screenshots-<target>` for the primary profile — the name every consumer already
+          # reads — and `screenshots-<target>-<slug>` for each additional device.
+          name: ${{ matrix.shots_artifact }}
           path: ${{ inputs.project-path }}/build/day/screenshots/
           if-no-files-found: ignore
 
@@ -1158,7 +1179,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+      # The pack matrix, not the build one: this job downloads `dist-<target>`, which only a
+      # target's primary profile row produces. Fanning it out per device would have every extra
+      # row wait on an artifact nobody uploaded.
+      matrix: ${{ fromJSON(needs.preflight.outputs.pack-matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

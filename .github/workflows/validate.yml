@@ -92,6 +92,11 @@ jobs:
     with:
       targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
       day-version: main
+      # Exercise the device-profile fan-out: android-mdc becomes two parallel jobs, the second
+      # packing nothing and uploading `screenshots-android-mdc-tablet`. Android carries it rather
+      # than iOS because the fan-out logic is shared and ubuntu minutes are the cheap ones — the
+      # iOS half of the path (prefix-matching a simulator) runs on every single-profile build too.
+      android-profiles: pixel_5, pixel_tablet=tablet
       project-path: ci-app
       setup-command: >-
         day new app ci-app

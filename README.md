@@ -94,6 +94,8 @@ jobs:
 | `launch-env` | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`. |
 | `locales` | — | Locales to run each dayscript under (each gets its own screenshot variant). |
 | `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
+| `ios-profiles` | — | Device profiles to run `ios-uikit`'s dayscripts on, comma-separated — each becomes its own parallel job (see [Device profiles](#device-profiles)). |
+| `android-profiles` | — | The same for `android-mdc`, as `avdmanager list device` ids (`pixel_5`, `pixel_tablet`). |
 | `deploy-web` | `false` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `web-deploy-tag-pattern` | — | When `deploy-web` is set: empty deploys on a push to the repo's default branch; a bash regex (e.g. `^v[0-9]+\.[0-9]+\.[0-9]+$`) deploys **only** on a tag matching it. Ignored unless `deploy-web` is true. |
 
@@ -108,6 +110,50 @@ jobs:
 | `harmony-arkui` | ubuntu-latest | build + pack (`.hap`) only — no emulator scripts yet |
 | `windows-xaml` | windows-latest | packs `.msix` + NSIS installer |
 | `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds; pack and scripts are best-effort |
+
+### Device profiles
+
+`ios-profiles` and `android-profiles` run a mobile target's dayscripts on more than one device.
+Each profile becomes its own **parallel job**, so a second device costs wall clock only for its own
+build and script run, not the first device's:
+
+```yaml
+with:
+  targets: macos-appkit, ios-uikit, android-mdc
+  ios-profiles: "iPhone 16, iPad Pro=ipad"
+  android-profiles: "pixel_5, pixel_tablet=tablet"
+```
+
+That is five jobs: `macos-appkit`, `ios-uikit · iPhone 16`, `ios-uikit · iPad Pro`,
+`android-mdc · pixel_5`, `android-mdc · pixel_tablet`.
+
+- **iOS profiles are prefixes**, matched against the simulators the runner image has: `iPhone`
+  takes the first iPhone, `iPad Pro` the first iPad Pro. Exact names age out with each Xcode image,
+  so a pinned "iPhone 15" would start failing on its own. An unmatched prefix fails the job and
+  lists the devices the image does have. **Android profiles are exact** `avdmanager list device`
+  ids, passed to the emulator action verbatim.
+- **`=<slug>` fixes the artifact suffix** for a long device name: `iPad Pro 13-inch (M4)=ipad`
+  uploads `screenshots-ios-uikit-ipad` instead of `screenshots-ios-uikit-ipad-pro-13-inch-m4`.
+- **The first profile is primary.** It packs, uploads the packages, and feeds the release, signing
+  and store-upload jobs; its screenshots keep the plain `screenshots-<target>` name. Every later
+  profile builds, runs the scripts, and uploads `screenshots-<target>-<slug>` — it never packs, so
+  a tag build cannot race two identical release assets.
+- **Naming no profiles changes nothing**: one job per target, named `<target>` exactly as before,
+  on the first iPhone / `pixel_5`.
+
+**Replacing `tablet-walkthroughs`.** That input is gone (2026-08). It ran the scripts a second time
+inside the phone's job, on a hard-coded iPad and `pixel_tablet`, adding its whole wall clock to a
+job that was already the slowest in the matrix. Profiles do the same work as parallel jobs, so
+`tablet-walkthroughs: true` becomes:
+
+```yaml
+  ios-profiles: "iPhone, iPad=ipad"
+  android-profiles: "pixel_5, pixel_tablet=tablet"
+```
+
+which uploads the same `screenshots-ios-uikit-ipad` and `screenshots-android-mdc-tablet` the old
+input did. Passing `tablet-walkthroughs` now fails the run — GitHub rejects an input a reusable
+workflow does not define — so a caller still setting it has to change one of these two lines.
 
 ### Signing
 
