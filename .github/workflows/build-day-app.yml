@@ -599,130 +599,26 @@ jobs:
         if: inputs.setup-command != ''
         run: ${{ inputs.setup-command }}
 
-      # --- per-target toolkit prerequisites (the recipes from daybrite/day's CI) ----------
-      - name: Toolkit deps (brew)
-        if: runner.os == 'macOS' && (matrix.toolkit == 'gtk' || matrix.toolkit == 'qt')
-        run: |
-          case "${{ matrix.toolkit }}" in
-            qt) brew install qt pkg-config ;;
-            gtk) brew install gtk4 libadwaita pkg-config ;;
-          esac
-
-      - name: Toolkit deps (apt)
-        if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
-        run: |
-          sudo apt-get update
-          # day-piece-webview needs Qt WebEngine (Qt) / WebKitGTK 6 (GTK) on top of the base libs.
-          # An app that does not use the web view links neither, but the dev packages have to be
-          # here for one that does: without libwebkitgtk-6.0-dev the GTK build fails looking for
-          # `libsoup-3.0.pc`, which names a library nothing in the app mentions.
-          # fonts-noto-cjk: without it zh-CN screenshots render Han glyphs as tofu boxes.
-          # xvfb + imagemagick: the linux-gtk dayscripts run under a virtual display, with an
-          # ImageMagick root capture as the screenshot fallback.
-          # dbus: GTK's file dialogs are portal-backed, and a runner has no session bus — so
-          # `day launch` starts a private one with `dbus-run-session`, which ships in this
-          # package. Without a bus GTK reaches the portal through a NULL GDBusConnection and
-          # segfaults on the second dialog.
-          case "${{ matrix.toolkit }}" in
-            qt) sudo apt-get install -y --no-install-recommends qt6-base-dev qt6-webengine-dev pkg-config fonts-noto-cjk ;;
-            gtk) sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config xvfb imagemagick fonts-noto-cjk dbus ;;
-          esac
-
-      - name: Java 21 (android / ohos)
-        if: matrix.target == 'android-mdc' || matrix.target == 'harmony-arkui'
-        uses: actions/setup-java@v5
+      # --- everything this target needs, in one step ---------------------------------------
+      # The toolkit's dev libraries, the Rust std for its cross-compile and the SDK a mobile target
+      # builds through — a property of the TARGET, so it lives in one action (this repo's
+      # setup-day-deps) that daybrite/day's checkup.yml calls too, rather than a ladder of
+      # `if: matrix.target == …` steps kept in step by hand across three repositories.
+      #
+      # `extras` brings what a walkthrough needs beyond a build (the web view's dev libs, a virtual
+      # display, screenshot tooling, CJK fonts); `pack` brings flatpak/linuxdeploy/NSIS, below,
+      # closer to where they are used.
+      - name: Set up ${{ matrix.target }} dependencies
+        uses: daybrite/actions/.github/actions/setup-day-deps@main
         with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Gradle (android)
-        if: matrix.target == 'android-mdc'
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "9.6.1"
-          add-job-summary: "never"
-      - name: Android NDK env
-        if: matrix.target == 'android-mdc'
-        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-      - name: cargo-ndk (android)
-        if: matrix.target == 'android-mdc'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-ndk
-
-      # The OpenHarmony SDK (NDK for the Rust cross-compile) + hvigor/ohpm from the
-      # command-line-tools — the same recipe daybrite/day's harmony-arkui CI job uses.
-      - name: OHOS SDK
-        if: matrix.target == 'harmony-arkui'
-        uses: openharmony-rs/setup-ohos-sdk@v1
-        id: ohos-sdk
-        with:
-          version: "5.1.0"
-      - name: OHOS toolchain env
-        if: matrix.target == 'harmony-arkui'
-        run: |
-          set -euo pipefail
-          NATIVE="${{ steps.ohos-sdk.outputs.ohos_sdk_native }}"
-          echo "$(dirname "$NATIVE")/toolchains" >> "$GITHUB_PATH"
-          echo "OHOS_NDK_HOME=$NATIVE" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER=$NATIVE/llvm/bin/aarch64-unknown-linux-ohos-clang" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_OHOS_LINKER=$NATIVE/llvm/bin/x86_64-unknown-linux-ohos-clang" >> "$GITHUB_ENV"
-          # hvigor's OpenHarmony mode wants the versioned SDK view (<base>/<api>/…).
-          OH="$(dirname "$NATIVE")"
-          BASE="$HOME/ohos-ohsdk"
-          mkdir -p "$BASE"
-          ln -sfn "$OH" "$BASE/18"
-          echo "OHOS_BASE_SDK_HOME=$BASE" >> "$GITHUB_ENV"
-      - name: Cache the OpenHarmony command-line-tools (hvigor / ohpm)
-        if: matrix.target == 'harmony-arkui'
-        uses: actions/cache@v6
-        with:
-          path: ~/ohos-clt
-          key: ohos-clt-5.1.0.840
-      - name: Install hvigor/ohpm (node wrappers)
-        if: matrix.target == 'harmony-arkui'
-        env:
-          CLT_URL: https://repo.huaweicloud.com/harmonyos/ohpm/5.1.0/commandline-tools-linux-x64-5.1.0.840.zip
-        run: |
-          set -euo pipefail
-          C="$HOME/ohos-clt/command-line-tools"
-          if [ ! -f "$C/hvigor/bin/hvigorw.js" ]; then
-            mkdir -p ~/ohos-clt && cd ~/ohos-clt
-            curl -fSL -o clt.zip "$CLT_URL"
-            unzip -q -o clt.zip && rm -f clt.zip
-          fi
-          # hvigor/ohpm are pure JS — run them with the runner's node.
-          mkdir -p "$HOME/ohos-bin"
-          printf '#!/usr/bin/env bash\nexec node "%s/hvigor/bin/hvigorw.js" "$@"\n' "$C" > "$HOME/ohos-bin/hvigorw"
-          printf '#!/usr/bin/env bash\nexec node "%s/ohpm/bin/pm-cli.js" "$@"\n' "$C" > "$HOME/ohos-bin/ohpm"
-          chmod +x "$HOME/ohos-bin/hvigorw" "$HOME/ohos-bin/ohpm"
-          echo "$HOME/ohos-bin" >> "$GITHUB_PATH"
-          echo "DEVECO_SDK_HOME=$C/sdk" >> "$GITHUB_ENV"
-
-      # windows-qt / windows-gtk build against MSYS2's MINGW64 libraries with the windows-gnu
-      # toolchain (daybrite/day's windows-msys2 recipe).
-      - name: MSYS2 (windows qt/gtk)
-        if: matrix.target == 'windows-qt' || matrix.target == 'windows-gtk'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          path-type: inherit
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-pkgconf
-            ${{ matrix.target == 'windows-qt' && 'mingw-w64-x86_64-qt6-base' || 'mingw-w64-x86_64-gtk4 mingw-w64-x86_64-libadwaita' }}
-      - name: Pin the MSYS2 mingw toolchain
-        if: matrix.target == 'windows-qt' || matrix.target == 'windows-gtk'
-        shell: msys2 {0}
-        run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu
-          rustup default stable-x86_64-pc-windows-gnu
-          cygpath -w "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
-          GCC="$(cygpath -m "$MINGW_PREFIX/bin/gcc.exe")"
-          echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$GCC" >> "$GITHUB_ENV"
-          echo "CC=$GCC" >> "$GITHUB_ENV"
-          echo "CXX=$(cygpath -m "$MINGW_PREFIX/bin/g++.exe")" >> "$GITHUB_ENV"
+          target: ${{ matrix.target }}
+          # Only the row that packs pays for the packaging tools: a second device-profile row
+          # builds and runs scripts and never packs, so it can skip flatpak/linuxdeploy/NSIS.
+          pack: ${{ matrix.primary }}
+          extras: true
+          java: true
+          # The toolchain step above already installed the matrix's rust targets.
+          rust: false
 
       # --- validate the environment, then build ---------------------------------------------
       # Source-level checks before anything is built: fluent coverage, duplicate ids, unknown
@@ -777,60 +673,6 @@ jobs:
           esac
 
       # The linux legs pack BOTH formats (day pack, §16.5), so both toolchains are installed.
-      - name: Flatpak tooling (linux pack)
-        if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
-        run: |
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-      # linuxdeploy builds the .appimage: it walks the binary's library closure, its toolkit plugin
-      # adds the parts a naive ldd walk misses (GTK's loaders/GIO modules/schemas, Qt's platform
-      # plugins) so the image is self-contained, and appimagetool seals the AppDir. These ship as
-      # downloaded AppImages/scripts, not apt packages; they land in a dir OUTSIDE the workspace (the
-      # pristine assert covers the checkout). day finds linuxdeploy + the plugin via DAY_LINUXDEPLOY*;
-      # linuxdeploy finds the plugin AND appimagetool because that dir is also on PATH.
-      - name: linuxdeploy tooling (linux pack)
-        if: matrix.target == 'linux-gtk' || matrix.target == 'linux-qt'
-        env:
-          TOOLKIT: ${{ matrix.toolkit }}
-        run: |
-          set -euo pipefail
-          # patchelf: linuxdeploy (and the gtk plugin) rewrite bundled-library rpaths with it — a
-          # hard dep, absent from the runner. squashfs-tools: appimagetool seals the AppDir into a
-          # squashfs. desktop-file-utils: linuxdeploy validates the AppDir's .desktop.
-          # xvfb + fuse: BOTH linux legs LAUNCH the produced AppImage (walkthrough/verify) —
-          # APPIMAGE_EXTRACT_AND_RUN (set below, and by `day pack`) is the no-FUSE path the AppImage
-          # tools use inside a runner; fuse is the fallback for launching the image itself.
-          sudo apt-get install -y --no-install-recommends patchelf squashfs-tools desktop-file-utils xvfb
-          sudo apt-get install -y --no-install-recommends fuse3 libfuse2t64 || \
-            sudo apt-get install -y --no-install-recommends fuse libfuse2 || true
-          tools="$RUNNER_TEMP/appimage-tools"; mkdir -p "$tools"
-          get() { curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"; chmod +x "$2"; }
-          get "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" "$tools/linuxdeploy"
-          get "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" "$tools/appimagetool"
-          # The Qt plugin ships as an AppImage; the GTK plugin is a shell script (there is NO
-          # linuxdeploy-plugin-gtk AppImage), so each toolkit has its own source.
-          case "$TOOLKIT" in
-            qt)  get "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" "$tools/linuxdeploy-plugin-qt" ;;
-            gtk) get "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh" "$tools/linuxdeploy-plugin-gtk" ;;
-          esac
-          echo "$tools" >> "$GITHUB_PATH"
-          {
-            echo "DAY_LINUXDEPLOY=$tools/linuxdeploy"
-            echo "DAY_LINUXDEPLOY_PLUGIN_${TOOLKIT^^}=$tools/linuxdeploy-plugin-$TOOLKIT"
-            echo "APPIMAGE_EXTRACT_AND_RUN=1"
-          } >> "$GITHUB_ENV"
-          # The Qt plugin discovers Qt's plugin/qml dirs via qmake; qt6-base-dev ships it as qmake6.
-          if [ "$TOOLKIT" = qt ]; then
-            echo "QMAKE=$(command -v qmake6 || echo /usr/lib/qt6/bin/qmake)" >> "$GITHUB_ENV"
-          fi
-      - name: NSIS (windows-xaml pack)
-        if: matrix.target == 'windows-xaml'
-        shell: pwsh
-        run: choco install nsis -y --no-progress
-
-      # web-dom has no `day pack`: `day build` already emits the deployable static dist/.
-      # Build it in release and stage it under build/day/dist/ so the artifact upload below
-      # picks it up like any other package.
       - name: Stage the web dist (web-dom)
         if: matrix.target == 'web-dom'
         working-directory: ${{ inputs.project-path }}

@@ -254,6 +254,37 @@ main.
   omitting it fails with a 403), plus the one-time repo setting Settings → Pages → "Build and
   deployment" → **Source = "GitHub Actions"**. No repository secrets are involved.
 
+## Composite actions
+
+`build-day-app` is the whole pipeline. When you only want a piece of it, the actions it is built
+from are usable on their own — daybrite/day's own workflows call them directly.
+
+### `setup-day-deps`
+
+Everything one platform-toolkit target needs on a runner, in one step: the toolkit's dev libraries,
+the Rust std for its cross-compile, the SDK a mobile target builds through, and the tools
+`day pack` needs. What a target needs is a property of the target, so it is derived here rather
+than spelled out again in every workflow.
+
+```yaml
+- uses: daybrite/actions/.github/actions/setup-day-deps@main
+  with:
+    target: linux-gtk   # required; any of the 12 combos
+    pack: true          # flatpak-builder + linuxdeploy (linux), NSIS (windows-xaml)
+    extras: false       # walkthrough extras: web view dev libs, xvfb, imagemagick, CJK fonts
+    java: false         # pin JDK 21 + Gradle for android/harmony (else the runner's own JDK)
+    rust: true          # rustup target add this target's std
+```
+
+Everything that is not "make this target buildable" stays with the caller: checking out the app,
+installing the CLI (`setup-day-cli`), emulators, signing material, and the build/pack/script
+commands themselves.
+
+### `setup-day-cli`
+
+Installs the `day` CLI and exports `DAY_BIN` — from crates.io, a git ref, or an artifact this run
+built (`day-source: artifact`, how daybrite/day tests the CLI it just compiled).
+
 ## Validation
 
 `validate.yml` runs on every push and pull request: it scaffolds a fresh app with `day new app`
