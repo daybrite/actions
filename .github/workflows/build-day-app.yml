@@ -619,9 +619,13 @@ jobs:
           # fonts-noto-cjk: without it zh-CN screenshots render Han glyphs as tofu boxes.
           # xvfb + imagemagick: the linux-gtk dayscripts run under a virtual display, with an
           # ImageMagick root capture as the screenshot fallback.
+          # dbus: GTK's file dialogs are portal-backed, and a runner has no session bus — so
+          # `day launch` starts a private one with `dbus-run-session`, which ships in this
+          # package. Without a bus GTK reaches the portal through a NULL GDBusConnection and
+          # segfaults on the second dialog.
           case "${{ matrix.toolkit }}" in
             qt) sudo apt-get install -y --no-install-recommends qt6-base-dev qt6-webengine-dev pkg-config fonts-noto-cjk ;;
-            gtk) sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config xvfb imagemagick fonts-noto-cjk ;;
+            gtk) sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config xvfb imagemagick fonts-noto-cjk dbus ;;
           esac
 
       - name: Java 21 (android / ohos)
