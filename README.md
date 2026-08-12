@@ -96,6 +96,7 @@ jobs:
 | `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 | `ios-profiles` | — | Device profiles to run `ios-uikit`'s dayscripts on, comma-separated — each becomes its own parallel job (see [Device profiles](#device-profiles)). |
 | `android-profiles` | — | The same for `android-mdc`, as `avdmanager list device` ids (`pixel_5`, `pixel_tablet`). |
+| `publish-release` | `true` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft — packages, checksums, launch scripts and notes all in place — for a human to review and publish. Its asset URLs, including the ones in the install commands, answer only once it is published. Never un-publishes a release that is already public. |
 | `deploy-web` | `false` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `web-deploy-tag-pattern` | — | When `deploy-web` is set: empty deploys on a push to the repo's default branch; a bash regex (e.g. `^v[0-9]+\.[0-9]+\.[0-9]+$`) deploys **only** on a tag matching it. Ignored unless `deploy-web` is true. |
 

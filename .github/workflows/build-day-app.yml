@@ -205,6 +205,18 @@ on:
         type: boolean
         required: false
         default: false
+      publish-release:
+        description: >-
+          Publish the GitHub release for the tag, or leave it as a draft for a human to review and
+          publish. A draft is fully assembled — every package attached, checksums, launch scripts,
+          install commands at the top of the notes — it is simply not visible to anyone without
+          write access, sends no notifications, and does not answer the
+          `releases/latest/download/…` and `releases/download/<tag>/…` URLs the launch scripts and
+          the notes point at. Those start working when someone publishes it.
+          Never un-publishes: a release that is already public stays public on a re-run.
+        type: boolean
+        required: false
+        default: true
       deploy-web:
         description: >-
           Publish the web-dom build to the CALLER's GitHub Pages after the build matrix (reusing
@@ -1364,13 +1376,72 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Create as a draft, attach everything, then un-draft — never publicly visible in a
-          # half-uploaded state; --clobber + --draft=false keep re-runs idempotent.
+          # Create as a draft and attach everything. It stays a draft until the notes below are in
+          # place — and, with `publish-release: false`, for as long as the human reviewing it wants
+          # — so a release is never publicly visible half-assembled; --clobber and the edits that
+          # follow keep re-runs idempotent.
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
                  --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" assets/* --clobber
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+      # Someone who lands on a release page should find the command that runs THIS build, above the
+      # changelog and ahead of the file list. The URLs are pinned to this tag rather than
+      # `latest/download/…`, because on v1.2.0's page the command has to install v1.2.0 however
+      # many releases come after it.
+      - name: Lead the release notes with the install commands
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Each script is generated only when the release shipped a desktop build it can run, so
+          # its presence is exactly the right condition. Neither one means a mobile-only release,
+          # which gets no section rather than a command that would 404.
+          [ -f assets/launch.sh ] || [ -f assets/launch.ps1 ] || exit 0
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          # shellcheck disable=SC2016 # the backticks below open markdown fences, not substitutions
+          {
+            echo "<!-- day:install -->"
+            echo "## Install and run $GITHUB_REF_NAME"
+            echo
+            if [ -f assets/launch.sh ]; then
+              printf '**macOS and Linux**\n\n```sh\ncurl -fsSL %s/launch.sh | bash\n```\n\n' "$base"
+            fi
+            if [ -f assets/launch.ps1 ]; then
+              printf '**Windows** (PowerShell)\n\n```powershell\nirm %s/launch.ps1 | iex\n```\n\n' "$base"
+            fi
+            echo "Both print what they are about to download and ask before doing it, then run the"
+            echo "app from a temporary directory. To follow the newest release instead of this one,"
+            echo "use \`releases/latest/download/\` in place of \`releases/download/$GITHUB_REF_NAME/\`."
+            echo "<!-- /day:install -->"
+            echo
+          } > install.md
+          # Prepend to whatever the release already says — GitHub's generated changelog on a fresh
+          # one, a human's prose on a release that existed first — minus any block a previous run
+          # of this step left, so a re-run replaces its own section instead of stacking copies.
+          gh release view "$GITHUB_REF_NAME" --json body -q .body > body.md
+          # `sed '/./,$!d'` drops the blank lines the removed block left behind, so the separator
+          # is the one install.md ends with and a tenth re-run reads like the first.
+          awk '/<!-- day:install -->/ { skip = 1 }
+               !skip { print }
+               /<!-- \/day:install -->/ { skip = 0 }' body.md | sed '/./,$!d' > kept.md
+          cat install.md kept.md > notes.md
+          gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+      # The one step that makes the release public. `publish-release: false` skips it and leaves a
+      # complete draft behind: assets, checksums, launch scripts and notes are all already in
+      # place, so publishing is one click and needs no re-run. It is also why nothing here ever
+      # sets `--draft=true` — a release that went out cannot be recalled by a later build.
+      - name: Publish the release
+        if: ${{ inputs.publish-release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+      - name: Note that the release is a draft
+        if: ${{ !inputs.publish-release }}
+        run: |
+          echo "::notice::$GITHUB_REF_NAME is ready as a DRAFT (publish-release: false) — \
+          publish it to make its assets and the install commands in its notes reachable."
 
   # --- store uploads (semantic-version tags only) ---------------------------------------------
   # Three independent jobs that hand the packed artifacts to the APP'S OWN fastlane config. The
