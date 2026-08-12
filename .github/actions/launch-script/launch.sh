@@ -79,15 +79,31 @@ confirm() {
         echo "error: no terminal to ask on. Re-run with --yes (or DAY_LAUNCH_YES=1) to skip the prompt." >&2
         exit 1
     fi
-    printf 'Continue? [y/N] '
+    # Capitalised Y: Enter is the answer this prompt exists to make easy, since someone who ran
+    # the line already asked for the app. A blank reply (and a failed read, e.g. the terminal
+    # going away mid-prompt) continues; anything that is not a yes cancels.
+    printf 'Continue? [Y/n] '
     read -r reply <&3 || reply=""
     exec 3<&-
     case "$reply" in
-        y | Y | yes | Yes | YES) return 0 ;;
+        "" | y | Y | yes | Yes | YES) return 0 ;;
         *)
             echo "Cancelled — nothing was downloaded."
             exit 1
             ;;
+    esac
+}
+
+# The work directory with the temp root written as `$TMPDIR`, for the summary line only.
+# macOS hands mktemp a per-user path like /var/folders/zl/wkdjv4s1271fbm6w0plzknkh0000gn/T, and
+# printing that in full buries the part a reader is checking — which release, unpacked where —
+# in forty characters of noise. Everything still USES the real path; only this line abbreviates.
+short_tmp() {
+    tmp="${TMPDIR:-/tmp}"
+    tmp="${tmp%/}"
+    case "$1" in
+        "$tmp"/*) printf '$TMPDIR%s' "${1#"$tmp"}" ;;
+        *) printf '%s' "$1" ;;
     esac
 }
 
@@ -212,7 +228,7 @@ echo "$REPO $TAG"
 echo
 echo "  target    $TARGET ($CHOSEN)"
 echo "  download  $URL"
-echo "  into      $WORKDIR"
+echo "  into      $(short_tmp "$WORKDIR")"
 case "$TARGET" in
     macos-appkit) echo "  then      mount the .dmg, copy the .app out, and open it" ;;
     linux-*) echo "  then      chmod +x and run it — no install, no root" ;;

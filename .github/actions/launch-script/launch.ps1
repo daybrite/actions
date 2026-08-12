@@ -42,6 +42,17 @@ foreach ($a in $args) {
     }
 }
 
+# A path with the temp root written as `$env:TEMP`, for the summary line only: the real path is
+# long enough to bury what a reader is checking (which release, unpacked where). Everything still
+# USES the real path.
+function Format-TempPath([string]$Path) {
+    $tmp = [System.IO.Path]::GetTempPath().TrimEnd([char]'\', [char]'/')
+    if ($Path.StartsWith($tmp, [StringComparison]::OrdinalIgnoreCase)) {
+        return '$env:TEMP' + $Path.Substring($tmp.Length)
+    }
+    return $Path
+}
+
 $Url = "https://github.com/$Repo/releases/download/$Tag/$Asset"
 # One directory per release, so two versions can sit side by side and be compared.
 $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) "$(Split-Path $Repo -Leaf)-$Tag"
@@ -51,7 +62,7 @@ $File = Join-Path $WorkDir $Asset
 Write-Host "$Repo $Tag"
 Write-Host ""
 Write-Host "  download  $Url"
-Write-Host "  into      $WorkDir"
+Write-Host "  into      $(Format-TempPath $WorkDir)"
 Write-Host "  then      install it there (per-user, no admin) and run it"
 Write-Host ""
 Write-Host "  NOTE: the installer is signed with a development certificate, not one Windows"
@@ -59,8 +70,10 @@ Write-Host "        trusts, so SmartScreen may warn about it."
 Write-Host ""
 
 if (-not $AssumeYes) {
-    $reply = Read-Host "Continue? [y/N]"
-    if ($reply -notmatch '^(y|yes)$') {
+    # Capitalised Y: Enter is the answer this prompt exists to make easy, since someone who ran
+    # the line already asked for the app. A blank reply continues; anything not a yes cancels.
+    $reply = Read-Host "Continue? [Y/n]"
+    if ($reply.Trim() -ne "" -and $reply -notmatch '^(y|yes)$') {
         Write-Host "Cancelled - nothing was downloaded."
         exit 1
     }
