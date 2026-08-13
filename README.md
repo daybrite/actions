@@ -293,7 +293,9 @@ commands themselves.
 ### `setup-day-cli`
 
 Installs the `day` CLI and exports `DAY_BIN` — from crates.io, a git ref, or an artifact this run
-built (`day-source: artifact`, how daybrite/day tests the CLI it just compiled).
+built (`day-source: artifact`, how daybrite/day tests the CLI it just compiled). Source installs
+cache the cargo build directory (weekly rolling key, per OS and architecture), so the dependency
+crates carry over between runs and the build is incremental rather than cold.
 
 ## Validation
 

@@ -1726,10 +1726,12 @@ jobs:
       - name: Install the template
         working-directory: daysite
         run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-      # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png, so merging them
-      # into one directory reassembles exactly the capture tree the gallery assembler reads.
-      # Tolerated-absent: a run whose dayscripts captured nothing still publishes a site — the
-      # gallery page is simply not generated.
+      # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png — plus each
+      # target's own gallery.json, written by the dayscript runner with every `screenshot:`
+      # step's localized title/caption metadata — so merging them into one directory
+      # reassembles exactly the capture tree `day screenshot index` merges and the gallery
+      # assembler reads. Tolerated-absent: a run whose dayscripts captured nothing still
+      # publishes a site — the gallery page is simply not generated.
       - name: Download screenshots
         continue-on-error: true
         uses: actions/download-artifact@v7
@@ -1737,6 +1739,31 @@ jobs:
           pattern: screenshots-*
           path: shots
           merge-multiple: true
+      # `day screenshot index` merges the per-target indexes into shots/gallery.json — the
+      # machine-readable index of every screenshot (URL, localized title/caption, theme,
+      # locale, platform, dimensions, byte size, sha-256). The assembler republishes it at
+      # /gallery/gallery.json, where other sites reference this app's screenshots — the way
+      # daybrite.dev references the Day Showcase's. Best-effort like the download above: a
+      # failure costs the published index, never the site.
+      - name: Set up the day CLI
+        id: daycli
+        continue-on-error: true
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      - name: Build the screenshot index
+        if: ${{ steps.daycli.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          if [ -d shots ]; then
+            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
+              --screenshot-paths shots --out shots/gallery.json
+          fi
       - name: Generate the site data
         env:
           GH_TOKEN: ${{ github.token }}
