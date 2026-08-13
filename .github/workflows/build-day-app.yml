@@ -74,6 +74,17 @@ on:
         description: Git URL of the day repository, for branch/commit installs.
         type: string
         default: https://github.com/daybrite/day.git
+      day-verbose:
+        description: >-
+          Run the day CLI verbose (DAY_VERBOSE=1): every `day build`/`launch`/`pack`/`rebuild`
+          forwards its sub-commands' raw output — the cargo/gradle/xcodebuild/hvigor command
+          lines and logs — instead of showing only day's own status lines. On by default, so a
+          failed CI build shows the command that broke; set false for the quiet output.
+          Installing the day CLI itself is cargo's own build and is unaffected either way.
+          A pinned day-version that predates DAY_VERBOSE ignores it.
+        type: boolean
+        required: false
+        default: true
       project-path:
         description: Directory of the Day project within the repository.
         type: string
@@ -575,6 +586,10 @@ jobs:
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
+      # Verbose day CLI (inputs.day-verbose): lint/doctor stay terse either way; build, pack,
+      # and every scripted launch — including the ones the generated dayscript runner performs,
+      # which no flag from this file could reach — forward their sub-commands' raw output.
+      DAY_VERBOSE: ${{ inputs.day-verbose && '1' || '0' }}
       # Release signing, active on semantic-version tags only — branch/PR packs stay dev-signed
       # even when the repository secrets exist. Absent/empty secrets degrade to the dev tier.
       # The names match daybrite/day's ci.yml; forward them with `secrets: inherit`.
@@ -1035,6 +1050,10 @@ jobs:
     needs: [preflight, build]
     if: ${{ inputs.validate-rebuild && !cancelled() }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Same switch as the build job: `day rebuild` runs a full pack, and a comparison failure
+      # without the underlying build log is undebuggable from CI output alone.
+      DAY_VERBOSE: ${{ inputs.day-verbose && '1' || '0' }}
     strategy:
       fail-fast: false
       # The pack matrix, not the build one: this job downloads `dist-<target>`, which only a
@@ -1732,8 +1751,13 @@ jobs:
           # and is the only icon for projects without an SVG master. Nothing else supplies the
           # site an icon, so a project without either gets the template's defaults and a line
           # in this log saying why.
-          node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" --repo "$GITHUB_REPOSITORY"
+          # ORDER MATTERS: the gallery assembler WRITES gallery-manifest.json, and the appindex
+          # generator READS it to fill each platform's landing-page carousel. Run the other way
+          # round — as this did — and the manifest does not exist yet on a fresh checkout (it is
+          # generated, so it is gitignored and never checked out), so every platform's carousel
+          # ships empty while the /gallery page looks fine. Assemble first, then index.
           node daysite/scripts/assemble-gallery.mjs shots "$SITE_DIR"
+          node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" --repo "$GITHUB_REPOSITORY"
           echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
       # The hosted web build: reuse the dist the build matrix produced, staged under the
       # directory site.toml names (default "webapp"). Absent when web-dom is not a target —

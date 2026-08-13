@@ -87,6 +87,7 @@ jobs:
 | `targets` | (required) | Platform-toolkit pairs to build, comma- or space-separated. |
 | `day-version` | `latest` | Day CLI to install: `latest` (newest crates.io release), `v1.2.3`/`1.2.3` (that crates.io release), a 40-hex commit, or a branch name of the day repo (built from git). |
 | `day-git` | `https://github.com/daybrite/day.git` | Day repo URL for branch/commit installs. |
+| `day-verbose` | `true` | Run the day CLI verbose (`DAY_VERBOSE=1`): every `day build`/`launch`/`pack`/`rebuild` forwards its sub-commands' raw output — the cargo/gradle/xcodebuild/hvigor command lines and logs — so a failed build shows the command that broke. `false` restores the quiet status-line output. Installing the CLI itself is cargo's own build either way; a `day-version` that predates `DAY_VERBOSE` ignores it. |
 | `project-path` | `.` | Directory of the Day project within the repository. |
 | `setup-command` | — | Shell command run at the repo root after the CLI installs (e.g. `day new app …`). |
 | `preflight-checks` | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt clippy check test` (comma- or space-separated). `fmt` needs no build and takes seconds; the others compile the whole workspace and delay every matrix leg, which is why they are opt-in. Empty skips the checks. |
