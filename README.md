@@ -243,6 +243,14 @@ regex to publish only on matching tags. The native release-assets job (on `vX.Y.
 independent, so one caller can attach packages on tags *and* deploy the web build on every push to
 main.
 
+**Re-running a job is safe.** Artifacts belong to the run, not to the attempt, so a re-run used to
+leave a second artifact named `github-pages` beside the first and `actions/deploy-pages` refused to
+deploy at all — one flaky build leg would take the whole workflow down on its way out
+([upload-pages-artifact#97](https://github.com/actions/upload-pages-artifact/issues/97)). The Pages
+artifact now carries the run attempt in its name, so each attempt deploys its own; a duplicate left
+by the uploader's internal retry is swept before deploying, where the caller's token allows it.
+Nothing to configure.
+
 ### Requirements
 
 - The project's `Cargo.toml` must resolve its `day` dependencies on a runner — a git dependency

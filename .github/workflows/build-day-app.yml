@@ -1620,14 +1620,58 @@ jobs:
           rm -rf web-dist
           unzip -q "$ZIP" -d web-dist
           test -f web-dist/index.html
+      # The artifact name carries the RUN ATTEMPT (docs: the re-run story below). Artifacts are
+      # scoped to the run, not the attempt, and survive a re-run — so a second attempt uploading
+      # `github-pages` again leaves TWO artifacts under that name in the same run, and
+      # `deploy-pages` fails with "Multiple artifacts named github-pages were unexpectedly found"
+      # before it deploys anything. That turns one flaky build leg into a whole failed workflow,
+      # which is exactly what re-running a leg is supposed to avoid.
+      #
+      # Suffixing makes each attempt's artifact its own name, so the lookup finds exactly one.
+      # This works because the upload and the deploy are steps of the SAME job: whichever attempt
+      # runs them, both read the same `github.run_attempt`. (The name is only ever used to look
+      # the artifact up — `deploy-pages` sends the resolved artifact ID to the Pages API — so any
+      # name deploys the same site.)
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
+          name: github-pages-${{ github.run_attempt }}
           # The whole self-contained static site, all relative — the directory IS the Pages site.
           path: web-dist
+      # Belt and braces for the OTHER way duplicates appear, which the attempt suffix cannot
+      # separate: `upload-pages-artifact`'s own retry when finalizing times out can leave two
+      # artifacts under ONE name within a SINGLE attempt (actions/upload-pages-artifact#97).
+      # Drop all but the newest before deploying.
+      #
+      # Best-effort by design. Listing and deleting artifacts needs an `actions` grant this
+      # workflow deliberately does not request — a nested job's permissions are validated against
+      # the CALLER's grant even when the job is skipped, so requiring it would break every caller
+      # that never deploys web. Without the grant the API call fails, this logs a notice, and the
+      # deploy proceeds exactly as it would have: never worse than not having the step.
+      - name: Drop duplicate Pages artifacts from a retried upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ART: github-pages-${{ github.run_attempt }}
+        run: |
+          set -uo pipefail
+          if ! ids=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+              --jq "[.artifacts[] | select(.name==\"${ART}\")] | sort_by(.created_at) | .[:-1][].id" 2>/dev/null); then
+            echo "::notice::cannot list run artifacts (no 'actions: read' grant) — skipping the duplicate sweep"
+            exit 0
+          fi
+          for id in ${ids:-}; do
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/$id" >/dev/null 2>&1; then
+              echo "::warning::deleted a duplicate '${ART}' artifact (id $id) left by a retried upload"
+            else
+              echo "::notice::a duplicate '${ART}' artifact (id $id) needs deleting but the token lacks 'actions: write'"
+            fi
+          done
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
 
   # --- Project website (daysite) -------------------------------------------------------------
   # When the repository has website/site.toml, this job replaces the bare root deploy above: it
@@ -1728,10 +1772,54 @@ jobs:
         env:
           DAYSITE_CONFIG: ${{ env.SITE_DIR }}/site.toml
         run: npx astro build
+      # The artifact name carries the RUN ATTEMPT (docs: the re-run story below). Artifacts are
+      # scoped to the run, not the attempt, and survive a re-run — so a second attempt uploading
+      # `github-pages` again leaves TWO artifacts under that name in the same run, and
+      # `deploy-pages` fails with "Multiple artifacts named github-pages were unexpectedly found"
+      # before it deploys anything. That turns one flaky build leg into a whole failed workflow,
+      # which is exactly what re-running a leg is supposed to avoid.
+      #
+      # Suffixing makes each attempt's artifact its own name, so the lookup finds exactly one.
+      # This works because the upload and the deploy are steps of the SAME job: whichever attempt
+      # runs them, both read the same `github.run_attempt`. (The name is only ever used to look
+      # the artifact up — `deploy-pages` sends the resolved artifact ID to the Pages API — so any
+      # name deploys the same site.)
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
+          name: github-pages-${{ github.run_attempt }}
           path: daysite/dist
+      # Belt and braces for the OTHER way duplicates appear, which the attempt suffix cannot
+      # separate: `upload-pages-artifact`'s own retry when finalizing times out can leave two
+      # artifacts under ONE name within a SINGLE attempt (actions/upload-pages-artifact#97).
+      # Drop all but the newest before deploying.
+      #
+      # Best-effort by design. Listing and deleting artifacts needs an `actions` grant this
+      # workflow deliberately does not request — a nested job's permissions are validated against
+      # the CALLER's grant even when the job is skipped, so requiring it would break every caller
+      # that never deploys web. Without the grant the API call fails, this logs a notice, and the
+      # deploy proceeds exactly as it would have: never worse than not having the step.
+      - name: Drop duplicate Pages artifacts from a retried upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ART: github-pages-${{ github.run_attempt }}
+        run: |
+          set -uo pipefail
+          if ! ids=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+              --jq "[.artifacts[] | select(.name==\"${ART}\")] | sort_by(.created_at) | .[:-1][].id" 2>/dev/null); then
+            echo "::notice::cannot list run artifacts (no 'actions: read' grant) — skipping the duplicate sweep"
+            exit 0
+          fi
+          for id in ${ids:-}; do
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/$id" >/dev/null 2>&1; then
+              echo "::warning::deleted a duplicate '${ART}' artifact (id $id) left by a retried upload"
+            else
+              echo "::notice::a duplicate '${ART}' artifact (id $id) needs deleting but the token lacks 'actions: write'"
+            fi
+          done
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
