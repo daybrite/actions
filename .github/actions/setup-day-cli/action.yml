@@ -50,37 +50,17 @@ runs:
         echo "DAY_BIN=$BIN" >> "$GITHUB_ENV"
         "$BIN" version
 
-    # Cache the CLI's build directory so `cargo install` rebuilds incrementally instead of
-    # cold — the ~200 dependency crates are the bulk of the build and change far more slowly
-    # than day-cli itself. The key rolls weekly: a fixed key would save once and go stale
-    # (actions/cache saves only when the primary key missed), while a per-version key would
-    # save a multi-hundred-MB entry on every release or push. `restore-keys` lets a new week
-    # start from the previous one's artifacts.
-    - name: Work out the build-cache week
-      id: week
-      if: inputs.source != 'artifact'
-      shell: bash
-      run: echo "stamp=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
-    - name: Cache the build directory
-      if: inputs.source != 'artifact'
-      uses: actions/cache@v6
-      with:
-        path: |
-          ${{ runner.temp }}/day-cli-target
-          ~/.cargo/registry
-        key: day-cli-target-${{ runner.os }}-${{ runner.arch }}-${{ steps.week.outputs.stamp }}
-        restore-keys: |
-          day-cli-target-${{ runner.os }}-${{ runner.arch }}-
-
+    # NO build-directory cache here, deliberately (2026-08): a cached CARGO_TARGET_DIR made
+    # `cargo install --git --branch main` reuse the PREVIOUS run's day-cli wholesale — zero
+    # recompilation, "Finished in 3.33s" — installing a stale binary labeled with the new
+    # commit. For a tool whose generated files are pristine-checked in every app repo, a
+    # binary that silently lags its own source is worse than the minutes a cold build costs.
     - name: Install the day CLI (${{ inputs.version }})
       if: inputs.source != 'artifact'
       shell: bash
       env:
         VERSION_IN: ${{ inputs.version }}
         GIT_URL: ${{ inputs.git }}
-        # Without this, `cargo install` builds in a private temp dir and the cache above
-        # would hold nothing.
-        CARGO_TARGET_DIR: ${{ runner.temp }}/day-cli-target
       run: |
         set -euo pipefail
         V="${VERSION_IN:-latest}"
