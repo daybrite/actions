@@ -63,7 +63,7 @@ runs:
       run: echo "stamp=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
     - name: Cache the build directory
       if: inputs.source != 'artifact'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ${{ runner.temp }}/day-cli-target
