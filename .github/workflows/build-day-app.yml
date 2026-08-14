@@ -803,13 +803,12 @@ jobs:
           if-no-files-found: ${{ matrix.tier == 'primary' && 'error' || 'warn' }}
 
       # --- dayscripts + screenshots ----------------------------------------------------------
-      # harmony-arkui is pack-only here: driving the OHOS emulator is still experimental even in
-      # daybrite/day's own CI, so this workflow doesn't attempt it. web-dom is build-only too:
-      # scripted web runs need a DAY_WEB_DRIVER browser (daybrite/day's own CI carries one), which
-      # this workflow doesn't ship yet.
+      # Every target runs the scripts: desktop and iOS through the generated runner below,
+      # Android and HarmonyOS on their emulators, web-dom in a headless Playwright browser
+      # driven by the CLI's own bundled page-driver. The emulator legs are best-effort —
+      # packages are already uploaded above and must not be blocked by a screenshot flake.
       - name: Prepare the dayscript runner
         id: scripts
-        if: matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
         working-directory: ${{ inputs.project-path }}
         env:
           SCRIPTS_IN: ${{ inputs.scripts }}
@@ -944,8 +943,10 @@ jobs:
         continue-on-error: ${{ matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
-      - name: Enable KVM group perms (android emulator)
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+      - name: Enable KVM group perms (android / harmony emulator)
+        # Make /dev/kvm world-accessible so the emulators can open it (`day ohos emulator
+        # launch` auto-selects `-accel kvm` when /dev/kvm exists).
+        if: steps.scripts.outputs.found == 'true' && (matrix.target == 'android-mdc' || matrix.target == 'harmony-arkui')
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -970,6 +971,72 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: bash ${{ runner.temp }}/run-dayscripts.sh
+
+      # --- HarmonyOS: the Oniro emulator, the same recipe daybrite/day's own CI runs.
+      # Best-effort from boot to walkthrough: the QEMU guest is slow and occasionally flaky,
+      # so a wedged emulator costs this run's OHOS screenshots, never the packages. QEMU
+      # itself comes from setup-day-deps (extras).
+      - name: Cache the Oniro emulator image
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/oniro-emulator/v6.1
+          key: oniro-emulator-v6.1-oniro_emulator.zip
+      - name: Boot the Oniro emulator (day ohos emulator launch --headless)
+        id: ohosemu
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ZIP="$HOME/.cache/oniro-emulator/v6.1/oniro_emulator.zip"
+          if [ ! -f "$ZIP" ]; then
+            mkdir -p "$(dirname "$ZIP")"
+            curl -fL -o "$ZIP" \
+              "https://github.com/eclipse-oniro4openharmony/device_board_oniro/releases/download/v6.1/oniro_emulator.zip"
+          fi
+          rm -rf "$RUNNER_TEMP/oniro-emulator" && mkdir -p "$RUNNER_TEMP/oniro-emulator"
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/oniro-emulator"
+          IMAGES="$(dirname "$(find "$RUNNER_TEMP/oniro-emulator" -name bzImage -print -quit)")"
+          echo "DAY_OHOS_EMULATOR=$IMAGES" >> "$GITHUB_ENV"
+          DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" ohos emulator launch --headless
+      - name: Run dayscripts (harmony emulator)
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.ohosemu.outcome == 'success'
+        continue-on-error: true
+        env:
+          # Per-screenshot compositor settle before capture (script.rs): matches the measured
+          # 2-3 s emulator compositor lag; the byte-identical stale-frame retry still catches
+          # the stragglers.
+          DAY_OHOS_SHOT_SETTLE_MS: "2500"
+        run: bash "$RUNNER_TEMP/run-dayscripts.sh"
+
+      # --- web-dom: scripted runs drive a headless Playwright browser through the page-driver
+      # that ships INSIDE day-cli (`day web driver`), so driver and CLI can never disagree on
+      # the control protocol. A day-version that predates the command skips the scripts with a
+      # notice — exactly the old build-only behavior.
+      - name: Install the walkthrough browser (web)
+        id: webdriver
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'web-dom'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if ! DRIVER="$("$DAY_BIN" web driver 2>/dev/null)"; then
+            echo "::notice::this day CLI has no 'web driver' subcommand — skipping the web-dom dayscripts"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/webdriver" && cd "$RUNNER_TEMP/webdriver"
+          npm init -y >/dev/null
+          npm install playwright >/dev/null
+          npx playwright install --with-deps chromium
+          {
+            echo "DAY_WEB_DRIVER=node $DRIVER"
+            echo "DAY_WEB_DRIVER_PLAYWRIGHT=$RUNNER_TEMP/webdriver"
+            # Chromium, not WebKit: Playwright's Linux WebKit (the WPE port) ships no OPFS,
+            # which day-part-fs needs (docs/fs.md).
+            echo "DAY_WEB_DRIVER_BROWSER=chromium"
+          } >> "$GITHUB_ENV"
+      - name: Run dayscripts (web-dom)
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'web-dom' && steps.webdriver.outcome == 'success'
+        run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       # A package that builds but will not install is worth catching here rather than on a user's
       # machine. Both Linux artifacts are checked, because they fail in different places: a

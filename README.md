@@ -109,8 +109,9 @@ jobs:
 | `ios-uikit` | macos-latest | Simulator scripts; packs an unsigned device `.ipa` for sideloading/self-signing (a signed `.ipa` with signing secrets) |
 | `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` **and** a `.appimage`, and the release check installs the one and runs the other |
 | `android-mdc` | ubuntu-latest | scripts on a KVM emulator (best-effort); packs `.apk` + `.aab` |
-| `harmony-arkui` | ubuntu-latest | build + pack (`.hap`) only — no emulator scripts yet |
+| `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort); packs `.hap` |
 | `windows-xaml` | windows-latest | packs `.msix` + NSIS installer |
+| `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`); ships the built dist as a zip |
 | `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds; pack and scripts are best-effort |
 
 ### Device profiles

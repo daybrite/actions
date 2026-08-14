@@ -138,6 +138,23 @@ runs:
         # shellcheck disable=SC2086 # deliberately word-split package lists
         sudo apt-get install -y --no-install-recommends $BASE $PKGS
 
+    # What the harmony/web WALKTHROUGHS need beyond a build: the Oniro emulator is a QEMU
+    # x86_64 guest (`day ohos emulator launch`), and the headless web browser renders the
+    # zh-CN captures as tofu without CJK fonts (imagemagick is the same capture-validation
+    # tooling the linux legs carry).
+    - name: Walkthrough deps (harmony emulator / web driver)
+      if: inputs.extras == 'true' && (inputs.target == 'harmony-arkui' || inputs.target == 'web-dom')
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "${{ inputs.target }}" in
+          harmony-arkui) PKGS="qemu-system-x86 qemu-utils" ;;
+          web-dom) PKGS="fonts-noto-cjk imagemagick" ;;
+        esac
+        sudo apt-get update
+        # shellcheck disable=SC2086 # deliberately word-split package lists
+        sudo apt-get install -y --no-install-recommends $PKGS
+
     # --- Android --------------------------------------------------------------------------------
     - name: JDK 21 (android / harmony)
       if: inputs.java == 'true' && (inputs.target == 'android-mdc' || inputs.target == 'harmony-arkui')
