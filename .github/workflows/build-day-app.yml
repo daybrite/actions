@@ -954,9 +954,14 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Run dayscripts (android emulator · ${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
-        # Best-effort: the emulator has a known intermittent app-start flake; packages are
-        # already uploaded and must not be blocked by a screenshot run.
-        continue-on-error: true
+        # NOT best-effort. This was `continue-on-error: true` for a known intermittent
+        # app-start flake, and the cost was that every REAL walkthrough failure on Android went
+        # unreported too: Day-Tradr's phone-route breakage failed android-mdc and ios-uikit
+        # identically for weeks, and only ios-uikit ever turned the build red — which made a
+        # deterministic bug look like an iOS-only flake. A green tick has to mean the
+        # walkthrough passed. The app-start flake is handled where it belongs, by the CLI's own
+        # retry on engine loss (`day launch --locales`), which distinguishes a dead app from a
+        # failed assertion; a flake that outlives that retry should be seen, not hidden.
         uses: reactivecircus/android-emulator-runner@v2
         env:
           DAY_ANDROID_ABI: x86_64
