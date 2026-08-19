@@ -5,7 +5,7 @@
 # path is exercised too. This covers the whole surface a real caller uses: the target matrix and
 # runner mapping, the day CLI install path, every per-target toolchain recipe, `day build`,
 # `day pack` (and the web-dom dist staging), the dayscript runner (the scaffold ships
-# dayscript/smoke.yaml), and the artifact uploads. The release-assets and Pages-deploy jobs stay
+# dayscript/demo.yaml), and the artifact uploads. The release-assets and Pages-deploy jobs stay
 # skipped — this repo doesn't tag app releases, and deploy-web is off (it publishes to a live
 # Pages site, which a validation run must not do).
 #
