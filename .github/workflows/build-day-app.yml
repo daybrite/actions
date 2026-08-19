@@ -260,6 +260,21 @@ on:
         type: string
         required: false
         default: fmt
+      update-day-deps:
+        description: >-
+          Refresh the day crates in Cargo.lock to the tip of what the app's git dependency tracks,
+          instead of building the revision the committed lock pins. Off by default: an app wants
+          its lock honoured, which is what makes a build reproducible and what lets the checks
+          above pass `--locked`. Turn it on for a repository whose job is to prove the CURRENT
+          framework still builds — the reference app — where a lock pinned at whatever revision
+          it was generated against would silently stop testing day at all.
+          The revision is resolved ONCE, in preflight, and every build and validate leg is moved
+          to that exact revision. Resolving per job instead would let a push land mid-run and give
+          `validate-rebuild` two different framework revisions to compare, which fails as an
+          unreproducible build when nothing is actually wrong.
+        type: boolean
+        required: false
+        default: false
       upload-ios:
         description: >-
           Upload the packed .ipa to App Store Connect on semantic-version tags, via the app's own
@@ -354,6 +369,9 @@ jobs:
       upload_ios: ${{ steps.stores.outputs.upload_ios }}
       upload_macos: ${{ steps.stores.outputs.upload_macos }}
       upload_play: ${{ steps.stores.outputs.upload_play }}
+      # The day revision every leg builds against, under inputs.update-day-deps. Empty when the
+      # input is off, which is the signal each leg reads to leave the committed lock alone.
+      day-rev: ${{ steps.day-dep.outputs.rev }}
     steps:
       # A full checkout, not the old website/site.toml sparse one: the first-pass checks read the
       # whole workspace and the store-upload detection greps the repo's Fastfiles.
@@ -364,13 +382,42 @@ jobs:
       # deep into their builds — that is the point of a preflight. Skipped for setup-command
       # callers: their project is generated later, so there is no source here to check.
       - uses: dtolnay/rust-toolchain@stable
-        if: inputs.setup-command == '' && inputs.preflight-checks != ''
+        if: inputs.setup-command == '' && (inputs.preflight-checks != '' || inputs.update-day-deps)
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         if: inputs.setup-command == '' && inputs.preflight-checks != ''
         with:
           workspaces: ${{ inputs.project-path }}
+
+      # Track the branch instead of the lock (inputs.update-day-deps). Must come BEFORE the checks
+      # below: they pass `--locked`, which fails outright on a lock that needs updating.
+      #
+      # Every day crate comes from one git source with no revision pinned in Cargo.toml, so they
+      # share a single locked revision and `-p day` moves all of them together.
+      - name: Resolve the day revision to track
+        id: day-dep
+        if: inputs.setup-command == '' && inputs.update-day-deps
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          cargo update -p day
+          # Read the revision back out of the lock rather than asking git for the branch tip: the
+          # lock is what the build actually uses, and it is the app's own Cargo.toml that decides
+          # which repository and branch that is — this workflow does not get to assume.
+          REV=$(python3 - <<'PY'
+          import re, pathlib, sys
+          for blk in pathlib.Path("Cargo.lock").read_text().split("[[package]]"):
+              if re.search(r'^name = "day"$', blk, re.M):
+                  m = re.search(r'^source = "git\+[^"]*#(\w+)"', blk, re.M)
+                  if m:
+                      print(m.group(1)); sys.exit(0)
+          sys.exit("no git-sourced `day` package in Cargo.lock — is this a Day app tracking day by git?")
+          PY
+          )
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "tracking day at $REV" >> "$GITHUB_STEP_SUMMARY"
+
       - name: First-pass checks
         if: inputs.setup-command == '' && inputs.preflight-checks != ''
         working-directory: ${{ inputs.project-path }}
@@ -613,6 +660,15 @@ jobs:
         with:
           targets: ${{ matrix.rust_targets }}
       - uses: Swatinem/rust-cache@v2
+
+      # The day revision preflight resolved (inputs.update-day-deps). `--precise` and not a bare
+      # `cargo update`, so every leg of the matrix compiles the SAME framework revision even if
+      # someone pushes to day while the run is in flight. Empty output = the input is off, and the
+      # committed lock stands.
+      - name: Track the day revision preflight resolved
+        if: needs.preflight.outputs.day-rev != ''
+        working-directory: ${{ inputs.project-path }}
+        run: cargo update -p day --precise "${{ needs.preflight.outputs.day-rev }}"
 
       # --- the day CLI (cargo install, per the day-version input) -------------------------
       - name: Set up the day CLI
@@ -1141,6 +1197,15 @@ jobs:
         with:
           name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
           path: shipped
+
+      # The same revision the build leg used, for the same reason — and here it is the whole point
+      # of the job: `day rebuild` compares its output against the artifact built above, so a
+      # different framework revision would read as an unreproducible build.
+      - name: Track the day revision preflight resolved
+        if: needs.preflight.outputs.day-rev != ''
+        working-directory: ${{ inputs.project-path }}
+        run: cargo update -p day --precise "${{ needs.preflight.outputs.day-rev }}"
+
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@main
         with:
