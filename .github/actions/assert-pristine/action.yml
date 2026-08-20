@@ -16,6 +16,23 @@ inputs:
       act on.
     required: false
     default: ""
+  ignore:
+    description: >-
+      Paths, space- or newline-separated, that may differ from the commit without failing the
+      check — matched whole, relative to `path`.
+
+      Defaults to `Cargo.lock`, because the workflow that calls this WRITES it: `Prepare
+      Cargo.lock` resolves one when the committed lock cannot describe the checkout, and
+      `update-day-deps` then moves the day crates with `cargo update -p day`. A repository that
+      commits no lock (the reference app tracks day's main, so a lock would pin nothing) gets one
+      created by the first cargo command either way. Failing here would be this workflow objecting
+      to its own edit, which is why the file went unnoticed until a packing job hit it.
+
+      Excluding it does not weaken the guarantee it exists for: which day revision the artifact was
+      built from is pinned by the preflight and replayed with `--precise` in the build and validate
+      legs, so the rebuild resolves the same graph rather than merely the same file.
+    required: false
+    default: "Cargo.lock"
 
 runs:
   using: composite
@@ -28,6 +45,8 @@ runs:
     - name: Check
       if: inputs.skip-reason == ''
       shell: bash
+      env:
+        IGNORE: ${{ inputs.ignore }}
       run: |
         set -euo pipefail
         # `day pack` records HEAD and a `dirty` flag in the SBOM, and `day rebuild` refuses an
@@ -36,7 +55,24 @@ runs:
         # belongs in $RUNNER_TEMP, not in the workspace, which on GitHub Actions IS the checkout.
         # Run this immediately before `day pack`, so a stray path names itself here instead of
         # surfacing a job later as "no rebuild can reproduce it".
-        changes="$(git -C "${{ inputs.path }}" status --porcelain)"
+        #
+        # `inputs.ignore` comes off the top: porcelain lines are a two-character status, a space,
+        # then the path, so the path is everything from column 4 and is compared WHOLE — an ignored
+        # `Cargo.lock` never covers `vendor/Cargo.lock`.
+        all="$(git -C "${{ inputs.path }}" status --porcelain)"
+        changes="$(printf '%s' "$all" | awk -v ig="$IGNORE" '
+          BEGIN { n = split(ig, a, /[[:space:]]+/); for (i = 1; i <= n; i++) if (a[i] != "") skip[a[i]] = 1 }
+          { if (!(substr($0, 4) in skip)) print }
+        ')"
+        # Say what was let through, so an ignored path is a decision on the record rather than a
+        # silent hole in the check.
+        ignored="$(printf '%s' "$all" | awk -v ig="$IGNORE" '
+          BEGIN { n = split(ig, a, /[[:space:]]+/); for (i = 1; i <= n; i++) if (a[i] != "") skip[a[i]] = 1 }
+          { if (substr($0, 4) in skip) print }
+        ')"
+        if [ -n "$ignored" ]; then
+          echo "::notice::pristine check ignored: $(printf '%s' "$ignored" | tr '\n' ' ')"
+        fi
         if [ -n "$changes" ]; then
           echo "::error::the working tree is not pristine, so the artifact this job packs could not be rebuilt from its commit"
           printf '%s\n' "$changes"
