@@ -390,6 +390,31 @@ jobs:
         with:
           workspaces: ${{ inputs.project-path }}
 
+      # A lock this checkout can actually resolve, before anything that depends on one.
+      #
+      # `--locked` below refuses to CREATE a lock, so a repository that commits none fails there.
+      # A committed lock can be just as unusable: `day patch --local` points the day dependencies
+      # at a checkout on the developer's machine, and cargo then REWRITES Cargo.lock to record
+      # those paths. Commit that and the lock describes a machine nobody else has — every day
+      # crate loses its `source`, so there is no `day` package from git to update and no revision
+      # to read back. Both dead ends have the same cure, so neither is worth distinguishing:
+      # `cargo metadata --locked` is precisely the question "does this lock describe this
+      # checkout, without changing it?", and a no means throw it away and resolve from the
+      # manifest. A healthy lock is left exactly as committed, which is what keeps `--locked`
+      # meaningful for the repositories that do pin.
+      - name: Prepare Cargo.lock
+        if: inputs.setup-command == '' && (inputs.preflight-checks != '' || inputs.update-day-deps)
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          if cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo.lock resolves this checkout as committed"
+          else
+            echo "::notice::Cargo.lock is missing or does not describe this checkout — resolving a fresh one"
+            rm -f Cargo.lock
+            cargo generate-lockfile
+          fi
+
       # Track the branch instead of the lock (inputs.update-day-deps). Must come BEFORE the checks
       # below: they pass `--locked`, which fails outright on a lock that needs updating.
       #
