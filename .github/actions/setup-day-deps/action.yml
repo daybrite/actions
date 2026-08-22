@@ -128,12 +128,14 @@ runs:
           # without libwebkitgtk-6.0-dev the GTK build fails looking for `libsoup-3.0.pc`, which
           # names a library nothing in the app mentions. xvfb + imagemagick are the walkthrough's
           # virtual display and its root-capture screenshot fallback; fonts-noto-cjk is why zh-CN
-          # screenshots have glyphs instead of tofu boxes.
+          # screenshots have glyphs instead of tofu boxes; xclip is the X11 clipboard broker
+          # day-part-clipboard shells out to — without it every copy/paste walkthrough step is a
+          # silent no-op (set_text drops the payload, get_text reads back nothing).
           case "${{ inputs.target }}" in
             linux-qt) PKGS="$PKGS qt6-webengine-dev" ;;
             linux-gtk) PKGS="$PKGS libwebkitgtk-6.0-dev" ;;
           esac
-          PKGS="$PKGS xvfb imagemagick fonts-noto-cjk"
+          PKGS="$PKGS xvfb imagemagick fonts-noto-cjk xclip"
         fi
         # shellcheck disable=SC2086 # deliberately word-split package lists
         sudo apt-get install -y --no-install-recommends $BASE $PKGS

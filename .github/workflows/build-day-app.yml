@@ -918,9 +918,10 @@ jobs:
           # Two runner shapes, chosen by what the installed CLI supports:
           #
           # NEW (day > 0.1.2): `day launch --locales` owns the per-locale loop, the variant
-          # naming, the linux headless plumbing (xvfb sized from Day.toml + WebKit flags,
-          # QT_QPA_PLATFORM=offscreen), and the iOS app-death retry — the knowledge this step
-          # used to inline, now shared with day's own CI through the CLI.
+          # naming, the linux headless plumbing (both toolkits under an xvfb sized from Day.toml,
+          # WebKit flags for gtk, the xcb platform for qt — a real display, so the system
+          # clipboard works), and the iOS app-death retry — the knowledge this step used to
+          # inline, now shared with day's own CI through the CLI.
           #
           # LEGACY (released CLIs without --locales): the previous inline wrapper, kept
           # verbatim so `day-version: latest` keeps working. DELETE this branch when the
