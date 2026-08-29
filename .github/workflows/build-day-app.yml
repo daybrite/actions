@@ -938,12 +938,24 @@ jobs:
           set -euo pipefail
           cd "$PWD"
           run_one() {
-            $DAY_BIN launch -p $COMBO --script "\$1"$THEMEFLAG$LOCFLAG$ENVS
+            local flags=()
+            for s in "\$@"; do flags+=(--script "\$s"); done
+            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$ENVS
           }
           EOF
-            for f in $LIST; do
-              echo "run_one \"$f\"" >> "$OUT"
-            done
+            if [ "$COMBO" = web-dom ]; then
+              # All scripts in ONE launch: web state (OPFS in the driver's throwaway browser
+              # profile, on an ephemeral loopback origin) lives exactly as long as the launch,
+              # so a seed script's store can only reach the scripts after it inside the same
+              # launch — the CLI runs them in sequence against the one app instance. Native
+              # targets keep one launch per script: their stores persist on disk, and the
+              # relaunch between scripts doubles as cold-start coverage over the stored data.
+              echo "run_one $LIST" >> "$OUT"
+            else
+              for f in $LIST; do
+                echo "run_one \"$f\"" >> "$OUT"
+              done
+            fi
           else
             if [ -n "${THEMES// /}" ]; then
               echo "::warning::themes: ignored — the installed day CLI predates --themes (day > 0.1.2)"

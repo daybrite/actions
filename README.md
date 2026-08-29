@@ -111,7 +111,7 @@ jobs:
 | `android-mdc` | ubuntu-latest | scripts on a KVM emulator (best-effort); packs `.apk` + `.aab` |
 | `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort); packs `.hap` |
 | `windows-xaml` | windows-latest | packs `.msix` + NSIS installer |
-| `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`); ships the built dist as a zip |
+| `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`), all of them in one launch — web storage lasts only as long as the launch; ships the built dist as a zip |
 | `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds; pack and scripts are best-effort |
 
 ### Device profiles
