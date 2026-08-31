@@ -134,8 +134,10 @@ Three jobs: `macos-appkit`, `ios-uikit · iPhone`, `ios-uikit · iPad Pro 13-inc
   takes the newest 26.x the image has. Runner images retire exact device names and runtimes, so a
   pinned "iPhone 15" on "iOS 26.2" would start failing on its own. Unmatched fails the job and
   lists what the image does have.
-- **`orientation`** is `portrait` (default) or `landscape`. It drives the simulator through
-  Simulator.app, so it needs the runner's GUI session — GitHub's macOS images have one.
+- **`orientation`** is `portrait` (default) or `landscape`, applied headlessly through
+  `devicectl device orientation set`. Needs Xcode 26.6 or newer, whose `devicectl` can drive
+  simulators; below that the job fails naming the version it found, rather than silently
+  capturing the wrong way up.
 - **`slug`** fixes the artifact suffix *and* the capture directory; it defaults to the kebab-cased
   device name. Captures land in `<target>/<slug>/<variant>/`, which is what stops two form factors
   of one target overwriting each other when the site job merges every screenshot artifact into one

@@ -187,8 +187,10 @@ on:
           image. An unmatched profile fails the job loudly, listing what the image does have;
           silently capturing the wrong form factor under this job's name would be worse.
 
-          `orientation` is `portrait` (default) or `landscape`. It drives the simulator through
-          Simulator.app, so it needs the runner's GUI session — which GitHub's macOS images have.
+          `orientation` is `portrait` (default) or `landscape`, applied headlessly through
+          `devicectl device orientation set` — so it needs Xcode 26.6 or newer on the runner,
+          whose `devicectl` can drive simulators. Below that the job fails naming the version it
+          found, rather than silently capturing the wrong way up.
 
           `slug` fixes the artifact suffix and the CAPTURE DIRECTORY; it defaults to the
           kebab-cased device name. Captures land in `<target>/<slug>/<variant>/`, so two devices
