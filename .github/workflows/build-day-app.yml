@@ -169,6 +169,40 @@ on:
         type: string
         required: false
         default: ""
+      ios-devices:
+        description: >-
+          Device profiles to run `ios-uikit`'s dayscripts on — one per LINE, each a
+          comma-separated set of `key=value` fields. Each becomes its own PARALLEL job, so two
+          profiles cost two jobs rather than two script runs in one.
+
+          Fields: `device` (required), `os`, `orientation`, `slug`.
+
+              ios-devices: |
+                device=iPhone,               os=iOS 26, orientation=portrait
+                device=iPad Pro 13-inch,     os=iOS 26, orientation=landscape, slug=ipad
+
+          `device` matches as a PREFIX against the simulators the runner has, and `os` as a major
+          version taking the newest point release installed — because runner images rotate exact
+          device names and runtimes, and a pinned "iPhone 15" quietly disappears with the next
+          image. An unmatched profile fails the job loudly, listing what the image does have;
+          silently capturing the wrong form factor under this job's name would be worse.
+
+          `orientation` is `portrait` (default) or `landscape`. It drives the simulator through
+          Simulator.app, so it needs the runner's GUI session — which GitHub's macOS images have.
+
+          `slug` fixes the artifact suffix and the CAPTURE DIRECTORY; it defaults to the
+          kebab-cased device name. Captures land in `<target>/<slug>/<variant>/`, so two devices
+          of one target no longer overwrite each other when the site job merges every screenshot
+          artifact into one tree — and the published gallery gives each its own column.
+
+          The FIRST profile is the primary one: it packs, uploads the packages and release
+          assets, and keeps the plain `screenshots-ios-uikit` artifact name. Later profiles build,
+          run the scripts, and upload `screenshots-ios-uikit-<slug>`.
+
+          Supersedes `ios-profiles`, which still works and is unchanged.
+        type: string
+        required: false
+        default: ""
       android-profiles:
         description: >-
           The same for `android-mdc`, as AVD device profiles from `avdmanager list device`
@@ -466,6 +500,7 @@ jobs:
           TARGETS_IN: ${{ inputs.targets }}
           ANDROID_ABIS_IN: ${{ inputs.android-abis }}
           IOS_PROFILES_IN: ${{ inputs.ios-profiles }}
+          IOS_DEVICES_IN: ${{ inputs.ios-devices }}
           ANDROID_PROFILES_IN: ${{ inputs.android-profiles }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
@@ -525,11 +560,18 @@ jobs:
           # into JSON is how a matrix ends up silently malformed.
           IOS_P="${IOS_PROFILES_IN:-}"
           ANDROID_P="${ANDROID_PROFILES_IN:-}"
-          case "$IOS_P$ANDROID_P" in
+          IOS_D="${IOS_DEVICES_IN:-}"
+          case "$IOS_P$ANDROID_P$IOS_D" in
             *'"'*) echo "::error::a device profile may not contain a double quote"; exit 1 ;;
           esac
+          # `ios-devices` supersedes `ios-profiles`; naming both is a mistake worth stopping on
+          # rather than silently preferring one.
+          if [ -n "$(echo "$IOS_P" | tr -d '[:space:]')" ] && [ -n "$(echo "$IOS_D" | tr -d '[:space:]')" ]; then
+            echo "::error::set either ios-profiles or ios-devices, not both (ios-devices supersedes it)"
+            exit 1
+          fi
           matrix=$(printf '%s' "$matrix" | jq -c \
-            --arg ios "$IOS_P" --arg android "$ANDROID_P" '
+            --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" '
             def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-")
                          | sub("^-+"; "") | sub("-+$"; "");
             def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -540,13 +582,31 @@ jobs:
                  | map(split("=") | if length > 1
                        then {device: (.[0] | trim), slug: (.[1] | trim | slugify)}
                        else {device: .[0], slug: (.[0] | slugify)} end);
+            # `ios-devices`: one profile per LINE, each `key=value` fields separated by commas.
+            # The comma is the field separator INSIDE a profile, which is exactly why profiles
+            # are separated by newlines rather than by commas as the older input does.
+            def fields($line):
+              $line | split(",") | map(trim) | map(select(length > 0))
+                    | map(split("=") | {key: (.[0] | trim | ascii_downcase),
+                                        value: (.[1:] | join("=") | trim)})
+                    | from_entries;
+            def devices($s):
+              $s | split("\n") | map(trim) | map(select(length > 0))
+                 | map(fields(.))
+                 | map(select(.device != null and .device != ""))
+                 | map({device: .device,
+                        os: (.os // ""),
+                        orientation: (.orientation // "portrait"),
+                        slug: ((.slug // .device) | slugify)});
             # What the target runs on when the caller named nothing — the devices the dedicated
             # legs used to hard-code, so an unconfigured run is unchanged.
             def fallback($t): if $t == "ios-uikit" then "iPhone"
                               elif $t == "android-mdc" then "pixel_5" else "" end;
             { include: [
                 .include[] as $r
-                | (if $r.target == "ios-uikit" then profiles($ios)
+                | (if $r.target == "ios-uikit" then
+                     (if ($iosdev | ascii_downcase | test("[a-z]")) then devices($iosdev)
+                      else profiles($ios) end)
                    elif $r.target == "android-mdc" then profiles($android)
                    else [] end) as $named
                 | (if ($named | length) == 0
@@ -554,6 +614,13 @@ jobs:
                 | range(0; $ps | length) as $i
                 | $r + {
                     profile: $ps[$i].device,
+                    # `ios-devices` extras; empty for a legacy `ios-profiles` row, which the
+                    # boot step reads as "any OS, portrait".
+                    device_os: ($ps[$i].os // ""),
+                    device_orientation: ($ps[$i].orientation // ""),
+                    # The capture-tree level. Empty for a single-device target, which keeps its
+                    # captures exactly where every existing site build expects them.
+                    device_slug: (if ($named | length) > 1 then $ps[$i].slug else "" end),
                     # Only the first row of a target packs, uploads packages, and feeds the
                     # release/signing/store jobs. The rest exist for their screenshots.
                     primary: ($i == 0),
@@ -897,6 +964,7 @@ jobs:
           THEMES_IN: ${{ inputs.themes }}
           LAUNCH_ENV_IN: ${{ inputs.launch-env }}
           COMBO: ${{ matrix.target }}
+          DEVICE_SLUG: ${{ matrix.device_slug }}
         run: |
           set -euo pipefail
           LIST=""
@@ -933,6 +1001,12 @@ jobs:
             [ -n "${LOCALES// /}" ] && LOCFLAG=" --locales \"$LOCALES\""
             THEMEFLAG=""
             [ -n "${THEMES// /}" ] && THEMEFLAG=" --themes \"$THEMES\""
+            # The capture-tree level for this job's device (docs/screenshots.md). Empty for a
+            # single-device target, which keeps its captures exactly where every existing site
+            # build expects them; set, it stops two form factors of one target overwriting each
+            # other when the site job merges every screenshot artifact into one tree.
+            DEVFLAG=""
+            [ -n "${DEVICE_SLUG:-}" ] && DEVFLAG=" --device-slug \"$DEVICE_SLUG\""
             cat > "$OUT" <<EOF
           #!/usr/bin/env bash
           set -euo pipefail
@@ -940,7 +1014,7 @@ jobs:
           run_one() {
             local flags=()
             for s in "\$@"; do flags+=(--script "\$s"); done
-            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$ENVS
+            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$ENVS
           }
           EOF
             if [ "$COMBO" = web-dom ]; then
@@ -1009,28 +1083,24 @@ jobs:
       # names every few months, so an exact "iPhone 15" would start failing the day the image
       # moves to 16. Unmatched is a hard error listing what the image does have — silently taking
       # some other device would upload screenshots of the wrong form factor under this job's name.
+      # The simulator this job's profile names. Selection, boot, wait and orientation are all
+      # `day devices boot` — the same command a developer runs, rather than a workflow-shaped
+      # copy of it that drifts (it used to be inline simctl + jq here).
       - name: Boot an iOS Simulator (${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'ios-uikit'
         env:
           PROFILE: ${{ matrix.profile }}
+          DEVICE_OS: ${{ matrix.device_os }}
+          DEVICE_ORIENTATION: ${{ matrix.device_orientation }}
         run: |
           set -euo pipefail
-          AVAILABLE=$(xcrun simctl list devices available --json)
-          UDID=$(printf '%s' "$AVAILABLE" \
-            | jq -r --arg p "$PROFILE" '[.devices[] | .[] | select(.name | startswith($p))][0].udid // empty')
-          if [ -z "$UDID" ]; then
-            echo "::error::no available simulator whose name starts with \"$PROFILE\" (ios-profiles)"
-            echo "available simulators on this image:"
-            printf '%s' "$AVAILABLE" | jq -r '[.devices[] | .[] | .name] | unique | .[]' | sed 's/^/  /'
-            exit 1
-          fi
-          NAME=$(printf '%s' "$AVAILABLE" | jq -r --arg u "$UDID" '[.devices[] | .[] | select(.udid == $u)][0].name')
-          echo "booting $NAME ($UDID) for profile \"$PROFILE\""
           # `day launch` drives every booted simulator, so this job owns exactly one. Each profile
-          # is its own job now, so there is no sibling run whose captures could be mixed in.
+          # is its own job, so there is no sibling run whose captures could be mixed in.
           xcrun simctl shutdown all || true
-          xcrun simctl boot "$UDID"
-          xcrun simctl bootstatus "$UDID" -b
+          args=(devices boot -p ios-uikit --device "$PROFILE" --wait)
+          [ -n "${DEVICE_OS:-}" ] && args+=(--os "$DEVICE_OS")
+          [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
+          "$DAY_BIN" "${args[@]}"
 
       - name: Run dayscripts (${{ matrix.target }})
         if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'

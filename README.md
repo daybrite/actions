@@ -95,7 +95,8 @@ jobs:
 | `launch-env` | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`. |
 | `locales` | — | Locales to run each dayscript under (each gets its own screenshot variant). |
 | `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
-| `ios-profiles` | — | Device profiles to run `ios-uikit`'s dayscripts on, comma-separated — each becomes its own parallel job (see [Device profiles](#device-profiles)). |
+| `ios-devices` | — | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…` — each its own parallel job, its own screenshot artifact and its own gallery column (see [Device profiles](#device-profiles)). |
+| `ios-profiles` | — | The older device-only form, comma-separated. Superseded by `ios-devices`; setting both is an error. |
 | `android-profiles` | — | The same for `android-mdc`, as `avdmanager list device` ids (`pixel_5`, `pixel_tablet`). |
 | `publish-release` | `true` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft — packages, checksums, launch scripts and notes all in place — for a human to review and publish. Its asset URLs, including the ones in the install commands, answer only once it is published. Never un-publishes a release that is already public. |
 | `deploy-web` | `false` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
@@ -115,6 +116,41 @@ jobs:
 | `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds; pack and scripts are best-effort |
 
 ### Device profiles
+
+`ios-devices` runs `ios-uikit`'s dayscripts on more than one device, naming each by device, OS and
+orientation. One profile per **line**; the comma separates the fields *inside* a profile:
+
+```yaml
+with:
+  targets: macos-appkit, ios-uikit
+  ios-devices: |
+    device=iPhone,           os=iOS 26, orientation=portrait
+    device=iPad Pro 13-inch, os=iOS 26, orientation=landscape, slug=ipad
+```
+
+Three jobs: `macos-appkit`, `ios-uikit · iPhone`, `ios-uikit · iPad Pro 13-inch`.
+
+- **`device` is a prefix and `os` a major version.** `iPad Pro` takes the first iPad Pro; `iOS 26`
+  takes the newest 26.x the image has. Runner images retire exact device names and runtimes, so a
+  pinned "iPhone 15" on "iOS 26.2" would start failing on its own. Unmatched fails the job and
+  lists what the image does have.
+- **`orientation`** is `portrait` (default) or `landscape`. It drives the simulator through
+  Simulator.app, so it needs the runner's GUI session — GitHub's macOS images have one.
+- **`slug`** fixes the artifact suffix *and* the capture directory; it defaults to the kebab-cased
+  device name. Captures land in `<target>/<slug>/<variant>/`, which is what stops two form factors
+  of one target overwriting each other when the site job merges every screenshot artifact into one
+  tree — and gives each its own **column in the published gallery**.
+- **The first profile is primary.** It packs, uploads the packages and release assets, and keeps
+  the plain `screenshots-ios-uikit` artifact name; later profiles upload
+  `screenshots-ios-uikit-<slug>` and never pack.
+
+A single profile writes no device level at all, so a one-device project's captures and gallery are
+exactly what they were.
+
+#### The older `ios-profiles` / `android-profiles`
+
+Still supported and unchanged; `ios-devices` supersedes `ios-profiles`, and setting both is an
+error. `android-devices` arrives with the emulator rework.
 
 `ios-profiles` and `android-profiles` run a mobile target's dayscripts on more than one device.
 Each profile becomes its own **parallel job**, so a second device costs wall clock only for its own
