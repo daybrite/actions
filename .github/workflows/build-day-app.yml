@@ -188,9 +188,13 @@ on:
           silently capturing the wrong form factor under this job's name would be worse.
 
           `orientation` is `portrait` (default) or `landscape`, applied headlessly through
-          `devicectl device orientation set` — so it needs Xcode 26.6 or newer on the runner,
-          whose `devicectl` can drive simulators. Below that the job fails naming the version it
-          found, rather than silently capturing the wrong way up.
+          `devicectl device orientation set` — which needs **macOS 26.6 or newer** on the runner.
+          Not Xcode: Xcode's `devicectl` is a shell wrapper that execs the system CoreDevice
+          framework, so the OS version decides, and no `xcode-select` changes it. GitHub's
+          `macos-26` image was still on 26.5.2 when this was written, where devicectl cannot see
+          simulators at all; such a runner warns and captures the device's default orientation
+          rather than failing the job, so an `orientation` that cannot be honored costs the
+          landscape framing and nothing else. It starts working when the image moves to 26.6.
 
           `slug` fixes the artifact suffix and the CAPTURE DIRECTORY; it defaults to the
           kebab-cased device name. Captures land in `<target>/<slug>/<variant>/`, so two devices
