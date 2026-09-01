@@ -1222,6 +1222,11 @@ jobs:
           echo "::endgroup::"
           # `--wait` blocks on sys.boot_completed rather than on adbd answering, and the serial
           # comes back on stdout so the walkthrough drives exactly the device this booted.
+          #
+          # The wait narrates itself: a line whenever adb's view or the boot properties change, a
+          # heartbeat every 15s, and the emulator's own log tail if it exits or times out. Set the
+          # caller's `day-verbose: true` (DAY_VERBOSE reaches here from the job env) for a line per
+          # poll instead — worth doing when a boot hangs rather than fails.
           SERIAL="$($DAY_BIN devices boot -p android-mdc --device "$AVD" --wait --headless \
             ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"})"
           echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
