@@ -1198,6 +1198,28 @@ jobs:
           $DAY_BIN devices setup -p android-mdc --name "$AVD" \
             --device "$PROFILE" --os "${DEVICE_OS:-36}" --arch x86_64 \
             ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"}
+          # Where the SDK tools actually put things, printed every run. This is cheap and it is
+          # the evidence that was missing when a runner created an AVD successfully and then
+          # reported having none: the tools keep `.android` wherever ANDROID_USER_HOME (or the
+          # older ANDROID_SDK_HOME) points, which need not be $HOME, and the layout differs
+          # between a developer's machine and this image.
+          echo "::group::Android SDK layout"
+          for v in HOME ANDROID_HOME ANDROID_SDK_ROOT ANDROID_USER_HOME ANDROID_SDK_HOME \
+                   ANDROID_AVD_HOME; do
+            printf '%-20s %s\n' "$v" "$(eval echo "\${$v:-<unset>}")"
+          done
+          echo "--- avdmanager list avd -c ---"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" list avd -c 2>&1 | head -20 || true
+          echo "--- emulator -list-avds ---"
+          "$ANDROID_HOME/emulator/emulator" -list-avds 2>&1 | head -20 || true
+          echo "--- .ini files under every candidate home ---"
+          for d in "${ANDROID_AVD_HOME:-}" "${ANDROID_USER_HOME:-}/avd" \
+                   "${ANDROID_SDK_HOME:-}/.android/avd" "$HOME/.android/avd"; do
+            [ -n "$d" ] && [ -d "$d" ] && { echo "  $d:"; ls -1 "$d" | sed 's/^/    /'; }
+          done
+          echo "--- day's own view ---"
+          $DAY_BIN devices list -p android-mdc 2>&1 | head -20 || true
+          echo "::endgroup::"
           # `--wait` blocks on sys.boot_completed rather than on adbd answering, and the serial
           # comes back on stdout so the walkthrough drives exactly the device this booted.
           SERIAL="$($DAY_BIN devices boot -p android-mdc --device "$AVD" --wait --headless \
