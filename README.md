@@ -97,7 +97,8 @@ jobs:
 | `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 | `ios-devices` | — | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…` — each its own parallel job, its own screenshot artifact and its own gallery column (see [Device profiles](#device-profiles)). |
 | `ios-profiles` | — | The older device-only form, comma-separated. Superseded by `ios-devices`; setting both is an error. |
-| `android-profiles` | — | The same for `android-mdc`, as `avdmanager list device` ids (`pixel_5`, `pixel_tablet`). |
+| `android-devices` | — | Device profiles for `android-mdc`, one per line as `device=…, os=…, orientation=…, slug=…` — the same shape as `ios-devices`, each its own parallel job, artifact and gallery column. |
+| `android-profiles` | — | Superseded by `android-devices`. The older form: `avdmanager list device` ids (`pixel_5`, `pixel_tablet`). |
 | `publish-release` | `true` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft — packages, checksums, launch scripts and notes all in place — for a human to review and publish. Its asset URLs, including the ones in the install commands, answer only once it is published. Never un-publishes a release that is already public. |
 | `deploy-web` | `false` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `web-deploy-tag-pattern` | — | When `deploy-web` is set: empty deploys on a push to the repo's default branch; a bash regex (e.g. `^v[0-9]+\.[0-9]+\.[0-9]+$`) deploys **only** on a tag matching it. Ignored unless `deploy-web` is true. |
@@ -150,6 +151,17 @@ Three jobs: `macos-appkit`, `ios-uikit · iPhone`, `ios-uikit · iPad Pro 13-inc
 - **`orientation`** is `portrait` (default) or `landscape`, applied headlessly through
   `devicectl device orientation set`. Nothing extra is needed to make it work: every macOS job runs
   on `xcode-27` (see [macOS runner](#macos-runner)).
+On Android the same fields mean the same things, with two differences worth knowing. `device` is an
+exact `avdmanager list device` id rather than a prefix — those ids are stable, so an unknown one
+should fail loudly — and `os` is an API level (`36`, `API 36`, `android-36`), defaulting to 36.
+
+The emulator itself is stood up by the `day` CLI rather than a third-party action: `day devices
+setup` creates the AVD from the profile (installing the system image if the cache missed), and
+`day devices boot --wait --headless` starts it, blocks on `sys.boot_completed`, applies the
+orientation and prints the serial the walkthrough then drives. Only the system image is cached,
+keyed by API level — the AVD is rebuilt each run in about a second, so it cannot go stale against a
+changed profile.
+
 - **`slug`** fixes the artifact suffix *and* the capture directory; it defaults to the kebab-cased
   device name. Captures land in `<target>/<slug>/<variant>/`, which is what stops two form factors
   of one target overwriting each other when the site job merges every screenshot artifact into one
@@ -163,8 +175,9 @@ exactly what they were.
 
 #### The older `ios-profiles` / `android-profiles`
 
-Still supported and unchanged; `ios-devices` supersedes `ios-profiles`, and setting both is an
-error. `android-devices` arrives with the emulator rework.
+Both are still supported and unchanged. `ios-devices` supersedes `ios-profiles` and
+`android-devices` supersedes `android-profiles`; setting a pair together is an error rather than a
+silent preference.
 
 `ios-profiles` and `android-profiles` run a mobile target's dayscripts on more than one device.
 Each profile becomes its own **parallel job**, so a second device costs wall clock only for its own

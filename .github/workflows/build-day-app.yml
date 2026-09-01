@@ -216,6 +216,26 @@ on:
         type: string
         required: false
         default: ""
+      android-devices:
+        description: >-
+          Device profiles for `android-mdc`, one per LINE, in the same shape as `ios-devices`:
+          `device=…, os=…, orientation=…, slug=…`. Each line becomes its own parallel job with its
+          own screenshot artifact and gallery column.
+
+              android-devices: |
+                device=pixel_5,      os=36, orientation=portrait
+                device=pixel_tablet, os=36, orientation=landscape, slug=tablet
+
+          `device` is an exact `avdmanager list device` id (`pixel_5`, `pixel_tablet`), not a
+          prefix — unlike iOS, these ids are stable and an unknown one should fail loudly. `os` is
+          an API level (`36`, `API 36`, `android-36`) and defaults to 36. `orientation` is
+          `portrait` (default) or `landscape`, applied to the DISPLAY by
+          `day devices boot --orientation` and verified there.
+
+          Supersedes `android-profiles`, which stays for callers that already set it.
+        type: string
+        required: false
+        default: ""
       app-id:
         description: >-
           The app's bundle id. When set, the linux legs verify the packed flatpak actually installs
@@ -514,6 +534,7 @@ jobs:
           IOS_PROFILES_IN: ${{ inputs.ios-profiles }}
           IOS_DEVICES_IN: ${{ inputs.ios-devices }}
           ANDROID_PROFILES_IN: ${{ inputs.android-profiles }}
+          ANDROID_DEVICES_IN: ${{ inputs.android-devices }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -578,17 +599,23 @@ jobs:
           IOS_P="${IOS_PROFILES_IN:-}"
           ANDROID_P="${ANDROID_PROFILES_IN:-}"
           IOS_D="${IOS_DEVICES_IN:-}"
-          case "$IOS_P$ANDROID_P$IOS_D" in
+          ANDROID_D="${ANDROID_DEVICES_IN:-}"
+          case "$IOS_P$ANDROID_P$IOS_D$ANDROID_D" in
             *'"'*) echo "::error::a device profile may not contain a double quote"; exit 1 ;;
           esac
-          # `ios-devices` supersedes `ios-profiles`; naming both is a mistake worth stopping on
-          # rather than silently preferring one.
+          # The `-devices` inputs supersede the `-profiles` ones; naming both is a mistake worth
+          # stopping on rather than silently preferring one.
           if [ -n "$(echo "$IOS_P" | tr -d '[:space:]')" ] && [ -n "$(echo "$IOS_D" | tr -d '[:space:]')" ]; then
             echo "::error::set either ios-profiles or ios-devices, not both (ios-devices supersedes it)"
             exit 1
           fi
+          if [ -n "$(echo "$ANDROID_P" | tr -d '[:space:]')" ] && [ -n "$(echo "$ANDROID_D" | tr -d '[:space:]')" ]; then
+            echo "::error::set either android-profiles or android-devices, not both (android-devices supersedes it)"
+            exit 1
+          fi
           matrix=$(printf '%s' "$matrix" | jq -c \
-            --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" '
+            --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" \
+            --arg androiddev "$ANDROID_D" '
             def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-")
                          | sub("^-+"; "") | sub("-+$"; "");
             def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -624,7 +651,9 @@ jobs:
                 | (if $r.target == "ios-uikit" then
                      (if ($iosdev | ascii_downcase | test("[a-z]")) then devices($iosdev)
                       else profiles($ios) end)
-                   elif $r.target == "android-mdc" then profiles($android)
+                   elif $r.target == "android-mdc" then
+                     (if ($androiddev | ascii_downcase | test("[a-z]")) then devices($androiddev)
+                      else profiles($android) end)
                    else [] end) as $named
                 | (if ($named | length) == 0
                    then [{device: fallback($r.target), slug: ""}] else $named end) as $ps
@@ -1133,6 +1162,37 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      # The system IMAGE is the only slow part of standing an emulator up — hundreds of
+      # megabytes, and identical for every run on that API level. The AVD built from it is made
+      # fresh each run by `day devices setup`, which takes about a second and so can never go
+      # stale against a changed profile.
+      - name: Cache the Android system image
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.ANDROID_HOME }}/system-images/android-${{ matrix.device_os || '36' }}
+          key: android-sysimg-${{ matrix.device_os || '36' }}-x86_64-google_apis
+      - name: Set up and boot the emulator (day devices)
+        id: androidemu
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+        env:
+          PROFILE: ${{ matrix.profile }}
+          DEVICE_OS: ${{ matrix.device_os }}
+          DEVICE_ORIENTATION: ${{ matrix.device_orientation }}
+        run: |
+          set -euo pipefail
+          # One AVD per profile, made from the same command a developer runs. The workflow holds
+          # no Android SDK knowledge of its own any more — which system image an API level wants,
+          # that `avdmanager` writes `hw.keyboard=no`, how to start headless — all of it lives in
+          # the CLI, where a developer gets it too.
+          AVD="$($DAY_BIN devices setup -p android-mdc \
+            --device "$PROFILE" --os "${DEVICE_OS:-36}" --arch x86_64 \
+            ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"})"
+          # `--wait` blocks on sys.boot_completed rather than on adbd answering, and the serial
+          # comes back on stdout so the walkthrough drives exactly the device this booted.
+          SERIAL="$($DAY_BIN devices boot -p android-mdc --device "$AVD" --wait --headless \
+            ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"})"
+          echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
       - name: Run dayscripts (android emulator · ${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
         # NOT best-effort. This was `continue-on-error: true` for a known intermittent
@@ -1143,20 +1203,10 @@ jobs:
         # walkthrough passed. The app-start flake is handled where it belongs, by the CLI's own
         # retry on engine loss (`day launch --locales`), which distinguishes a dead app from a
         # failed assertion; a flake that outlives that retry should be seen, not hidden.
-        uses: reactivecircus/android-emulator-runner@v2
         env:
           DAY_ANDROID_ABI: x86_64
-        with:
-          api-level: 34
-          arch: x86_64
-          # The AVD device profile for this job (inputs.android-profiles), passed verbatim: these
-          # are exact `avdmanager list device` ids, not prefixes, and the action fails on an
-          # unknown one. A tablet id (pixel_tablet) is 600dp+ wide, so the navigation split tiles
-          # both panes (docs/size-classes.md) — the same app, a different form factor.
-          profile: ${{ matrix.profile }}
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-          script: bash ${{ runner.temp }}/run-dayscripts.sh
+          ANDROID_SERIAL: ${{ steps.androidemu.outputs.serial }}
+        run: bash ${{ runner.temp }}/run-dayscripts.sh
 
       # --- HarmonyOS: the Oniro emulator, the same recipe daybrite/day's own CI runs.
       # Best-effort from boot to walkthrough: the QEMU guest is slow and occasionally flaky,
