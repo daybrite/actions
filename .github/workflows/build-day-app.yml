@@ -652,7 +652,11 @@ jobs:
                      (if ($iosdev | ascii_downcase | test("[a-z]")) then devices($iosdev)
                       else profiles($ios) end)
                    elif $r.target == "android-mdc" then
-                     (if ($androiddev | ascii_downcase | test("[a-z]")) then devices($androiddev)
+                     # API level down to digits: a caller may write 36, API 36 or android-36, and
+                     # the level reaches a CACHE PATH as well as the CLI. The CLI reads all three,
+                     # but `system-images/android-API 36` caches nothing.
+                     (if ($androiddev | ascii_downcase | test("[a-z]")) then
+                        (devices($androiddev) | map(.os |= gsub("[^0-9]"; "")))
                       else profiles($android) end)
                    else [] end) as $named
                 | (if ($named | length) == 0
@@ -1185,9 +1189,15 @@ jobs:
           # no Android SDK knowledge of its own any more — which system image an API level wants,
           # that `avdmanager` writes `hw.keyboard=no`, how to start headless — all of it lives in
           # the CLI, where a developer gets it too.
-          AVD="$($DAY_BIN devices setup -p android-mdc \
+          #
+          # The name is CHOSEN here rather than read back from the command. `setup` does print it,
+          # but making the next step depend on that means one stray line of tool output on stdout
+          # breaks the run — which is exactly what happened when sdkmanager's download bars landed
+          # there and the whole blob was passed to `--device`. Naming it needs no such trust.
+          AVD="day-ci-$(printf %s "$PROFILE" | tr -cs '[:alnum:]' '-')"
+          $DAY_BIN devices setup -p android-mdc --name "$AVD" \
             --device "$PROFILE" --os "${DEVICE_OS:-36}" --arch x86_64 \
-            ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"})"
+            ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"}
           # `--wait` blocks on sys.boot_completed rather than on adbd answering, and the serial
           # comes back on stdout so the walkthrough drives exactly the device this booted.
           SERIAL="$($DAY_BIN devices boot -p android-mdc --device "$AVD" --wait --headless \
