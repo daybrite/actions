@@ -135,12 +135,13 @@ Three jobs: `macos-appkit`, `ios-uikit · iPhone`, `ios-uikit · iPad Pro 13-inc
   pinned "iPhone 15" on "iOS 26.2" would start failing on its own. Unmatched fails the job and
   lists what the image does have.
 - **`orientation`** is `portrait` (default) or `landscape`, applied headlessly through
-  `devicectl device orientation set`. This needs **macOS 26.6 or newer** — not a particular Xcode,
-  because Xcode's `devicectl` execs the system CoreDevice framework and the OS version is what
-  decides. GitHub's `macos-26` image was still on 26.5.2 when this was written, where devicectl
-  cannot see simulators; that runner warns and captures the device's default orientation instead
-  of failing, and starts honoring `orientation` once the image moves to 26.6. An iPad captures its
-  wide layout either way — 1024pt portrait is already past the 840pt breakpoint.
+  `devicectl device orientation set`. This needs **Xcode 27 or newer** on the runner. Xcode's
+  `devicectl` is a wrapper that execs the CoreDevice framework, and Xcode *installs* that
+  framework, so the Xcode decides and the macOS version does not: Xcode 26.6 ships CoreDevice
+  518.33, which cannot see simulators, and Xcode 27 ships 642.15, which drives them.
+- **`runner`** overrides the runner label for that one profile. GitHub's default macOS images top
+  out at Xcode 26.6, so pair `orientation=landscape` with `runner=xcode-27` — an arm64 image whose
+  default Xcode is 27. Profiles that name no runner are unaffected.
 - **`slug`** fixes the artifact suffix *and* the capture directory; it defaults to the kebab-cased
   device name. Captures land in `<target>/<slug>/<variant>/`, which is what stops two form factors
   of one target overwriting each other when the site job merges every screenshot artifact into one

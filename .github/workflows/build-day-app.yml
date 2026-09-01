@@ -175,7 +175,7 @@ on:
           comma-separated set of `key=value` fields. Each becomes its own PARALLEL job, so two
           profiles cost two jobs rather than two script runs in one.
 
-          Fields: `device` (required), `os`, `orientation`, `slug`.
+          Fields: `device` (required), `os`, `orientation`, `slug`, `runner`.
 
               ios-devices: |
                 device=iPhone,               os=iOS 26, orientation=portrait
@@ -190,11 +190,19 @@ on:
           `orientation` is `portrait` (default) or `landscape`, applied headlessly through
           `devicectl device orientation set` — which needs **macOS 26.6 or newer** on the runner.
           Not Xcode: Xcode's `devicectl` is a shell wrapper that execs the system CoreDevice
-          framework, so the OS version decides, and no `xcode-select` changes it. GitHub's
-          `macos-26` image was still on 26.5.2 when this was written, where devicectl cannot see
-          simulators at all; such a runner warns and captures the device's default orientation
-          rather than failing the job, so an `orientation` that cannot be honored costs the
-          landscape framing and nothing else. It starts working when the image moves to 26.6.
+          framework, so the OS version decides, and no `xcode-select` changes it.
+
+          Which `devicectl` a runner has is decided by its XCODE, not by its macOS. Xcode's
+          `devicectl` is a shell wrapper that execs
+          `/Library/Developer/PrivateFrameworks/CoreDevice.framework/.../devicectl`, and Xcode
+          INSTALLS that framework — its `xcodebuild -runFirstLaunch` puts the version it ships in
+          place. Xcode 26.6 carries CoreDevice 518.33, which cannot see simulators at all; Xcode 27
+          carries 642.15, which drives them. Two Macs on the same macOS therefore differ entirely,
+          depending on which Xcode last ran its first launch.
+
+          `runner` is what that leaves you needing: GitHub's default macOS images top out at
+          Xcode 26.6, so a profile asking for `landscape` should also ask for `runner=xcode-27`,
+          the arm64 image whose default Xcode is 27. Profiles that name no runner are unchanged.
 
           `slug` fixes the artifact suffix and the CAPTURE DIRECTORY; it defaults to the
           kebab-cased device name. Captures land in `<target>/<slug>/<variant>/`, so two devices
@@ -603,6 +611,7 @@ jobs:
                  | map({device: .device,
                         os: (.os // ""),
                         orientation: (.orientation // "portrait"),
+                        runner: (.runner // ""),
                         slug: ((.slug // .device) | slugify)});
             # What the target runs on when the caller named nothing — the devices the dedicated
             # legs used to hard-code, so an unconfigured run is unchanged.
@@ -627,6 +636,11 @@ jobs:
                     # The capture-tree level. Empty for a single-device target, which keeps its
                     # captures exactly where every existing site build expects them.
                     device_slug: (if ($named | length) > 1 then $ps[$i].slug else "" end),
+                    # A profile may name its own runner, which is how one device gets an image
+                    # the others do not need — `orientation` needs a `devicectl` that can drive
+                    # simulators, and that comes from the image's XCODE (see the input docs).
+                    # Everything else about the row stays as the target declared it.
+                    os: (if ($ps[$i].runner // "") != "" then $ps[$i].runner else $r.os end),
                     # Only the first row of a target packs, uploads packages, and feeds the
                     # release/signing/store jobs. The rest exist for their screenshots.
                     primary: ($i == 0),
