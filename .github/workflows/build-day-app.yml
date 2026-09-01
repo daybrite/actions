@@ -175,7 +175,7 @@ on:
           comma-separated set of `key=value` fields. Each becomes its own PARALLEL job, so two
           profiles cost two jobs rather than two script runs in one.
 
-          Fields: `device` (required), `os`, `orientation`, `slug`, `runner`.
+          Fields: `device` (required), `os`, `orientation`, `slug`.
 
               ios-devices: |
                 device=iPhone,               os=iOS 26, orientation=portrait
@@ -188,21 +188,11 @@ on:
           silently capturing the wrong form factor under this job's name would be worse.
 
           `orientation` is `portrait` (default) or `landscape`, applied headlessly through
-          `devicectl device orientation set` — which needs **macOS 26.6 or newer** on the runner.
-          Not Xcode: Xcode's `devicectl` is a shell wrapper that execs the system CoreDevice
-          framework, so the OS version decides, and no `xcode-select` changes it.
-
-          Which `devicectl` a runner has is decided by its XCODE, not by its macOS. Xcode's
-          `devicectl` is a shell wrapper that execs
-          `/Library/Developer/PrivateFrameworks/CoreDevice.framework/.../devicectl`, and Xcode
-          INSTALLS that framework — its `xcodebuild -runFirstLaunch` puts the version it ships in
-          place. Xcode 26.6 carries CoreDevice 518.33, which cannot see simulators at all; Xcode 27
-          carries 642.15, which drives them. Two Macs on the same macOS therefore differ entirely,
-          depending on which Xcode last ran its first launch.
-
-          `runner` is what that leaves you needing: GitHub's default macOS images top out at
-          Xcode 26.6, so a profile asking for `landscape` should also ask for `runner=xcode-27`,
-          the arm64 image whose default Xcode is 27. Profiles that name no runner are unchanged.
+          `devicectl device orientation set`. It asks nothing of the caller: every macOS job here
+          runs on `xcode-27`, whose Xcode installs a `devicectl` that can drive simulators. Which
+          `devicectl` a machine has is decided by its XCODE and not by its macOS — Xcode ships the
+          CoreDevice framework its wrapper execs, and 26.6 ships a version (518.33) that cannot see
+          a simulator at all where 27 ships one (642.15) that turns them.
 
           `slug` fixes the artifact suffix and the CAPTURE DIRECTORY; it defaults to the
           kebab-cased device name. Captures land in `<target>/<slug>/<variant>/`, so two devices
@@ -406,6 +396,14 @@ jobs:
     name: preflight
     runs-on: ubuntu-latest
     outputs:
+      # Every macOS job in this workflow runs here, defined ONCE so the floor moves deliberately.
+      #
+      # `xcode-27` is a FLOOR, not a preference. Turning a simulator headlessly needs a `devicectl`
+      # that can see simulators, and that comes from the CoreDevice framework XCODE installs, not
+      # from macOS: Xcode 26.6 ships CoreDevice 518.33, which cannot see a simulator at all, and
+      # Xcode 27 ships 642.15, which drives them. Every default GitHub macOS image stops at 26.6,
+      # so on those a device profile asking for `landscape` captured portrait and said nothing.
+      macos_runner: ${{ steps.plan.outputs.macos_runner }}
       # The BUILD matrix: one row per target, times each mobile target's device profiles.
       matrix: ${{ steps.plan.outputs.matrix }}
       # The same rows before that expansion — one per target, the shape every job that consumes a
@@ -522,6 +520,11 @@ jobs:
           PROJECT_PATH: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
+          # THE macOS runner floor — see the `macos_runner` output above for why it is xcode-27.
+          # Defined here and echoed out, so the matrix rows below and the standalone macOS jobs
+          # (signing, the two store uploads) can never drift apart.
+          MACOS_RUNNER=xcode-27
+          echo "macos_runner=$MACOS_RUNNER" >> "$GITHUB_OUTPUT"
           # Map the requested Android ABIs (inputs.android-abis) to their rustup targets, so the
           # android-mdc leg installs exactly what `day pack` cross-compiles into the package.
           # x86_64-linux-android is always kept on top for the x86_64 emulator screenshot leg,
@@ -544,10 +547,10 @@ jobs:
             # their pack + script steps are best-effort, mirroring their walkthrough-coverage
             # role in daybrite/day's own CI.
             case "$t" in
-              macos-appkit)   row='{"target":"macos-appkit","os":"macos-latest","toolkit":"appkit","rust_targets":"","tier":"primary"}' ;;
-              macos-gtk)      row='{"target":"macos-gtk","os":"macos-latest","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
-              macos-qt)       row='{"target":"macos-qt","os":"macos-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
-              ios-uikit)      row='{"target":"ios-uikit","os":"macos-latest","toolkit":"uikit","rust_targets":"aarch64-apple-ios-sim,aarch64-apple-ios","tier":"primary"}' ;;
+              macos-appkit)   row='{"target":"macos-appkit","os":"'"$MACOS_RUNNER"'","toolkit":"appkit","rust_targets":"","tier":"primary"}' ;;
+              macos-gtk)      row='{"target":"macos-gtk","os":"'"$MACOS_RUNNER"'","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
+              macos-qt)       row='{"target":"macos-qt","os":"'"$MACOS_RUNNER"'","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
+              ios-uikit)      row='{"target":"ios-uikit","os":"'"$MACOS_RUNNER"'","toolkit":"uikit","rust_targets":"aarch64-apple-ios-sim,aarch64-apple-ios","tier":"primary"}' ;;
               linux-gtk)      row='{"target":"linux-gtk","os":"ubuntu-latest","toolkit":"gtk","rust_targets":"","tier":"primary"}' ;;
               linux-qt)       row='{"target":"linux-qt","os":"ubuntu-latest","toolkit":"qt","rust_targets":"","tier":"primary"}' ;;
               android-mdc) row="{\"target\":\"android-mdc\",\"os\":\"ubuntu-latest\",\"toolkit\":\"android\",\"rust_targets\":\"$android_rust\",\"tier\":\"primary\"}" ;;
@@ -611,7 +614,6 @@ jobs:
                  | map({device: .device,
                         os: (.os // ""),
                         orientation: (.orientation // "portrait"),
-                        runner: (.runner // ""),
                         slug: ((.slug // .device) | slugify)});
             # What the target runs on when the caller named nothing — the devices the dedicated
             # legs used to hard-code, so an unconfigured run is unchanged.
@@ -636,11 +638,6 @@ jobs:
                     # The capture-tree level. Empty for a single-device target, which keeps its
                     # captures exactly where every existing site build expects them.
                     device_slug: (if ($named | length) > 1 then $ps[$i].slug else "" end),
-                    # A profile may name its own runner, which is how one device gets an image
-                    # the others do not need — `orientation` needs a `devicectl` that can drive
-                    # simulators, and that comes from the image's XCODE (see the input docs).
-                    # Everything else about the row stays as the target declared it.
-                    os: (if ($ps[$i].runner // "") != "" then $ps[$i].runner else $r.os end),
                     # Only the first row of a target packs, uploads packages, and feeds the
                     # release/signing/store jobs. The rest exist for their screenshots.
                     primary: ($i == 0),
@@ -1372,7 +1369,7 @@ jobs:
     # release signing. Skipping is the one outcome a release must never take quietly — if the
     # appkit leg itself failed, this job fails at download-artifact instead, which is honest.
     if: ${{ !cancelled() && inputs.signing-environment != '' && needs.preflight.outputs.release == 'true' }}
-    runs-on: macos-26
+    runs-on: ${{ needs.preflight.outputs.macos_runner }}
     environment: ${{ inputs.signing-environment }}
     permissions:
       contents: read
@@ -1741,7 +1738,7 @@ jobs:
     name: upload (ios app store)
     needs: [preflight, build]
     if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_ios == 'true' }}
-    runs-on: macos-latest
+    runs-on: ${{ needs.preflight.outputs.macos_runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -1785,7 +1782,7 @@ jobs:
     name: upload (mac app store)
     needs: [preflight, build, sign-macos]
     if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_macos == 'true' }}
-    runs-on: macos-latest
+    runs-on: ${{ needs.preflight.outputs.macos_runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

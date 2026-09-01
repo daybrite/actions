@@ -104,10 +104,23 @@ jobs:
 
 ### Targets and runners
 
+<a id="macos-runner"></a>
+Every macOS job — the Apple targets, the portable-toolkit builds on macOS, code signing and both
+store uploads — runs on **`xcode-27`**, and never on an older image. That is a floor rather than a
+preference: turning a simulator headlessly needs a `devicectl` that can see simulators, and a
+machine gets that from the CoreDevice framework its **Xcode** installs, not from its macOS. Xcode
+26.6 ships CoreDevice 518.33, which cannot see a simulator at all; Xcode 27 ships 642.15, which
+turns them. Every default GitHub macOS image stops at 26.6, so on those a device profile asking for
+`landscape` captured portrait and reported success. The label is defined once, as the preflight
+job's `macos_runner` output.
+
+That image carries a single iOS runtime, so device profiles should leave `os=` unset and take the
+newest installed rather than pinning a major that the next image drops.
+
 | target | runner | notes |
 |---|---|---|
-| `macos-appkit` | macos-latest | packs a `.dmg` |
-| `ios-uikit` | macos-latest | Simulator scripts; packs an unsigned device `.ipa` for sideloading/self-signing (a signed `.ipa` with signing secrets) |
+| `macos-appkit` | xcode-27 | packs a `.dmg` |
+| `ios-uikit` | xcode-27 | Simulator scripts; packs an unsigned device `.ipa` for sideloading/self-signing (a signed `.ipa` with signing secrets) |
 | `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` **and** a `.appimage`, and the release check installs the one and runs the other |
 | `android-mdc` | ubuntu-latest | scripts on a KVM emulator (best-effort); packs `.apk` + `.aab` |
 | `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort); packs `.hap` |
@@ -135,13 +148,8 @@ Three jobs: `macos-appkit`, `ios-uikit · iPhone`, `ios-uikit · iPad Pro 13-inc
   pinned "iPhone 15" on "iOS 26.2" would start failing on its own. Unmatched fails the job and
   lists what the image does have.
 - **`orientation`** is `portrait` (default) or `landscape`, applied headlessly through
-  `devicectl device orientation set`. This needs **Xcode 27 or newer** on the runner. Xcode's
-  `devicectl` is a wrapper that execs the CoreDevice framework, and Xcode *installs* that
-  framework, so the Xcode decides and the macOS version does not: Xcode 26.6 ships CoreDevice
-  518.33, which cannot see simulators, and Xcode 27 ships 642.15, which drives them.
-- **`runner`** overrides the runner label for that one profile. GitHub's default macOS images top
-  out at Xcode 26.6, so pair `orientation=landscape` with `runner=xcode-27` — an arm64 image whose
-  default Xcode is 27. Profiles that name no runner are unaffected.
+  `devicectl device orientation set`. Nothing extra is needed to make it work: every macOS job runs
+  on `xcode-27` (see [macOS runner](#macos-runner)).
 - **`slug`** fixes the artifact suffix *and* the capture directory; it defaults to the kebab-cased
   device name. Captures land in `<target>/<slug>/<variant>/`, which is what stops two form factors
   of one target overwriting each other when the site job merges every screenshot artifact into one
