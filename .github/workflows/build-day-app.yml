@@ -1370,6 +1370,17 @@ jobs:
           name: ${{ matrix.shots_artifact }}
           path: ${{ inputs.project-path }}/build/day/screenshots/
           if-no-files-found: ignore
+      # The emulator's own output, kept by `day devices boot` on the host. A walkthrough that ends
+      # in "the device stopped answering" leaves no crash to find — the guest froze, and every adb
+      # call after that returns nothing — so what the emulator wrote is the one record of why.
+      # The CLI prints its tail into the job log; the whole file goes here.
+      - name: Upload the emulator log (android-mdc)
+        if: failure() && matrix.target == 'android-mdc'
+        uses: actions/upload-artifact@v7
+        with:
+          name: emulator-log-${{ matrix.target }}-${{ matrix.profile }}
+          path: /tmp/day-emulator-*.log
+          if-no-files-found: ignore
 
   # --- release assets (semantic-version tags only) ------------------------------------------
   # Attaches every package and a per-target screenshot zip to the GitHub release for the tag,
