@@ -929,6 +929,12 @@ jobs:
         if: inputs.assert-pristine
         uses: daybrite/actions/.github/actions/assert-pristine@main
         with:
+          # The project directory, so the action's default `Cargo.lock` ignore names THIS
+          # project's lock — the one `Prepare Cargo.lock` and `update-day-deps` rewrite — even
+          # when the project lives in a subdirectory of its repository (a piece's `demo/`).
+          # The whole repository is still checked: git status reports every path from any
+          # directory.
+          path: ${{ inputs.project-path }}
           # A `setup-command` caller scaffolds the project into the workspace, so the tree is
           # untracked BY DESIGN and no commit describes what gets packed. Skipping says that out
           # loud rather than failing on a condition the caller cannot fix.

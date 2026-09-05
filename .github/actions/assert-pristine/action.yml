@@ -19,7 +19,12 @@ inputs:
   ignore:
     description: >-
       Paths, space- or newline-separated, that may differ from the commit without failing the
-      check — matched whole, relative to `path`.
+      check — matched whole, relative to `path`. `git status --porcelain` reports every path
+      relative to the REPOSITORY root whatever directory it runs in, so an entry is compared with
+      `path`'s own prefix in front of it: with `path: demo`, `Cargo.lock` means `demo/Cargo.lock`.
+      (The workflow that packs a project in a subdirectory found this the hard way — its own
+      rewrite of the project's lock failed the check because the default `Cargo.lock` was only
+      ever compared against the root's.)
 
       Defaults to `Cargo.lock`, because the workflow that calls this WRITES it: `Prepare
       Cargo.lock` resolves one when the committed lock cannot describe the checkout, and
@@ -59,15 +64,19 @@ runs:
         # `inputs.ignore` comes off the top: porcelain lines are a two-character status, a space,
         # then the path, so the path is everything from column 4 and is compared WHOLE — an ignored
         # `Cargo.lock` never covers `vendor/Cargo.lock`.
+        # Porcelain paths are relative to the repository root regardless of `-C`, so the ignore
+        # list is resolved under the checked directory's prefix (`demo/` for `path: demo`, empty
+        # at the root) before comparing.
+        prefix="$(git -C "${{ inputs.path }}" rev-parse --show-prefix)"
         all="$(git -C "${{ inputs.path }}" status --porcelain)"
-        changes="$(printf '%s' "$all" | awk -v ig="$IGNORE" '
-          BEGIN { n = split(ig, a, /[[:space:]]+/); for (i = 1; i <= n; i++) if (a[i] != "") skip[a[i]] = 1 }
+        changes="$(printf '%s' "$all" | awk -v ig="$IGNORE" -v pre="$prefix" '
+          BEGIN { n = split(ig, a, /[[:space:]]+/); for (i = 1; i <= n; i++) if (a[i] != "") skip[pre a[i]] = 1 }
           { if (!(substr($0, 4) in skip)) print }
         ')"
         # Say what was let through, so an ignored path is a decision on the record rather than a
         # silent hole in the check.
-        ignored="$(printf '%s' "$all" | awk -v ig="$IGNORE" '
-          BEGIN { n = split(ig, a, /[[:space:]]+/); for (i = 1; i <= n; i++) if (a[i] != "") skip[a[i]] = 1 }
+        ignored="$(printf '%s' "$all" | awk -v ig="$IGNORE" -v pre="$prefix" '
+          BEGIN { n = split(ig, a, /[[:space:]]+/); for (i = 1; i <= n; i++) if (a[i] != "") skip[pre a[i]] = 1 }
           { if (substr($0, 4) in skip) print }
         ')"
         if [ -n "$ignored" ]; then
