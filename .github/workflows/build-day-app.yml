@@ -154,7 +154,10 @@ on:
           A profile is matched as a PREFIX against the simulators available on the runner —
           `iPhone` takes the first iPhone, `iPad Pro` the first iPad Pro — because runner images
           rotate exact device names, and a pinned "iPhone 15" quietly disappears with the next
-          image. An unmatched prefix fails the job loudly, listing what the image does have.
+          image. A `*` stands for any run of characters, and the newest model wins among several
+          matches: `iPhone * Pro Max` is the largest iPhone the image carries, whose captures are
+          the 6.9-inch size App Store Connect requires for iPhone screenshots. An unmatched prefix
+          fails the job loudly, listing what the image does have.
 
           Append `=<slug>` to fix the artifact suffix for a long device name
           (`iPad Pro 13-inch (M4)=ipad` uploads `screenshots-ios-uikit-ipad`); the default slug
@@ -164,7 +167,7 @@ on:
           assets, and keeps the plain `screenshots-ios-uikit` artifact name, so every existing
           consumer is unaffected. Later profiles build, run the scripts, and upload
           `screenshots-ios-uikit-<slug>` — they never pack, which is what keeps a tag build from
-          racing two identical release assets. Unset = one job on the first iPhone, named
+          racing two identical release assets. Unset = one job on `iPhone * Pro Max`, named
           `ios-uikit` exactly as before.
         type: string
         required: false
@@ -178,14 +181,18 @@ on:
           Fields: `device` (required), `os`, `orientation`, `slug`.
 
               ios-devices: |
-                device=iPhone,               os=iOS 26, orientation=portrait
+                device=iPhone * Pro Max,     os=iOS 26, orientation=portrait,  slug=iphone
                 device=iPad Pro 13-inch,     os=iOS 26, orientation=landscape, slug=ipad
 
           `device` matches as a PREFIX against the simulators the runner has, and `os` as a major
           version taking the newest point release installed — because runner images rotate exact
           device names and runtimes, and a pinned "iPhone 15" quietly disappears with the next
-          image. An unmatched profile fails the job loudly, listing what the image does have;
-          silently capturing the wrong form factor under this job's name would be worse.
+          image. A `*` stands for any run of characters and the newest model wins, so
+          `iPhone * Pro Max` is the largest iPhone the image carries: its captures are the
+          6.9-inch size App Store Connect requires for iPhone screenshots, where a plain `iPhone`
+          landed on a 6.3-inch model whose captures the store takes only as an optional set. An
+          unmatched profile fails the job loudly, listing what the image does have; silently
+          capturing the wrong form factor under this job's name would be worse.
 
           `orientation` is `portrait` (default) or `landscape`, applied headlessly through
           `devicectl device orientation set`. It asks nothing of the caller: every macOS job here
@@ -644,7 +651,8 @@ jobs:
                         slug: ((.slug // .device) | slugify)});
             # What the target runs on when the caller named nothing — the devices the dedicated
             # legs used to hard-code, so an unconfigured run is unchanged.
-            def fallback($t): if $t == "ios-uikit" then "iPhone"
+            # The iPhone is the largest one the image has: the store-screenshot size.
+            def fallback($t): if $t == "ios-uikit" then "iPhone * Pro Max"
                               elif $t == "android-mdc" then "pixel_5" else "" end;
             { include: [
                 .include[] as $r
