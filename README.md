@@ -2,7 +2,7 @@
 
 Reusable GitHub workflows for [Day](https://daybrite.dev) projects.
 
-## build-day-app
+## dayapp
 
 Builds a conventional Day project for a set of platform-toolkit targets, runs its dayscripts
 (capturing screenshots), and packages it for distribution with `day pack`. A `preflight` job runs
@@ -71,7 +71,7 @@ permissions:
   contents: write   # release-asset upload on tag builds
 jobs:
   app:
-    uses: daybrite/actions/.github/workflows/build-day-app.yml@main
+    uses: daybrite/actions/.github/workflows/dayapp.yml@main
     secrets: inherit
     with:
       targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
@@ -82,26 +82,44 @@ jobs:
 
 ### Inputs
 
-| input | default | meaning |
-|---|---|---|
-| `targets` | (required) | Platform-toolkit pairs to build, comma- or space-separated. |
-| `day-version` | `latest` | Day CLI to install: `latest` (newest crates.io release), `v1.2.3`/`1.2.3` (that crates.io release), a 40-hex commit, or a branch name of the day repo (built from git). |
-| `day-git` | `https://github.com/daybrite/day.git` | Day repo URL for branch/commit installs. |
-| `day-verbose` | `true` | Run the day CLI verbose (`DAY_VERBOSE=1`): every `day build`/`launch`/`pack`/`rebuild` forwards its sub-commands' raw output — the cargo/gradle/xcodebuild/hvigor command lines and logs — so a failed build shows the command that broke. `false` restores the quiet status-line output. Installing the CLI itself is cargo's own build either way; a `day-version` that predates `DAY_VERBOSE` ignores it. |
-| `project-path` | `.` | Directory of the Day project within the repository. |
-| `setup-command` | — | Shell command run at the repo root after the CLI installs (e.g. `day new app …`). |
-| `preflight-checks` | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt clippy check test` (comma- or space-separated). `fmt` needs no build and takes seconds; the others compile the whole workspace and delay every matrix leg, which is why they are opt-in. Empty skips the checks. |
-| `scripts` | `auto` | Dayscripts to run per target; `auto` = every `dayscript/*.yaml` or `scripts/*.yaml`; `none` disables. |
-| `launch-env` | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`. |
-| `locales` | — | Locales to run each dayscript under (each gets its own screenshot variant). |
-| `android-abis` | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK/AAB (each adds its own `lib/<abi>/`), comma- or space-separated. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
-| `ios-devices` | — | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…` — each its own parallel job, its own screenshot artifact and its own gallery column (see [Device profiles](#device-profiles)). |
-| `ios-profiles` | — | The older device-only form, comma-separated. Superseded by `ios-devices`; setting both is an error. |
-| `android-devices` | — | Device profiles for `android-mdc`, one per line as `device=…, os=…, orientation=…, slug=…` — the same shape as `ios-devices`, each its own parallel job, artifact and gallery column. |
-| `android-profiles` | — | Superseded by `android-devices`. The older form: `avdmanager list device` ids (`pixel_5`, `pixel_tablet`). |
-| `publish-release` | `true` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft — packages, checksums, launch scripts and notes all in place — for a human to review and publish. Its asset URLs, including the ones in the install commands, answer only once it is published. Never un-publishes a release that is already public. |
-| `deploy-web` | `false` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
-| `web-deploy-tag-pattern` | — | When `deploy-web` is set: empty deploys on a push to the repo's default branch; a bash regex (e.g. `^v[0-9]+\.[0-9]+\.[0-9]+$`) deploys **only** on a tag matching it. Ignored unless `deploy-web` is true. |
+Every input the workflow declares, in the order it declares them. Only `targets` is required.
+
+| input | type | default | meaning |
+|---|---|---|---|
+| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-xaml`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-mdc`, `harmony-arkui`, `web-dom`. |
+| `day-version` | string | `latest` | Day CLI to install: `latest` (newest crates.io release), `v1.2.3`/`1.2.3` (that release), a 40-hex commit, or a branch name of the day repository (built from git). |
+| `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
+| `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |
+| `project-path` | string | `.` | Directory of the Day project within the repository. |
+| `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. |
+| `scripts` | string | `auto` | Dayscripts to run on each target, comma- or space-separated paths relative to the project. `auto` runs every `dayscript/*.yaml` (or `scripts/*.yaml`); `none` runs nothing. |
+| `launch-env` | string | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`; values must not contain spaces. |
+| `locales` | string | — | Locales to run each dayscript under, comma- or space-separated (`en fr ar zh-CN`). Each locale captures its own screenshot variant. |
+| `android-abis` | string | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK and AAB, comma- or space-separated; each adds its own `lib/<abi>/`. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
+| `day-source` | string | `install` | Where the day CLI comes from: `install` builds it with cargo per `day-version`; `artifact` downloads the `day-<os>-<arch>` artifact an earlier job in the same run uploaded. |
+| `artifact-prefix` | string | — | Prefix for the package artifact names (`<prefix>dist-<target>`), so a repository that already publishes `dist-<target>` from another workflow can keep both. |
+| `themes` | string | — | Themes to run each dayscript under (`light dark`), expanded against `locales` into one run per combination. Each theme captures its own screenshot variant. |
+| `ios-profiles` | string | — | The older device-only form of `ios-devices`, comma-separated name prefixes with optional `=<slug>`. Setting both is an error. |
+| `ios-devices` | string | — | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…`. Each becomes its own parallel job, screenshot artifact and gallery column; the first one packs. `device` is a name prefix in which `*` matches anything, so `iPhone * Pro Max` is the largest iPhone the runner image has (see [Device profiles](#device-profiles)). |
+| `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `pixel_5` or `pixel_tablet`, comma-separated. |
+| `android-devices` | string | — | Device profiles for `android-mdc`, one per line in the same shape as `ios-devices`; `os` is the API level. |
+| `app-id` | string | — | The app's bundle id. When set, the Linux legs verify that the packed flatpak installs and reports that id, and the macOS legs that the `.app` carries it. |
+| `lint` | boolean | `True` | Run `day lint` before building: fluent coverage, ids, routes, and the store listing. |
+| `assert-pristine` | boolean | `True` | Fail if the checkout has uncommitted changes before packing. An artifact packed from a dirty tree records a commit that cannot reproduce it. |
+| `signing-environment` | string | — | GitHub environment holding the macOS release-signing secrets (`DAY_MACOS_CERT_P12`, `DAY_MACOS_CERT_PASSWORD`, `DAY_SIGN_MACOS_IDENTITY`, `DAY_NOTARY_KEY_ID`, `DAY_NOTARY_ISSUER`, `DAY_NOTARY_KEY_B64`). When set, a tag build signs and notarizes the `.dmg` in a separate job that checks out no code, and fails rather than shipping unsigned when the material is missing. |
+| `validate-rebuild` | boolean | `False` | After packing, rebuild each artifact from its own recorded provenance and compare (`day rebuild --strict`). Off by default: the check needs a fixed day revision to be meaningful. |
+| `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
+| `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
+| `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
+| `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. |
+| `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
+| `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. |
+| `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios`, or a `store/app.toml` listing that `day store stage` turns into lanes. `"true"`/`"false"` override. |
+| `upload-macos` | string | — | Upload the `macos-appkit` build products to the Mac App Store on semantic-version tags through `macos-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` with `platform :mac`; `"true"`/`"false"` override. |
+| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`; `"true"`/`"false"` override. |
+| `ios-upload-lane` | string | `ios upload` | The fastlane arguments the `appstore-ios` job runs (platform + lane). The staged lanes are `ios validate`, `ios upload`, and `ios release`, which also submits the version for review. |
+| `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
+| `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. |
 
 ### Targets and runners
 
@@ -229,6 +247,14 @@ absent — it never fails for that reason. On semantic-version tags, the same `D
 exist and the caller forwards them with `secrets: inherit`. Branch and PR builds always pack
 dev-signed, even when the secrets exist.
 
+An App Store `.ipa` takes `DAY_APPLE_TEAM`, the API key trio `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
+`DAY_ASC_KEY_B64`, the distribution certificate as `DAY_APPLE_CERT_P12` with
+`DAY_APPLE_CERT_PASSWORD`, and the App Store provisioning profile as `DAY_IOS_PROFILE_B64`. The
+profile is installed where Xcode looks and `day pack` exports over it with the imported
+certificate; an API key cannot use Xcode's cloud-managed signing, so without the profile the
+export has nothing to sign with and the pack degrades to an unsigned `.ipa`, which the upload
+job then refuses.
+
 ### Store uploads
 
 On semantic-version tags, three independent jobs upload the packed artifacts to the stores by
@@ -240,28 +266,25 @@ running a lane from the app's own fastlane config:
 | `appstore-macos` | Mac App Store | `dist-macos-appkit` (notarized when `signing-environment` is set) | `DAY_PKG_OR_APP` |
 | `playstore-android` | Google Play | `dist-android-mdc` (the `.aab`) | `DAY_AAB` |
 
-| input | default | meaning |
-|---|---|---|
-| `upload-ios` | `""` | `""` auto-detects from the Fastfile (see below); `"true"`/`"false"` force the iOS upload on or off. |
-| `upload-macos` | `""` | Same, for the Mac App Store upload. |
-| `upload-play` | `""` | Same, for the Google Play upload. |
-| `ios-upload-lane` | `ios upload` | The fastlane arguments the iOS job runs (platform + lane). |
-| `macos-upload-lane` | `mac upload` | The fastlane arguments the macOS job runs. |
-| `play-upload-lane` | `android upload` | The fastlane arguments the Play job runs. |
+The `upload-*` and `*-upload-lane` inputs that drive them are in [Inputs](#inputs).
 
 With an `upload-*` input left empty, the upload runs exactly when the repo has a fastlane config
 for that platform — a `fastlane/Fastfile` under `project-path` (for iOS also
 `platform/ios/fastlane/Fastfile`, for Play also `platform/android/fastlane/Fastfile`) containing
-the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). The
-`preflight` job prints a `::notice` for each auto decision.
+the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). For iOS a
+`store/app.toml` listing counts as well: the job runs `day store stage` and uses the lanes it
+writes (`ios validate`, `ios upload`, and `ios release`, which also submits the version for
+review). The `preflight` job prints a `::notice` for each auto decision.
 
 Each job checks out the repo, downloads the built artifact, points its `DAY_*` variable at it
 (an absolute path), and runs the lane from the directory holding `fastlane/` — with
 `bundle install && bundle exec fastlane <lane>` when a `Gemfile` is present, plain
 `fastlane <lane>` otherwise (installed with `gem install fastlane` on ubuntu; macOS runners ship
-it). The workflow sets no store credentials: forward yours with `secrets: inherit` and have the
-Fastfile read its own — the App Store Connect API key envs for `upload_to_app_store`/`deliver`,
-the JSON key for `upload_to_play_store`/`supply`. A Mac App Store submission needs a `.pkg`
+it). The iOS job hands the lane the App Store Connect API key as `DAY_ASC_KEY_ID`,
+`DAY_ASC_ISSUER`, and `DAY_ASC_KEY` (the `.p8` written from `DAY_ASC_KEY_B64`), which is what
+the staged lanes read; a repository's own Fastfile may read the same names or its own. The other
+jobs set no store credentials: forward yours with `secrets: inherit` and have the Fastfile read
+them — the JSON key for `upload_to_play_store`/`supply`. A Mac App Store submission needs a `.pkg`
 signed with the MAS installer identity; producing or re-signing it from `DAY_PKG_OR_APP` is the
 lane's job — the workflow hands over build products, not store policy. Caller permissions are
 unchanged: the upload jobs need nothing beyond what the workflow already uses.
@@ -295,7 +318,7 @@ permissions:
   id-token: write # deploy-pages OIDC token
 jobs:
   app:
-    uses: daybrite/actions/.github/workflows/build-day-app.yml@main
+    uses: daybrite/actions/.github/workflows/dayapp.yml@main
     secrets: inherit
     with:
       targets: macos-appkit, ios-uikit, android-mdc, web-dom
@@ -330,7 +353,7 @@ Nothing to configure.
 
 ## Composite actions
 
-`build-day-app` is the whole pipeline. When you only want a piece of it, the actions it is built
+`dayapp` is the whole pipeline. When you only want a piece of it, the actions it is built
 from are usable on their own — daybrite/day's own workflows call them directly.
 
 ### `setup-day-deps`
@@ -366,7 +389,7 @@ binary labeled with the new commit, and correctness beats the minutes saved.
 `validate.yml` runs on every push and pull request: it scaffolds a fresh app with `day new app`
 and drives it through the reusable workflow for all 7 primary platform-toolkit pairs, with
 `day-version: main` so the CLI and the framework come from the same tree. (It exercises
-`build-day-app`'s build/pack path; the web deploy publishes to a live Pages site and so isn't part
+`dayapp`'s build/pack path; the web deploy publishes to a live Pages site and so isn't part
 of the validation run.)
 
 ## Project website (daysite)

@@ -1,4 +1,4 @@
-# build-day-app — the reusable build workflow for conventional Day projects.
+# dayapp — the reusable build workflow for conventional Day projects.
 #
 # Call it from a Day app repository to build, exercise, package, and (for web-dom) deploy the app
 # for a set of platform-toolkit targets. The recipes are a subset of daybrite/day's own ci.yml
@@ -23,7 +23,7 @@
 #     id-token: write         # deploy-pages OIDC token (only used when deploy-web is set)
 #   jobs:
 #     app:
-#       uses: daybrite/actions/.github/workflows/build-day-app.yml@main
+#       uses: daybrite/actions/.github/workflows/dayapp.yml@main
 #       secrets: inherit          # forwards optional DAY_* signing secrets
 #       with:
 #         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, web-dom
@@ -51,7 +51,7 @@
 # must grant `pages: write` + `id-token: write` (shown above) and, one time, set Settings → Pages
 # → Source = "GitHub Actions"; no secrets are involved (the deploy uses the workflow's OIDC token).
 
-name: build-day-app
+name: dayapp
 
 on:
   workflow_call:

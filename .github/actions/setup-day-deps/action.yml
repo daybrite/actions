@@ -7,7 +7,7 @@ description: >-
 # WHY THIS EXISTS
 #
 # Every workflow that builds a Day app repeated the same ladder of `if: matrix.target == …` install
-# steps — this repo's build-day-app.yml, daybrite/day's ci.yml and its checkup.yml. Three copies of
+# steps — this repo's dayapp.yml, daybrite/day's ci.yml and its checkup.yml. Three copies of
 # one recipe drift, and they had: the OpenHarmony leg alone ran SDK 5.1.0 with a cached
 # command-line-tools and node wrappers in two of them, and SDK 6.1 with the CLT's own node on PATH
 # in the third. What a target needs is a property OF THE TARGET, so it belongs in one place that
