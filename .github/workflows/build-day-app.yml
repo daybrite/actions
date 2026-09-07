@@ -400,6 +400,10 @@ on:
       DAY_ASC_KEY_B64: { required: false }
       DAY_APPLE_CERT_P12: { required: false }
       DAY_APPLE_CERT_PASSWORD: { required: false }
+      # The App Store provisioning profile for the app id, base64. `day pack` exports over an
+      # installed profile with the certificate above (an API key cannot use Xcode's
+      # cloud-managed signing, so an automatic export has nothing to sign with).
+      DAY_IOS_PROFILE_B64: { required: false }
       DAY_ANDROID_KEYSTORE_B64: { required: false }
       DAY_ANDROID_KEY_ALIAS: { required: false }
       DAY_KS_PASS: { required: false }
@@ -767,7 +771,13 @@ jobs:
             esac
             echo "$name=$on" | tee -a "$GITHUB_OUTPUT"
           }
-          decide upload_ios   "$UPLOAD_IOS_IN"   'platform :ios'     "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile"
+          # A `store/` listing counts too: `day store stage` writes the iOS lanes from it.
+          if [ -z "$UPLOAD_IOS_IN" ] && [ -f "$PP/store/app.toml" ]; then
+            echo "::notice::upload_ios=true (auto) — $PP/store/app.toml exists, lanes come from 'day store stage'"
+            echo "upload_ios=true" | tee -a "$GITHUB_OUTPUT"
+          else
+            decide upload_ios   "$UPLOAD_IOS_IN"   'platform :ios'     "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile"
+          fi
           decide upload_macos "$UPLOAD_MACOS_IN" 'platform :mac'     "$PP/fastlane/Fastfile"
           decide upload_play  "$UPLOAD_PLAY_IN"  'platform :android' "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile"
 
@@ -883,6 +893,7 @@ jobs:
         if: needs.preflight.outputs.release == 'true' && matrix.primary
         env:
           ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
+          IOS_PROFILE_B64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
           ANDROID_KEYSTORE_B64: ${{ secrets.DAY_ANDROID_KEYSTORE_B64 }}
           OHOS_KEYSTORE_B64: ${{ secrets.DAY_OHOS_KEYSTORE_B64 }}
           OHOS_CERT_B64: ${{ secrets.DAY_OHOS_CERT_B64 }}
@@ -897,7 +908,18 @@ jobs:
           }
           case "${{ matrix.target }}" in
             # macos-*: nothing — the Developer ID and notary key live in `sign-macos`.
-            ios-uikit) put "${ASC_KEY_B64:-}" asc.p8 DAY_ASC_KEY ;;
+            ios-uikit)
+              put "${ASC_KEY_B64:-}" asc.p8 DAY_ASC_KEY
+              # The App Store profile goes where Xcode looks, under its own UUID, so `day pack`
+              # finds it and exports manually with the imported certificate.
+              if [ -n "${IOS_PROFILE_B64:-}" ]; then
+                PROFILES="$HOME/Library/MobileDevice/Provisioning Profiles"
+                mkdir -p "$PROFILES"
+                echo "$IOS_PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/appstore.mobileprovision"
+                UUID="$(security cms -D -i "$RUNNER_TEMP/appstore.mobileprovision" | plutil -extract UUID raw -o - -)"
+                cp "$RUNNER_TEMP/appstore.mobileprovision" "$PROFILES/$UUID.mobileprovision"
+                echo "installed App Store profile $UUID"
+              fi ;;
             android-mdc) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
             harmony-arkui)
               put "${OHOS_KEYSTORE_B64:-}" ohos.p12 DAY_OHOS_KEYSTORE
@@ -1862,17 +1884,43 @@ jobs:
           set -euo pipefail
           IPA="$(find dist -type f -name '*.ipa' | head -1)"
           [ -n "$IPA" ] || { echo "::error::no .ipa in the ${{ inputs.artifact-prefix }}dist-ios-uikit artifact — is ios-uikit in inputs.targets?"; exit 1; }
+          case "$IPA" in
+            *-unsigned.ipa) echo "::error::the packed .ipa is unsigned — the store refuses it. Set DAY_APPLE_TEAM, DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64, DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 so pack signs"; exit 1 ;;
+          esac
           echo "DAY_IPA=$PWD/$IPA" | tee -a "$GITHUB_ENV"
+      # An app with no fastlane directory of its own gets the lanes `day store stage` writes
+      # from its store/ listing (docs/store.md), so the day CLI is needed here too.
+      - name: Set up the day CLI
+        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/ios/fastlane/Fastfile', inputs.project-path)) == ''
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      - name: Stage the store listing
+        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/ios/fastlane/Fastfile', inputs.project-path)) == ''
+        working-directory: ${{ inputs.project-path }}
+        run: $DAY_BIN store stage
       - name: Run the app's fastlane lane
         working-directory: ${{ inputs.project-path }}
         env:
           LANE: ${{ inputs.ios-upload-lane }}
+          DAY_ASC_KEY_ID: ${{ secrets.DAY_ASC_KEY_ID }}
+          DAY_ASC_ISSUER: ${{ secrets.DAY_ASC_ISSUER }}
+          ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
         run: |
           set -euo pipefail
+          if [ -n "${ASC_KEY_B64:-}" ]; then
+            echo "$ASC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/asc.p8"
+            export DAY_ASC_KEY="$RUNNER_TEMP/asc.p8"
+          fi
           # fastlane resolves its config upward from the working directory, so run from the one
-          # that holds fastlane/ — the project root, or the platform/ios convention directory.
+          # that holds fastlane/ — the project root, the platform/ios convention directory, or
+          # the tree `day store stage` just wrote.
           if [ ! -f fastlane/Fastfile ] && [ -f platform/ios/fastlane/Fastfile ]; then
             cd platform/ios
+          elif [ ! -f fastlane/Fastfile ] && [ -f build/day/store/ios-uikit/fastlane/Fastfile ]; then
+            cd build/day/store/ios-uikit
           fi
           read -ra lane <<< "$LANE" # "ios upload" is two fastlane arguments
           if [ -f Gemfile ]; then
