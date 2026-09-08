@@ -222,7 +222,7 @@ on:
       android-profiles:
         description: >-
           The same for `android-mdc`, as AVD device profiles from `avdmanager list device`
-          (`pixel_10`, `small_tablet`) — passed to the emulator action verbatim, so these are
+          (`pixel_7`, `Nexus 7 2013`) — passed to the emulator action verbatim, so these are
           exact ids rather than prefixes. `=<slug>` and the first-is-primary rule work as they do
           for ios-profiles. Unset = the default pair, a phone and a tablet (see
           `android-devices`).
@@ -236,30 +236,37 @@ on:
           own screenshot artifact and gallery column.
 
               android-devices: |
-                device=pixel_10,    os=36, orientation=portrait,  slug=phone
-                device=small_tablet, os=36, orientation=landscape, slug=tablet, density=240
+                device=pixel_7,     os=36, orientation=portrait,  slug=phone
+                device=Nexus 7 2013, os=36, orientation=landscape, slug=tablet, density=240
 
-          `device` is an exact `avdmanager list device` id (`pixel_10`, `small_tablet`), not a
+          `device` is an exact `avdmanager list device` id (`pixel_7`, `Nexus 7 2013`), not a
           prefix — unlike iOS, these ids are stable and an unknown one should fail loudly. `os` is
           an API level (`36`, `API 36`, `android-36`) and defaults to 36. `orientation` is
           `portrait` (default) or `landscape`, applied to the DISPLAY by
           `day devices boot --orientation` and verified there.
 
-          Those two profiles are what Google Play accepts as store screenshots, measured against
-          the publishing API rather than read off the help page (which still says the long side
-          may be at most twice the short one — the API is looser). What it actually enforces:
-          the phone slot takes up to about 2.25:1, so `pixel_10`'s 1080x2424 goes in whole while
-          1080x2500 is refused; the ten-inch tablet slot needs at least 1080 px on the short side,
-          so 1920x1200 is taken and 1280x800 is refused, though the seven-inch slot takes both.
+          Two things decide these defaults. The first is what the runner HAS: the device
+          catalog comes from the Android command-line tools on the image, which is version 12.0
+          and older than a desktop Android Studio, so `pixel_8` and later, `small_tablet` and
+          `medium_tablet` are simply absent there and avdmanager fails with "No device found".
+          Check a candidate against the runner catalog, not a laptop.
 
-          That last rule is why the tablet is not a modern one. `pixel_tablet` and `medium_tablet`
-          are 2560x1600, past the three million pixels at which `day devices boot` halves a
-          headless panel to keep the emulator answering, and they come back at 1280x800 — which
-          the ten-inch slot refuses. `small_tablet` is 1920x1200 and is captured whole.
+          The second is what Google Play accepts as a store screenshot, measured against the
+          publishing API rather than read off the help page (which still says the long side may
+          be at most twice the short one; the API is looser). The phone slot takes up to about
+          2.25:1, so pixel_7 at 1080x2400 goes in whole while 1080x2500 is refused. The ten-inch
+          tablet slot needs at least 1080 px on the short side, so 1920x1200 is taken and
+          1280x800 is refused, though the seven-inch slot takes both.
+
+          Together those rule out every tablet on the image but one. `pixel_tablet` and
+          `medium_tablet` are 2560x1600, past the three million pixels at which `day devices
+          boot` halves a headless panel to keep the emulator answering, so they come back at
+          1280x800 and the ten-inch slot refuses them. `Nexus 7 2013` is 1200x1920, captured
+          whole, and 1920x1200 in landscape.
 
           `density` re-reads that panel at a density of your choosing, which moves the size in
           POINTS without touching the capture's pixels. Every stock tablet profile that clears
-          Play's 1080 does it at 320 dpi, so `small_tablet` lays out as 960x600 points — short
+          Play's 1080 does it at 320 dpi, so `Nexus 7 2013` lays out as 960x600 points — short
           enough that Day-Showcase's Query page collapses its list and three walkthrough steps
           fail. `density=240` makes the same 1920x1200 capture a 1280x800-point tablet, which is
           what the CI tablet had before, and the steps pass.
@@ -723,9 +730,9 @@ jobs:
                  {device: "iPad Pro 13-inch", os: "", orientation: "landscape", density: "",
                   slug: "ipad"}]
               elif $t == "android-mdc" then
-                [{device: "pixel_10",     os: "36", orientation: "portrait",  density: "",
+                [{device: "pixel_7",     os: "36", orientation: "portrait",  density: "",
                   slug: "phone"},
-                 {device: "small_tablet", os: "36", orientation: "landscape", density: "240",
+                 {device: "Nexus 7 2013", os: "36", orientation: "landscape", density: "240",
                   slug: "tablet"}]
               else [] end;
             { include: [
