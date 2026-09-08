@@ -406,6 +406,9 @@ on:
       DAY_IOS_PROFILE_B64: { required: false }
       DAY_ANDROID_KEYSTORE_B64: { required: false }
       DAY_ANDROID_KEY_ALIAS: { required: false }
+      # The Google Play service-account JSON (its contents, not base64), which the
+      # playstore-android job hands to the lane as SUPPLY_JSON_KEY.
+      DAY_PLAY_JSON_KEY: { required: false }
       DAY_KS_PASS: { required: false }
       DAY_KEY_PASS: { required: false }
       DAY_OHOS_KEYSTORE_B64: { required: false }
@@ -779,7 +782,12 @@ jobs:
             decide upload_ios   "$UPLOAD_IOS_IN"   'platform :ios'     "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile"
           fi
           decide upload_macos "$UPLOAD_MACOS_IN" 'platform :mac'     "$PP/fastlane/Fastfile"
-          decide upload_play  "$UPLOAD_PLAY_IN"  'platform :android' "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile"
+          if [ -z "$UPLOAD_PLAY_IN" ] && [ -f "$PP/store/app.toml" ]; then
+            echo "::notice::upload_play=true (auto) — $PP/store/app.toml exists, lanes come from 'day store stage'"
+            echo "upload_play=true" | tee -a "$GITHUB_OUTPUT"
+          else
+            decide upload_play  "$UPLOAD_PLAY_IN"  'platform :android' "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile"
+          fi
 
   build:
     # The bare target when the caller named no device profiles, `<target> · <device>` when it did
@@ -1994,15 +2002,43 @@ jobs:
           set -euo pipefail
           AAB="$(find dist -type f -name '*.aab' | head -1)"
           [ -n "$AAB" ] || { echo "::error::no .aab in the ${{ inputs.artifact-prefix }}dist-android-mdc artifact — is android-mdc in inputs.targets?"; exit 1; }
+          # A dev-tier pack signs with the debug keystore, which Play refuses; the signer's
+          # certificate says which key it was.
+          if keytool -printcert -jarfile "$AAB" 2>/dev/null | grep -q "CN=Android Debug"; then
+            echo "::error::the packed .aab is signed with the debug keystore — Play refuses it. Set DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS so pack signs with the upload key"
+            exit 1
+          fi
           echo "DAY_AAB=$PWD/$AAB" | tee -a "$GITHUB_ENV"
+      # An app with no fastlane directory of its own gets the lanes `day store stage` writes
+      # from its store/ listing (docs/store.md), so the day CLI is needed here too.
+      - name: Set up the day CLI
+        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/android/fastlane/Fastfile', inputs.project-path)) == ''
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      - name: Stage the store listing
+        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/android/fastlane/Fastfile', inputs.project-path)) == ''
+        working-directory: ${{ inputs.project-path }}
+        run: $DAY_BIN store stage
       - name: Run the app's fastlane lane
         working-directory: ${{ inputs.project-path }}
         env:
           LANE: ${{ inputs.play-upload-lane }}
+          PLAY_JSON_KEY: ${{ secrets.DAY_PLAY_JSON_KEY }}
         run: |
           set -euo pipefail
+          if [ -n "${PLAY_JSON_KEY:-}" ]; then
+            printf '%s' "$PLAY_JSON_KEY" > "$RUNNER_TEMP/play-key.json"
+            export SUPPLY_JSON_KEY="$RUNNER_TEMP/play-key.json"
+          fi
+          # fastlane resolves its config upward from the working directory: the project root,
+          # the platform/android convention directory, or the tree `day store stage` wrote.
           if [ ! -f fastlane/Fastfile ] && [ -f platform/android/fastlane/Fastfile ]; then
             cd platform/android
+          elif [ ! -f fastlane/Fastfile ] && [ -f build/day/store/android-mdc/fastlane/Fastfile ]; then
+            cd build/day/store/android-mdc
           fi
           read -ra lane <<< "$LANE"
           if [ -f Gemfile ]; then

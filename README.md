@@ -116,10 +116,10 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. |
 | `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios`, or a `store/app.toml` listing that `day store stage` turns into lanes. `"true"`/`"false"` override. |
 | `upload-macos` | string | — | Upload the `macos-appkit` build products to the Mac App Store on semantic-version tags through `macos-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` with `platform :mac`; `"true"`/`"false"` override. |
-| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`; `"true"`/`"false"` override. |
+| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/app.toml` listing that `day store stage` turns into lanes; `"true"`/`"false"` override. |
 | `ios-upload-lane` | string | `ios upload` | The fastlane arguments the `appstore-ios` job runs (platform + lane). The staged lanes are `ios validate`, `ios upload`, and `ios release`, which also submits the version for review. |
 | `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
-| `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. |
+| `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. The staged lanes are `android validate`, `android upload` (internal track, draft), and `android release` (production track, completed, which is Play's submission). |
 
 ### Targets and runners
 
@@ -271,10 +271,11 @@ The `upload-*` and `*-upload-lane` inputs that drive them are in [Inputs](#input
 With an `upload-*` input left empty, the upload runs exactly when the repo has a fastlane config
 for that platform — a `fastlane/Fastfile` under `project-path` (for iOS also
 `platform/ios/fastlane/Fastfile`, for Play also `platform/android/fastlane/Fastfile`) containing
-the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). For iOS a
+the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). For iOS and Play a
 `store/app.toml` listing counts as well: the job runs `day store stage` and uses the lanes it
 writes (`ios validate`, `ios upload`, and `ios release`, which also submits the version for
-review). The `preflight` job prints a `::notice` for each auto decision.
+review; `android validate`, `android upload`, and `android release`). The `preflight` job prints
+a `::notice` for each auto decision.
 
 Each job checks out the repo, downloads the built artifact, points its `DAY_*` variable at it
 (an absolute path), and runs the lane from the directory holding `fastlane/` — with
@@ -282,9 +283,10 @@ Each job checks out the repo, downloads the built artifact, points its `DAY_*` v
 `fastlane <lane>` otherwise (installed with `gem install fastlane` on ubuntu; macOS runners ship
 it). The iOS job hands the lane the App Store Connect API key as `DAY_ASC_KEY_ID`,
 `DAY_ASC_ISSUER`, and `DAY_ASC_KEY` (the `.p8` written from `DAY_ASC_KEY_B64`), which is what
-the staged lanes read; a repository's own Fastfile may read the same names or its own. The other
-jobs set no store credentials: forward yours with `secrets: inherit` and have the Fastfile read
-them — the JSON key for `upload_to_play_store`/`supply`. A Mac App Store submission needs a `.pkg`
+the staged lanes read; a repository's own Fastfile may read the same names or its own. The Play
+job writes `DAY_PLAY_JSON_KEY` (the service-account JSON) to a file and hands it to the lane as
+`SUPPLY_JSON_KEY`. The macOS job sets no store credentials: forward yours with `secrets: inherit`
+and have the Fastfile read them. A Mac App Store submission needs a `.pkg`
 signed with the MAS installer identity; producing or re-signing it from `DAY_PKG_OR_APP` is the
 lane's job — the workflow hands over build products, not store policy. Caller permissions are
 unchanged: the upload jobs need nothing beyond what the workflow already uses.
