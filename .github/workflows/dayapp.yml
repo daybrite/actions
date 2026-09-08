@@ -222,7 +222,7 @@ on:
       android-profiles:
         description: >-
           The same for `android-mdc`, as AVD device profiles from `avdmanager list device`
-          (`pixel_7`, `Nexus 7 2013`) — passed to the emulator action verbatim, so these are
+          (`medium_phone`, `medium_tablet`) — passed to the emulator action verbatim, so these are
           exact ids rather than prefixes. `=<slug>` and the first-is-primary rule work as they do
           for ios-profiles. Unset = the default pair, a phone and a tablet (see
           `android-devices`).
@@ -236,40 +236,39 @@ on:
           own screenshot artifact and gallery column.
 
               android-devices: |
-                device=pixel_7,     os=36, orientation=portrait,  slug=phone
-                device=Nexus 7 2013, os=36, orientation=landscape, slug=tablet, density=240
+                device=medium_phone,  os=36, orientation=portrait,  slug=phone
+                device=medium_tablet, os=36, orientation=landscape, slug=tablet
 
-          `device` is an exact `avdmanager list device` id (`pixel_7`, `Nexus 7 2013`), not a
+          `device` is an exact `avdmanager list device` id (`medium_phone`, `pixel_5`), not a
           prefix — unlike iOS, these ids are stable and an unknown one should fail loudly. `os` is
           an API level (`36`, `API 36`, `android-36`) and defaults to 36. `orientation` is
           `portrait` (default) or `landscape`, applied to the DISPLAY by
           `day devices boot --orientation` and verified there.
 
-          Two things decide these defaults. The first is what the runner HAS: the device
-          catalog comes from the Android command-line tools on the image, which is version 12.0
-          and older than a desktop Android Studio, so `pixel_8` and later, `small_tablet` and
-          `medium_tablet` are simply absent there and avdmanager fails with "No device found".
-          Check a candidate against the runner catalog, not a laptop.
+          What decides these defaults is what the runner HAS: the device catalog comes from the
+          Android command-line tools on the image, which is version 12.0 and older than a desktop
+          Android Studio — 66 profiles against 96 — so `pixel_8` and later and `small_tablet` are
+          simply absent there and avdmanager fails with "No device found". Check a candidate
+          against the runner catalog, not a laptop. `medium_phone` and `medium_tablet` are both
+          present in 12.0, and being generic they are the pair least likely to age out of it.
 
-          The second is what Google Play accepts as a store screenshot, measured against the
-          publishing API rather than read off the help page (which still says the long side may
-          be at most twice the short one; the API is looser). The phone slot takes up to about
-          2.25:1, so pixel_7 at 1080x2400 goes in whole while 1080x2500 is refused. The ten-inch
-          tablet slot needs at least 1080 px on the short side, so 1920x1200 is taken and
-          1280x800 is refused, though the seven-inch slot takes both.
+          `medium_phone` is 1080x2400 at 420 dpi and `medium_tablet` 2560x1600 at 320. The tablet
+          is past the three million pixels at which `day devices boot` halves a headless panel to
+          keep the emulator answering, so it captures at 1280x800 — which is also 1280x800 in
+          POINTS, the tablet layout Day-Showcase's walkthrough is written against.
 
-          Together those rule out every tablet on the image but one. `pixel_tablet` and
-          `medium_tablet` are 2560x1600, past the three million pixels at which `day devices
-          boot` halves a headless panel to keep the emulator answering, so they come back at
-          1280x800 and the ten-inch slot refuses them. `Nexus 7 2013` is 1200x1920, captured
-          whole, and 1920x1200 in landscape.
+          These are NOT sized for a store listing. Google Play's ten-inch tablet slot wants at
+          least 1080 px on a screenshot's short side (measured against the publishing API, not
+          the help page), and the phone slot takes up to about 2.25:1 — so the halved tablet
+          capture is refused there. An app that publishes from CI captures should name a pair of
+          its own; `Nexus 7 2013` at `density=240` is the profile that clears the ten-inch slot,
+          capturing 1920x1200 while laying out as 1280x800 points.
 
-          `density` re-reads that panel at a density of your choosing, which moves the size in
-          POINTS without touching the capture's pixels. Every stock tablet profile that clears
-          Play's 1080 does it at 320 dpi, so `Nexus 7 2013` lays out as 960x600 points — short
-          enough that Day-Showcase's Query page collapses its list and three walkthrough steps
-          fail. `density=240` makes the same 1920x1200 capture a 1280x800-point tablet, which is
-          what the CI tablet had before, and the steps pass.
+          `density` re-reads a panel at a density of your choosing, which moves the size in
+          POINTS without touching the capture's pixels. It is what lets one profile serve a store
+          screenshot and a layout at once: every stock tablet that clears Play's 1080 does it at
+          320 dpi, and `Nexus 7 2013` at 320 lays out as 960x600 points — short enough that
+          Day-Showcase's Query page collapses its list and three walkthrough steps fail.
 
           Supersedes `android-profiles`, which stays for callers that already set it.
         type: string
@@ -716,10 +715,12 @@ jobs:
                         slug: ((.slug // .device) | slugify)});
             # What a mobile target runs on when the caller named nothing: a phone AND a tablet,
             # because those are the two device classes a store listing asks for and the two an
-            # adaptive UI has to be looked at on. Every panel here is one App Store Connect and
-            # Google Play accept as a screenshot (the Device profiles section of the README says
-            # which sizes each store takes). Naming `ios-devices` or `android-devices` replaces
-            # the whole list, which is how an app runs on one device or on five.
+            # adaptive UI has to be looked at on. The iOS pair is sized for App Store Connect;
+            # the Android pair is the generic one the runner catalog is likeliest to keep, and
+            # its tablet capture is BELOW what Google Play takes (the Device profiles section of
+            # the README says which sizes each store takes, and `android-devices` above names the
+            # store-sized alternative). Naming `ios-devices` or `android-devices` replaces the
+            # whole list, which is how an app runs on one device or on five.
             #
             # No apostrophes in this program: it reaches jq inside a single-quoted shell string,
             # and one would end the string and hand jq nothing (`Top-level program not given`).
@@ -730,9 +731,9 @@ jobs:
                  {device: "iPad Pro 13-inch", os: "", orientation: "landscape", density: "",
                   slug: "ipad"}]
               elif $t == "android-mdc" then
-                [{device: "pixel_7",     os: "36", orientation: "portrait",  density: "",
+                [{device: "medium_phone",  os: "36", orientation: "portrait",  density: "",
                   slug: "phone"},
-                 {device: "Nexus 7 2013", os: "36", orientation: "landscape", density: "240",
+                 {device: "medium_tablet", os: "36", orientation: "landscape", density: "",
                   slug: "tablet"}]
               else [] end;
             { include: [

@@ -103,8 +103,8 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `themes` | string | — | Themes to run each dayscript under (`light dark`), expanded against `locales` into one run per combination. Each theme captures its own screenshot variant. |
 | `ios-profiles` | string | — | The older device-only form of `ios-devices`, comma-separated name prefixes with optional `=<slug>`. Setting both is an error. |
 | `ios-devices` | string | phone + tablet | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…`. Each becomes its own parallel job, screenshot artifact and gallery column; the first one packs. `device` is a name prefix in which `*` matches anything, so `iPhone * Pro Max` is the largest iPhone the runner image has. Unset runs `iPhone * Pro Max` portrait and `iPad Pro 13-inch` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
-| `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `pixel_7` or `Nexus 7 2013`, comma-separated. |
-| `android-devices` | string | phone + tablet | Device profiles for `android-mdc`, one per line in the same shape as `ios-devices`, plus a `density` field; `os` is the API level. Unset runs `pixel_7` portrait and `Nexus 7 2013` landscape at `density=240`; naming any replaces the pair (see [Device profiles](#device-profiles)). |
+| `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `medium_phone` or `Nexus 7 2013`, comma-separated. |
+| `android-devices` | string | phone + tablet | Device profiles for `android-mdc`, one per line in the same shape as `ios-devices`, plus a `density` field; `os` is the API level. Unset runs `medium_phone` portrait and `medium_tablet` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
 | `app-id` | string | — | The app's bundle id. When set, the Linux legs verify that the packed flatpak installs and reports that id, and the macOS legs that the `.app` carries it. |
 | `lint` | boolean | `True` | Run `day lint` before building: fluent coverage, ids, routes, and the store listing. |
 | `assert-pristine` | boolean | `True` | Fail if the checkout has uncommitted changes before packing. An artifact packed from a dirty tree records a commit that cannot reproduce it. |
@@ -153,12 +153,13 @@ newest installed rather than pinning a major that the next image drops.
 
 **Both mobile targets run on a phone and a tablet by default**, with no configuration in the
 calling workflow. `ios-uikit` runs `iPhone * Pro Max` in portrait and `iPad Pro 13-inch` in
-landscape; `android-mdc` runs `pixel_7` in portrait and `Nexus 7 2013` in landscape at
-`density=240`. Each is its own parallel job, its own screenshot artifact and its own gallery
-column, and captures land under `<target>/<slug>/<variant>/` — `ios-uikit/iphone/`,
-`ios-uikit/ipad/`, `android-mdc/phone/`, `android-mdc/tablet/`. Those are the two device classes
-a store listing asks for and the two an adaptive UI has to be looked at on, and the four panels
-are ones the App Store and Play accept as screenshots.
+landscape; `android-mdc` runs `medium_phone` in portrait and `medium_tablet` in landscape. Each is its own
+parallel job, its own screenshot artifact and its own gallery column, and captures land under
+`<target>/<slug>/<variant>/` — `ios-uikit/iphone/`, `ios-uikit/ipad/`, `android-mdc/phone/`,
+`android-mdc/tablet/`. Those are the two device classes a store listing asks for and the two an
+adaptive UI has to be looked at on. The iOS panels are ones the App Store accepts as screenshots;
+the Android tablet capture is not one Play takes — see [Store-sized Android
+profiles](#store-sized-android-profiles) for the pair that is.
 
 Naming `ios-devices` or `android-devices` replaces that target's whole list, which is how an app
 runs on one device:
@@ -169,10 +170,10 @@ with:
   ios-devices: |
     device=iPhone, orientation=portrait
   android-devices: |
-    device=pixel_7, os=36, orientation=portrait
+    device=medium_phone, os=36, orientation=portrait
 ```
 
-Two jobs, `ios-uikit · iPhone` and `android-mdc · pixel_7`, each capturing to
+Two jobs, `ios-uikit · iPhone` and `android-mdc · medium_phone`, each capturing to
 `<target>/<variant>/` with no device level, since neither target runs on more than one device.
 
 `ios-devices` names each device by device, OS and orientation. One profile per **line**; the comma
@@ -202,9 +203,10 @@ should fail loudly — and `os` is an API level (`36`, `API 36`, `android-36`), 
 
 **Check a candidate id against the runner, not against a laptop.** The device catalog ships inside
 the Android command-line tools, and the image carries version 12.0 while a current Android Studio
-carries 23.0 — 66 profiles against 96. `pixel_8` and later, `small_tablet` and `medium_tablet`
-exist only in the newer catalog, and naming one fails the job with `No device found matching
---device`. To see what the runner has, install that exact version and ask it:
+carries 23.0 — 66 profiles against 96. `pixel_8` and later and `small_tablet` exist only in the
+newer catalog, and naming one fails the job with `No device found matching --device`. The generic
+`medium_phone` / `medium_tablet` pair is in both, which is why the defaults use it. To see what
+the runner has, install that exact version and ask it:
 
 ```sh
 sdkmanager "cmdline-tools;12.0"
@@ -215,18 +217,26 @@ sdkmanager "cmdline-tools;12.0"
 with:
   targets: android-mdc
   android-devices: |
-    device=pixel_7,     os=36, orientation=portrait,  slug=phone
-    device=Nexus 7 2013, os=36, orientation=landscape, slug=tablet, density=240
+    device=medium_phone,  os=36, orientation=portrait,  slug=phone
+    device=medium_tablet, os=36, orientation=landscape, slug=tablet
 ```
 
 Android takes one field iOS does not: **`density`**, the dpi the panel is read at. It moves the
 layout's size in points and leaves the capture's pixels alone.
 
-**Pick Android profiles Google Play accepts as store screenshots.** These two go in as captured:
+The default pair captures 1080x2400 on the phone and, because `day devices boot` halves a
+headless panel past three million pixels, 1280x800 on the tablet — which is also 1280x800 in
+points, the tablet layout Day-Showcase's walkthrough is written against.
+
+#### Store-sized Android profiles
+
+The defaults above are picked for durability in the runner catalog, not for a store listing, and
+the halved tablet capture is below what Google Play takes. An app publishing from its CI captures
+should name this pair instead, which goes in as captured:
 
 | profile | capture | points | Play |
 |---|---|---|---|
-| `pixel_7` | 1080x2400 portrait | 411x914 | phone slot |
+| `medium_phone` | 1080x2400 portrait | 411x914 | phone slot |
 | `Nexus 7 2013`, `density=240` | 1920x1200 landscape | 1280x800 | both tablet slots |
 
 Play's help page says a screenshot's long side may be at most twice its short side, which would
@@ -245,17 +255,16 @@ answer:
 | 1920x1200 | — | **accepted** |
 | 2560x1600 | — | accepted |
 
-So a tall modern phone is fine: the cutoff sits between 2.24:1 and 2.32:1, and `pixel_7` is
+So a tall modern phone is fine: the cutoff sits between 2.24:1 and 2.32:1, and `medium_phone`
+(which is `pixel_7`'s panel, and `pixel_6`'s, and `pixel_6a`'s — all 1080x2400 at 420 dpi) is
 2.22:1. The ten-inch tablet slot holds a floor of 1,080 px on the short side, while the
 seven-inch slot took 1280x800 and 800x1280 without complaint.
 
-`pixel_7` is the newest phone in the runner's catalog; the newer Pixels that would also pass are
-not on the image. `Nexus 7 2013` is the only tablet there that clears the ten-inch floor.
-
-That floor is why the tablet profile is not a modern one — `day devices boot` halves a headless panel past three million
-pixels (both axes and the density, so the size in points holds) to keep the emulator answering,
-so `pixel_tablet` and `medium_tablet` at 2560x1600 come back at 1280x800, which the ten-inch slot
-refuses. At 2.30 Mpx `Nexus 7 2013` sits below that line and is captured whole.
+`Nexus 7 2013` is the only tablet in the runner catalog that clears the ten-inch floor. That is
+because `day devices boot` halves a headless panel past three million pixels (both axes and the
+density, so the size in points holds) to keep the emulator answering, so `pixel_tablet` and
+`medium_tablet` at 2560x1600 come back at 1280x800, which the ten-inch slot refuses. At 2.30 Mpx
+`Nexus 7 2013` sits below that line and is captured whole.
 
 That leaves one problem, which `density` solves. A tablet profile clearing Play's 1,080 does it at
 320 dpi, so `Nexus 7 2013` lays out as 960x600 points: short enough that Day-Showcase's Query page
@@ -296,11 +305,11 @@ build and script run, not the first device's:
 with:
   targets: macos-appkit, ios-uikit, android-mdc
   ios-profiles: "iPhone 16, iPad Pro=ipad"
-  android-profiles: "pixel_7, Nexus 7 2013=tablet"
+  android-profiles: "medium_phone, medium_tablet=tablet"
 ```
 
 That is five jobs: `macos-appkit`, `ios-uikit · iPhone 16`, `ios-uikit · iPad Pro`,
-`android-mdc · pixel_7`, `android-mdc · Nexus 7 2013`.
+`android-mdc · medium_phone`, `android-mdc · medium_tablet`.
 
 - **iOS profiles are prefixes**, matched against the simulators the runner image has: `iPhone`
   takes the first iPhone, `iPad Pro` the first iPad Pro. Exact names age out with each Xcode image,
@@ -323,7 +332,7 @@ job that was already the slowest in the matrix. Profiles do the same work as par
 
 ```yaml
   ios-profiles: "iPhone, iPad=ipad"
-  android-profiles: "pixel_7, Nexus 7 2013=tablet"
+  android-profiles: "medium_phone, medium_tablet=tablet"
 ```
 
 which uploads the same `screenshots-ios-uikit-ipad` and `screenshots-android-mdc-tablet` the old
