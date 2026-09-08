@@ -1,6 +1,8 @@
 # daybrite/actions
 
-Reusable GitHub workflows for [Day](https://daybrite.dev) projects.
+Reusable GitHub workflows for [Day](https://daybrite.dev) projects. Public open-source
+repositories use them freely; private and closed-source repositories need a
+[daybrite sponsorship](https://github.com/sponsors/daybrite).
 
 ## dayapp
 
@@ -100,9 +102,9 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `artifact-prefix` | string | — | Prefix for the package artifact names (`<prefix>dist-<target>`), so a repository that already publishes `dist-<target>` from another workflow can keep both. |
 | `themes` | string | — | Themes to run each dayscript under (`light dark`), expanded against `locales` into one run per combination. Each theme captures its own screenshot variant. |
 | `ios-profiles` | string | — | The older device-only form of `ios-devices`, comma-separated name prefixes with optional `=<slug>`. Setting both is an error. |
-| `ios-devices` | string | — | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…`. Each becomes its own parallel job, screenshot artifact and gallery column; the first one packs. `device` is a name prefix in which `*` matches anything, so `iPhone * Pro Max` is the largest iPhone the runner image has (see [Device profiles](#device-profiles)). |
-| `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `pixel_5` or `pixel_tablet`, comma-separated. |
-| `android-devices` | string | — | Device profiles for `android-mdc`, one per line in the same shape as `ios-devices`; `os` is the API level. |
+| `ios-devices` | string | phone + tablet | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…`. Each becomes its own parallel job, screenshot artifact and gallery column; the first one packs. `device` is a name prefix in which `*` matches anything, so `iPhone * Pro Max` is the largest iPhone the runner image has. Unset runs `iPhone * Pro Max` portrait and `iPad Pro 13-inch` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
+| `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `pixel_10` or `small_tablet`, comma-separated. |
+| `android-devices` | string | phone + tablet | Device profiles for `android-mdc`, one per line in the same shape as `ios-devices`, plus a `density` field; `os` is the API level. Unset runs `pixel_10` portrait and `small_tablet` landscape at `density=240`; naming any replaces the pair (see [Device profiles](#device-profiles)). |
 | `app-id` | string | — | The app's bundle id. When set, the Linux legs verify that the packed flatpak installs and reports that id, and the macOS legs that the `.app` carries it. |
 | `lint` | boolean | `True` | Run `day lint` before building: fluent coverage, ids, routes, and the store listing. |
 | `assert-pristine` | boolean | `True` | Fail if the checkout has uncommitted changes before packing. An artifact packed from a dirty tree records a commit that cannot reproduce it. |
@@ -149,8 +151,32 @@ newest installed rather than pinning a major that the next image drops.
 
 ### Device profiles
 
-`ios-devices` runs `ios-uikit`'s dayscripts on more than one device, naming each by device, OS and
-orientation. One profile per **line**; the comma separates the fields *inside* a profile:
+**Both mobile targets run on a phone and a tablet by default**, with no configuration in the
+calling workflow. `ios-uikit` runs `iPhone * Pro Max` in portrait and `iPad Pro 13-inch` in
+landscape; `android-mdc` runs `pixel_10` in portrait and `small_tablet` in landscape at
+`density=240`. Each is its own parallel job, its own screenshot artifact and its own gallery
+column, and captures land under `<target>/<slug>/<variant>/` — `ios-uikit/iphone/`,
+`ios-uikit/ipad/`, `android-mdc/phone/`, `android-mdc/tablet/`. Those are the two device classes
+a store listing asks for and the two an adaptive UI has to be looked at on, and the four panels
+are ones the App Store and Play accept as screenshots.
+
+Naming `ios-devices` or `android-devices` replaces that target's whole list, which is how an app
+runs on one device:
+
+```yaml
+with:
+  targets: ios-uikit, android-mdc
+  ios-devices: |
+    device=iPhone, orientation=portrait
+  android-devices: |
+    device=pixel_10, os=36, orientation=portrait
+```
+
+Two jobs, `ios-uikit · iPhone` and `android-mdc · pixel_10`, each capturing to
+`<target>/<variant>/` with no device level, since neither target runs on more than one device.
+
+`ios-devices` names each device by device, OS and orientation. One profile per **line**; the comma
+separates the fields *inside* a profile:
 
 ```yaml
 with:
@@ -169,9 +195,60 @@ Three jobs: `macos-appkit`, `ios-uikit · iPhone`, `ios-uikit · iPad Pro 13-inc
 - **`orientation`** is `portrait` (default) or `landscape`, applied headlessly through
   `devicectl device orientation set`. Nothing extra is needed to make it work: every macOS job runs
   on `xcode-27` (see [macOS runner](#macos-runner)).
+
 On Android the same fields mean the same things, with two differences worth knowing. `device` is an
 exact `avdmanager list device` id rather than a prefix — those ids are stable, so an unknown one
 should fail loudly — and `os` is an API level (`36`, `API 36`, `android-36`), defaulting to 36.
+
+```yaml
+with:
+  targets: android-mdc
+  android-devices: |
+    device=pixel_10,    os=36, orientation=portrait,  slug=phone
+    device=small_tablet, os=36, orientation=landscape, slug=tablet, density=240
+```
+
+Android takes one field iOS does not: **`density`**, the dpi the panel is read at. It moves the
+layout's size in points and leaves the capture's pixels alone.
+
+**Pick Android profiles Google Play accepts as store screenshots.** These two go in as captured:
+
+| profile | capture | points | Play |
+|---|---|---|---|
+| `pixel_10` | 1080x2424 portrait | 411x923 | phone slot |
+| `small_tablet`, `density=240` | 1920x1200 landscape | 1280x800 | both tablet slots |
+
+Play's help page says a screenshot's long side may be at most twice its short side, which would
+rule out every phone made since about 2018. The publishing API is looser, and these are the
+limits it actually enforces, each one measured by offering the API an image and reading its
+answer:
+
+| offered | phone slot | ten-inch slot |
+|---|---|---|
+| 100x100 | refused | — |
+| 1080x2400 (2.22:1) | accepted | — |
+| 1080x2424 (2.24:1) | **accepted** | — |
+| 1080x2500 (2.32:1) | refused | — |
+| 320x2000 (6.25:1) | refused | — |
+| 1280x800 | — | refused |
+| 1920x1200 | — | **accepted** |
+| 2560x1600 | — | accepted |
+
+So a current phone is fine — the cutoff sits between 2.24:1 and 2.32:1, and `pixel_10` is
+2.24:1 — while the ten-inch tablet slot holds a floor of 1,080 px on the short side. The
+seven-inch slot took 1280x800 and 800x1280 without complaint.
+
+That floor is why the tablet profile is not a modern one — `day devices boot` halves a headless panel past three million
+pixels (both axes and the density, so the size in points holds) to keep the emulator answering,
+so `pixel_tablet` and `medium_tablet` at 2560x1600 come back at 1280x800, which the ten-inch slot
+refuses. At 2.30 Mpx `small_tablet` sits below that line and is captured whole.
+
+That leaves one problem, which `density` solves. Every stock tablet profile clearing Play's 1,080
+does it at 320 dpi, so `small_tablet` lays out as 960x600 points: short enough that Day-Showcase's
+Query page collapses its list, failing three walkthrough steps that pass on a taller screen.
+`density=240` reads the same 1920x1200 panel as a 1280x800-point tablet — the layout the CI tablet
+had before — while the capture stays 1920x1200. Pixels are what the emulator rasterizes, so this
+costs nothing at boot.
 
 The emulator itself is stood up by the `day` CLI rather than a third-party action: `day devices
 setup` creates the AVD from the profile (installing the system image if the cache missed), and
@@ -205,11 +282,11 @@ build and script run, not the first device's:
 with:
   targets: macos-appkit, ios-uikit, android-mdc
   ios-profiles: "iPhone 16, iPad Pro=ipad"
-  android-profiles: "pixel_5, pixel_tablet=tablet"
+  android-profiles: "pixel_10, small_tablet=tablet"
 ```
 
 That is five jobs: `macos-appkit`, `ios-uikit · iPhone 16`, `ios-uikit · iPad Pro`,
-`android-mdc · pixel_5`, `android-mdc · pixel_tablet`.
+`android-mdc · pixel_10`, `android-mdc · small_tablet`.
 
 - **iOS profiles are prefixes**, matched against the simulators the runner image has: `iPhone`
   takes the first iPhone, `iPad Pro` the first iPad Pro. Exact names age out with each Xcode image,
@@ -222,8 +299,8 @@ That is five jobs: `macos-appkit`, `ios-uikit · iPhone 16`, `ios-uikit · iPad 
   and store-upload jobs; its screenshots keep the plain `screenshots-<target>` name. Every later
   profile builds, runs the scripts, and uploads `screenshots-<target>-<slug>` — it never packs, so
   a tag build cannot race two identical release assets.
-- **Naming no profiles changes nothing**: one job per target, named `<target>` exactly as before,
-  on the first iPhone / `pixel_5`.
+- **Naming no profiles gives a mobile target the default pair** — a phone and a tablet, two jobs
+  named `<target> · <device>`. Every other target is one job named `<target>`, exactly as before.
 
 **Replacing `tablet-walkthroughs`.** That input is gone (2026-08). It ran the scripts a second time
 inside the phone's job, on a hard-coded iPad and `pixel_tablet`, adding its whole wall clock to a
@@ -232,7 +309,7 @@ job that was already the slowest in the matrix. Profiles do the same work as par
 
 ```yaml
   ios-profiles: "iPhone, iPad=ipad"
-  android-profiles: "pixel_5, pixel_tablet=tablet"
+  android-profiles: "pixel_10, small_tablet=tablet"
 ```
 
 which uploads the same `screenshots-ios-uikit-ipad` and `screenshots-android-mdc-tablet` the old
@@ -343,6 +420,10 @@ Nothing to configure.
 
 ### Requirements
 
+- The calling repository must be public. `preflight` reads the caller's visibility and stops the
+  run there otherwise, before it builds anything: the workflows are free for public open-source
+  projects, and private, internal, and closed-source repositories need a
+  [daybrite sponsorship](https://github.com/sponsors/daybrite).
 - The project's `Cargo.toml` must resolve its `day` dependencies on a runner — a git dependency
   (`day = { git = "https://github.com/daybrite/day.git" }`, the `day new app --git` default), not
   a local path. For local-checkout development, put a `[patch]` in a gitignored

@@ -14,6 +14,11 @@
 # day-skies-windows-xaml-setup.exe; day-skies.hap → day-skies-harmony-arkui.hap), so each is
 # reachable at a stable .../releases/latest/download/<name> URL.
 #
+# Licensing: the workflows here are free for public open-source repositories. A private,
+# internal, or closed-source caller needs a daybrite sponsorship
+# (https://github.com/sponsors/daybrite); preflight's first step reads the caller's visibility
+# and stops the run there.
+#
 # Example caller (.github/workflows/ci.yml in the app repo) — build every target, and also publish
 # the web build to this repo's GitHub Pages on each push to the default branch:
 #
@@ -167,8 +172,8 @@ on:
           assets, and keeps the plain `screenshots-ios-uikit` artifact name, so every existing
           consumer is unaffected. Later profiles build, run the scripts, and upload
           `screenshots-ios-uikit-<slug>` — they never pack, which is what keeps a tag build from
-          racing two identical release assets. Unset = one job on `iPhone * Pro Max`, named
-          `ios-uikit` exactly as before.
+          racing two identical release assets. Unset = the default pair, a phone and a tablet
+          (see `ios-devices`).
         type: string
         required: false
         default: ""
@@ -217,9 +222,10 @@ on:
       android-profiles:
         description: >-
           The same for `android-mdc`, as AVD device profiles from `avdmanager list device`
-          (`pixel_5`, `pixel_tablet`) — passed to the emulator action verbatim, so these are
+          (`pixel_10`, `small_tablet`) — passed to the emulator action verbatim, so these are
           exact ids rather than prefixes. `=<slug>` and the first-is-primary rule work as they do
-          for ios-profiles. Unset = one job on `pixel_5`, named `android-mdc` exactly as before.
+          for ios-profiles. Unset = the default pair, a phone and a tablet (see
+          `android-devices`).
         type: string
         required: false
         default: ""
@@ -230,14 +236,33 @@ on:
           own screenshot artifact and gallery column.
 
               android-devices: |
-                device=pixel_5,      os=36, orientation=portrait
-                device=pixel_tablet, os=36, orientation=landscape, slug=tablet
+                device=pixel_10,    os=36, orientation=portrait,  slug=phone
+                device=small_tablet, os=36, orientation=landscape, slug=tablet, density=240
 
-          `device` is an exact `avdmanager list device` id (`pixel_5`, `pixel_tablet`), not a
+          `device` is an exact `avdmanager list device` id (`pixel_10`, `small_tablet`), not a
           prefix — unlike iOS, these ids are stable and an unknown one should fail loudly. `os` is
           an API level (`36`, `API 36`, `android-36`) and defaults to 36. `orientation` is
           `portrait` (default) or `landscape`, applied to the DISPLAY by
           `day devices boot --orientation` and verified there.
+
+          Those two profiles are what Google Play accepts as store screenshots, measured against
+          the publishing API rather than read off the help page (which still says the long side
+          may be at most twice the short one — the API is looser). What it actually enforces:
+          the phone slot takes up to about 2.25:1, so `pixel_10`'s 1080x2424 goes in whole while
+          1080x2500 is refused; the ten-inch tablet slot needs at least 1080 px on the short side,
+          so 1920x1200 is taken and 1280x800 is refused, though the seven-inch slot takes both.
+
+          That last rule is why the tablet is not a modern one. `pixel_tablet` and `medium_tablet`
+          are 2560x1600, past the three million pixels at which `day devices boot` halves a
+          headless panel to keep the emulator answering, and they come back at 1280x800 — which
+          the ten-inch slot refuses. `small_tablet` is 1920x1200 and is captured whole.
+
+          `density` re-reads that panel at a density of your choosing, which moves the size in
+          POINTS without touching the capture's pixels. Every stock tablet profile that clears
+          Play's 1080 does it at 320 dpi, so `small_tablet` lays out as 960x600 points — short
+          enough that Day-Showcase's Query page collapses its list and three walkthrough steps
+          fail. `density=240` makes the same 1920x1200 capture a 1280x800-point tablet, which is
+          what the CI tablet had before, and the steps pass.
 
           Supersedes `android-profiles`, which stays for callers that already set it.
         type: string
@@ -453,6 +478,31 @@ jobs:
       # input is off, which is the signal each leg reads to leave the committed lock alone.
       day-rev: ${{ steps.day-dep.outputs.rev }}
     steps:
+      # The licensing gate, first and before the checkout, so an ineligible caller stops on the
+      # cheapest step in the run — and stops the whole run, since every other job waits on
+      # preflight.
+      #
+      # `github.repository` is the CALLER's repository, not this one. Its visibility is read from
+      # the API rather than `github.event.repository`, which is absent from some of the events a
+      # caller can be triggered by; the automatic token always carries metadata read, so the
+      # lookup holds however tightly the caller scopes its own `permissions:` block. GitHub has
+      # three visibilities, not two: `internal` is an enterprise repository readable inside one
+      # organization, which is not open source, so only `public` passes.
+      - name: Check the caller's visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! visibility=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility 2>&1); then
+            echo "::error::could not read the visibility of $GITHUB_REPOSITORY: $visibility"
+            exit 1
+          fi
+          if [ "$visibility" != public ]; then
+            echo "::error::daybrite/actions is freely usable by public open-source repositories, but requires private and closed-source repositories to have a daybrite sponsorship in order to use the workflows. Sponsor the project at https://github.com/sponsors/daybrite."
+            exit 1
+          fi
+          echo "$GITHUB_REPOSITORY is public"
+
       # A full checkout, not the old website/site.toml sparse one: the first-pass checks read the
       # whole workspace and the store-upload detection greps the repo's Fastfiles.
       - uses: actions/checkout@v7
@@ -655,12 +705,26 @@ jobs:
                  | map({device: .device,
                         os: (.os // ""),
                         orientation: (.orientation // "portrait"),
+                        density: (.density // ""),
                         slug: ((.slug // .device) | slugify)});
-            # What the target runs on when the caller named nothing — the devices the dedicated
-            # legs used to hard-code, so an unconfigured run is unchanged.
-            # The iPhone is the largest one the image has: the store-screenshot size.
-            def fallback($t): if $t == "ios-uikit" then "iPhone * Pro Max"
-                              elif $t == "android-mdc" then "pixel_5" else "" end;
+            # What a mobile target runs on when the caller named nothing: a phone AND a tablet,
+            # because those are the two device classes a store listing asks for and the two an
+            # adaptive UI has to be looked at on. Every panel here is one App Store Connect and
+            # Google Play accept as a screenshot (see the README's Device profiles). Naming
+            # `ios-devices` or `android-devices` replaces the whole list, which is how an app
+            # runs on one device or on five.
+            def fallback($t):
+              if $t == "ios-uikit" then
+                [{device: "iPhone * Pro Max", os: "", orientation: "portrait",  density: "",
+                  slug: "iphone"},
+                 {device: "iPad Pro 13-inch", os: "", orientation: "landscape", density: "",
+                  slug: "ipad"}]
+              elif $t == "android-mdc" then
+                [{device: "pixel_10",     os: "36", orientation: "portrait",  density: "",
+                  slug: "phone"},
+                 {device: "small_tablet", os: "36", orientation: "landscape", density: "240",
+                  slug: "tablet"}]
+              else [] end;
             { include: [
                 .include[] as $r
                 | (if $r.target == "ios-uikit" then
@@ -674,8 +738,10 @@ jobs:
                         (devices($androiddev) | map(.os |= gsub("[^0-9]"; "")))
                       else profiles($android) end)
                    else [] end) as $named
-                | (if ($named | length) == 0
-                   then [{device: fallback($r.target), slug: ""}] else $named end) as $ps
+                | (if ($named | length) > 0 then $named
+                   elif (fallback($r.target) | length) > 0 then fallback($r.target)
+                   # Everything that is not a mobile target: one job, no device level.
+                   else [{device: "", slug: ""}] end) as $ps
                 | range(0; $ps | length) as $i
                 | $r + {
                     profile: $ps[$i].device,
@@ -683,15 +749,19 @@ jobs:
                     # boot step reads as "any OS, portrait".
                     device_os: ($ps[$i].os // ""),
                     device_orientation: ($ps[$i].orientation // ""),
-                    # The capture-tree level. Empty for a single-device target, which keeps its
-                    # captures exactly where every existing site build expects them.
-                    device_slug: (if ($named | length) > 1 then $ps[$i].slug else "" end),
+                    # Android only: the panel density `day devices setup --density` applies.
+                    device_density: ($ps[$i].density // ""),
+                    # The capture-tree level, `<target>/<slug>/<variant>/`. Empty for a target
+                    # running on ONE device, which keeps its captures where a single-device
+                    # gallery expects them.
+                    device_slug: (if ($ps | length) > 1 then $ps[$i].slug else "" end),
                     # Only the first row of a target packs, uploads packages, and feeds the
                     # release/signing/store jobs. The rest exist for their screenshots.
                     primary: ($i == 0),
-                    # The job name stays the bare target when the caller named no profiles, so
-                    # required status checks configured against it keep matching.
-                    label: (if ($named | length) == 0 then $r.target
+                    # The job name stays the bare target for a target running on one device, so
+                    # required status checks configured against it keep matching. Two jobs cannot
+                    # share a name, so a phone-and-tablet target names each after its device.
+                    label: (if ($named | length) == 0 and ($ps | length) == 1 then $r.target
                             else "\($r.target) · \($ps[$i].device)" end),
                     # First profile keeps the plain name every existing consumer reads.
                     shots_artifact: (if $i == 0 then "screenshots-\($r.target)"
@@ -1227,6 +1297,7 @@ jobs:
           PROFILE: ${{ matrix.profile }}
           DEVICE_OS: ${{ matrix.device_os }}
           DEVICE_ORIENTATION: ${{ matrix.device_orientation }}
+          DEVICE_DENSITY: ${{ matrix.device_density }}
         run: |
           set -euo pipefail
           # One AVD per profile, made from the same command a developer runs. The workflow holds
@@ -1241,7 +1312,8 @@ jobs:
           AVD="day-ci-$(printf %s "$PROFILE" | tr -cs '[:alnum:]' '-')"
           $DAY_BIN devices setup -p android-mdc --name "$AVD" \
             --device "$PROFILE" --os "${DEVICE_OS:-36}" --arch x86_64 \
-            ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"}
+            ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"} \
+            ${DEVICE_DENSITY:+--density "$DEVICE_DENSITY"}
           # Where the SDK tools actually put things, printed every run. This is cheap and it is
           # the evidence that was missing when a runner created an AVD successfully and then
           # reported having none: the tools keep `.android` wherever ANDROID_USER_HOME (or the
