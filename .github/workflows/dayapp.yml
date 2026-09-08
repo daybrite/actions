@@ -710,9 +710,12 @@ jobs:
             # What a mobile target runs on when the caller named nothing: a phone AND a tablet,
             # because those are the two device classes a store listing asks for and the two an
             # adaptive UI has to be looked at on. Every panel here is one App Store Connect and
-            # Google Play accept as a screenshot (see the README's Device profiles). Naming
-            # `ios-devices` or `android-devices` replaces the whole list, which is how an app
-            # runs on one device or on five.
+            # Google Play accept as a screenshot (the Device profiles section of the README says
+            # which sizes each store takes). Naming `ios-devices` or `android-devices` replaces
+            # the whole list, which is how an app runs on one device or on five.
+            #
+            # No apostrophes in this program: it reaches jq inside a single-quoted shell string,
+            # and one would end the string and hand jq nothing (`Top-level program not given`).
             def fallback($t):
               if $t == "ios-uikit" then
                 [{device: "iPhone * Pro Max", os: "", orientation: "portrait",  density: "",
