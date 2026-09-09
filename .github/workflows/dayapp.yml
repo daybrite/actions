@@ -14,11 +14,6 @@
 # day-skies-windows-xaml-setup.exe; day-skies.hap → day-skies-harmony-arkui.hap), so each is
 # reachable at a stable .../releases/latest/download/<name> URL.
 #
-# Licensing: the workflows here are free for public open-source repositories. A private,
-# internal, or closed-source caller needs a daybrite sponsorship
-# (https://github.com/sponsors/daybrite); preflight's first step reads the caller's visibility
-# and stops the run there.
-#
 # Example caller (.github/workflows/ci.yml in the app repo) — build every target, and also publish
 # the web build to this repo's GitHub Pages on each push to the default branch:
 #
@@ -484,31 +479,6 @@ jobs:
       # input is off, which is the signal each leg reads to leave the committed lock alone.
       day-rev: ${{ steps.day-dep.outputs.rev }}
     steps:
-      # The licensing gate, first and before the checkout, so an ineligible caller stops on the
-      # cheapest step in the run — and stops the whole run, since every other job waits on
-      # preflight.
-      #
-      # `github.repository` is the CALLER's repository, not this one. Its visibility is read from
-      # the API rather than `github.event.repository`, which is absent from some of the events a
-      # caller can be triggered by; the automatic token always carries metadata read, so the
-      # lookup holds however tightly the caller scopes its own `permissions:` block. GitHub has
-      # three visibilities, not two: `internal` is an enterprise repository readable inside one
-      # organization, which is not open source, so only `public` passes.
-      - name: Check the caller's visibility
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if ! visibility=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility 2>&1); then
-            echo "::error::could not read the visibility of $GITHUB_REPOSITORY: $visibility"
-            exit 1
-          fi
-          if [ "$visibility" != public ]; then
-            echo "::error::daybrite/actions is freely usable by public open-source repositories, but requires private and closed-source repositories to have a daybrite sponsorship in order to use the workflows. Sponsor the project at https://github.com/sponsors/daybrite."
-            exit 1
-          fi
-          echo "$GITHUB_REPOSITORY is public"
-
       # A full checkout, not the old website/site.toml sparse one: the first-pass checks read the
       # whole workspace and the store-upload detection greps the repo's Fastfiles.
       - uses: actions/checkout@v7

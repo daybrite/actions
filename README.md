@@ -1,8 +1,6 @@
 # daybrite/actions
 
-Reusable GitHub workflows for [Day](https://daybrite.dev) projects. Public open-source
-repositories use them freely; private and closed-source repositories need a
-[daybrite sponsorship](https://github.com/sponsors/daybrite).
+Reusable GitHub workflows for [Day](https://daybrite.dev) projects.
 
 ## dayapp
 
@@ -443,10 +441,6 @@ Nothing to configure.
 
 ### Requirements
 
-- The calling repository must be public. `preflight` reads the caller's visibility and stops the
-  run there otherwise, before it builds anything: the workflows are free for public open-source
-  projects, and private, internal, and closed-source repositories need a
-  [daybrite sponsorship](https://github.com/sponsors/daybrite).
 - The project's `Cargo.toml` must resolve its `day` dependencies on a runner — a git dependency
   (`day = { git = "https://github.com/daybrite/day.git" }`, the `day new app --git` default), not
   a local path. For local-checkout development, put a `[patch]` in a gitignored
