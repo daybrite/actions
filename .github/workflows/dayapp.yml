@@ -2234,9 +2234,23 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+      # From the lockfile as committed, and nothing else: a lock that cannot install is a
+      # template bug to fix there, not one to paper over with a fresh resolution that would
+      # build a site nobody has seen. Production packages only — the type checker and the
+      # search indexer are dev dependencies — except that a site which indexes (site.toml
+      # `pagefind = true`) needs the indexer, so it takes the full install.
       - name: Install the template
         working-directory: daysite
-        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          SITE_TOML="$GITHUB_WORKSPACE/app/${PROJECT_PATH:-.}/website/site.toml"
+          if grep -Eq '^[[:space:]]*pagefind[[:space:]]*=[[:space:]]*true' "$SITE_TOML"; then
+            npm ci --no-audit --no-fund
+          else
+            npm ci --no-audit --no-fund --omit=dev
+          fi
       # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png — plus each
       # target's own gallery.json, written by the dayscript runner with every `screenshot:`
       # step's localized title/caption metadata — so merging them into one directory
@@ -2275,27 +2289,49 @@ jobs:
             "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
               --screenshot-paths shots --out shots/gallery.json
           fi
-      - name: Generate the site data
+      # The raster favicon set (apple-touch, PWA tile, legacy favicon) comes from the renderer
+      # every platform's icon does: `day icon -p web-dom` writes the size-exact png/ family
+      # under build/day/host/, and the generator copies the sizes it needs. The site build
+      # carries no image library. Best-effort: without the CLI the site keeps the SVG master
+      # (or the largest PNG under resource/icons/) as its only icon.
+      - name: Render the icon family
+        if: ${{ steps.daycli.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: '"$DAY_BIN" --project "app/${PROJECT_PATH:-.}" icon -p web-dom'
+      # The latest release's assets, looked up HERE — the one place GitHub access is a given —
+      # and handed to the generator as a file, so the generator never touches the network. A
+      # repository with no release yet gets an empty file, which the generator reads as "no
+      # download cards", the same as a local preview.
+      - name: Look up the latest release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '[.assets[] | {name, size}]' \
+            > "$RUNNER_TEMP/release-assets.json"
+      - name: Generate the site data
+        env:
           PROJECT_PATH: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
           SITE_DIR="$GITHUB_WORKSPACE/app/${PROJECT_PATH:-.}/website"
           # This also copies the app's icon into the template's public/app/: the SVG master
           # (resource/icons/icon.svg or day-icon.svg) when the project ships one — the site
-          # serves it raw as the favicon and the landing-page app mark — plus the largest PNG
-          # under resource/icons/, which feeds the derived raster set (apple-touch, PWA tiles)
-          # and is the only icon for projects without an SVG master. Nothing else supplies the
-          # site an icon, so a project without either gets the template's defaults and a line
-          # in this log saying why.
+          # serves it raw as the favicon and the landing-page app mark — plus the png/ family
+          # rendered above (the raster favicon set, size for size) or, failing that, the
+          # largest PNG under resource/icons/. Nothing else supplies the site an icon, so a
+          # project without any gets the template's defaults and a line in this log saying why.
           # ORDER MATTERS: the gallery assembler WRITES gallery-manifest.json, and the appindex
           # generator READS it to fill each platform's landing-page carousel. Run the other way
           # round — as this did — and the manifest does not exist yet on a fresh checkout (it is
           # generated, so it is gitignored and never checked out), so every platform's carousel
           # ships empty while the /gallery page looks fine. Assemble first, then index.
           node daysite/scripts/assemble-gallery.mjs shots "$SITE_DIR"
-          node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" --repo "$GITHUB_REPOSITORY"
+          node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" \
+            --repo "$GITHUB_REPOSITORY" --release-assets "$RUNNER_TEMP/release-assets.json"
           echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
       # The hosted web build: reuse the dist the build matrix produced, staged under the
       # directory site.toml names (default "webapp"). Absent when web-dom is not a target —

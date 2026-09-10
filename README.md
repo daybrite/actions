@@ -508,7 +508,14 @@ host = "https://<owner>.github.io/<repo>"
 
 Deploys follow the same ref rule as `deploy-web` (pushes to the default branch, or
 `web-deploy-tag-pattern` when set) and need the same one-time setup: grant `pages: write` +
-`id-token: write` and set Settings → Pages → Source = "GitHub Actions". Pin the template with
-`daysite-version` (default `main`). Without a `website/` directory, `deploy-web: true` keeps its
-original behavior — the bare web app at the Pages root.
+`id-token: write` and set Settings → Pages → Source = "GitHub Actions". `daysite-version`
+selects the template revision; the default, `main`, means every rebuild takes the template's
+latest fixes, which is what the Day apps want. Without a `website/` directory,
+`deploy-web: true` keeps its original behavior — the bare web app at the Pages root.
+
+The job reads the network in two places only: the template's npm packages, installed from its
+lockfile as committed, and the repository's latest release, looked up with `gh api` and handed to
+the site generator as a file. The `day` CLI renders the icon family the favicons are copied from;
+the site build itself fetches nothing, and fails if the built site would load a resource from
+another origin.
 
