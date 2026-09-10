@@ -515,7 +515,9 @@ latest fixes, which is what the Day apps want. Without a `website/` directory,
 
 The job reads the network in two places only: the template's npm packages, installed from its
 lockfile as committed, and the repository's latest release, looked up with `gh api` and handed to
-the site generator as a file. The `day` CLI renders the icon family the favicons are copied from;
+the site generator as a file. The `day` CLI renders the icon family the favicons are copied from
+and describes the project (`day metadata --json`: the declared permissions, with their reasons
+in every locale) for the site's permissions card;
 the site build itself fetches nothing, and fails if the built site would load a resource from
 another origin.
 

@@ -2300,6 +2300,16 @@ jobs:
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
         run: '"$DAY_BIN" --project "app/${PROJECT_PATH:-.}" icon -p web-dom'
+      # The CLI's own view of the project — the declared permissions with their native keys per
+      # platform and reasons per locale (docs/permissions.md) — for the site's permissions
+      # card. Handed to the generator as a file, like the release lookup, so the generator
+      # itself runs no tool. Best-effort: without the CLI the card says none are declared.
+      - name: Describe the project
+        if: ${{ steps.daycli.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: '"$DAY_BIN" --project "app/${PROJECT_PATH:-.}" metadata --json > "$RUNNER_TEMP/day-metadata.json"'
       # The latest release's assets, looked up HERE — the one place GitHub access is a given —
       # and handed to the generator as a file, so the generator never touches the network. A
       # repository with no release yet gets an empty file, which the generator reads as "no
@@ -2331,7 +2341,8 @@ jobs:
           # ships empty while the /gallery page looks fine. Assemble first, then index.
           node daysite/scripts/assemble-gallery.mjs shots "$SITE_DIR"
           node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" \
-            --repo "$GITHUB_REPOSITORY" --release-assets "$RUNNER_TEMP/release-assets.json"
+            --repo "$GITHUB_REPOSITORY" --release-assets "$RUNNER_TEMP/release-assets.json" \
+            --metadata "$RUNNER_TEMP/day-metadata.json"
           echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
       # The hosted web build: reuse the dist the build matrix produced, staged under the
       # directory site.toml names (default "webapp"). Absent when web-dom is not a target —
