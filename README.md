@@ -9,9 +9,9 @@ Builds a conventional Day project for a set of platform-toolkit targets, runs it
 first and gates the whole matrix: `cargo fmt --all -- --check` by default, with clippy, check, and
 test available through the `preflight-checks` input — so a formatting slip fails one small ubuntu
 job before any build runner starts. On a semantic-version tag (`vX.Y.Z`), a final job attaches
-every package and a per-target screenshot zip — plus a `SHA256SUMS` manifest — to the GitHub
-release for that tag, and [store-upload jobs](#store-uploads) can hand the packed artifacts to the
-app's own fastlane lanes.
+every package, a per-target screenshot zip, one merged `screenshots.zip` with the `gallery.json`
+index beside it — plus a `SHA256SUMS` manifest — to the GitHub release for that tag, and
+[store-upload jobs](#store-uploads) can hand the packed artifacts to the app's own fastlane lanes.
 
 Release assets are packed with `day pack --no-version-in-name`, so their filenames carry no
 version, and each is tagged with its platform-toolkit combo — `app-fair-android-mdc.aab`,
@@ -25,6 +25,21 @@ Each package's provenance travels beside it, named after the package so a releas
 holding seven targets says which file each document describes:
 `app-fair-macos-appkit.dmg.buildinfo.json`, `.sbom-cdx.json`, `.sbom-spdx.json`. That is what
 `day rebuild <downloaded-package>` reads.
+
+### The screenshot bundle
+
+Beside the packages, a release carries every capture the run took:
+
+| asset | what it is |
+| --- | --- |
+| `screenshots.zip` | the merged capture tree — `<target>/[<device>/]<variant>/<shot>.png` for every target — with `gallery.json` at its root |
+| `gallery.json` | that same index on its own, so a tool can read what a release contains without downloading the images |
+| `screenshots-<target>.zip` | one target's captures, for someone who wants just those |
+
+`gallery.json` is `day screenshot index`'s merge of the per-target indexes: file name, shot id,
+localized title and caption, platform-toolkit, device, theme, locale, pixel dimensions, byte size,
+and sha-256 per capture. This is what makes a release's project-site pages buildable from the
+release alone — see [Project website](#project-website-daysite).
 
 ### Try it in one line
 
@@ -111,7 +126,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
 | `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
-| `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. |
+| `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. A [project website](#project-website-daysite) also deploys on every `vX.Y.Z` tag when this is empty, since a new release changes what its release channel shows. |
 | `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
 | `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. |
 | `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios`, or a `store/app.toml` listing that `day store stage` turns into lanes. `"true"`/`"false"` override. |
@@ -506,18 +521,45 @@ your dayscripts capture in this very workflow, and the latest release's assets.
 host = "https://<owner>.github.io/<repo>"
 ```
 
-Deploys follow the same ref rule as `deploy-web` (pushes to the default branch, or
-`web-deploy-tag-pattern` when set) and need the same one-time setup: grant `pages: write` +
+### Two build channels
+
+The site publishes the app twice, with a version picker above the platform picker:
+
+| | `/<locale>/` — the release | `/<locale>/main/` — the branch |
+| --- | --- | --- |
+| picker label | the release's version, `1.2.3` | the default branch, `main` |
+| downloads | that release's packages, at their `releases/latest/download/` URLs | this run's packages, served from the site under `main/downloads/` |
+| screenshots | that release's `screenshots.zip`, or its per-target zips when it predates the bundle | the captures this run's dayscripts took |
+| web app | that release's `web-dom` dist, at `/webapp/` | this run's, at `/main/webapp/` |
+| page | as published | carries a development-build notice and a link to the release |
+
+The release channel is assembled from **assets the release already carries** and nothing the run
+built, so the file a visitor downloads is the version the page names. The development channel is
+assembled from this run's artifacts and says so on every page; its packages are copied onto the
+site because a GitHub Actions artifact needs a signed-in account and expires with the run's
+retention window. That last part is the one cost worth knowing: a full package set is tens to
+hundreds of megabytes on every Pages deploy (Day Rise's is 117 MB).
+
+A repository with no release publishes the branch build at the locale root instead, and the
+picker, having one entry, is not drawn.
+
+### Deploys and setup
+
+Deploys follow `deploy-web`'s ref rule — pushes to the default branch, or
+`web-deploy-tag-pattern` when set — **plus every `vX.Y.Z` tag**, because the release channel's
+content changes the moment a release is published, and the job waits for the release job so it
+sees the release it just made. They need the same one-time setup: grant `pages: write` +
 `id-token: write` and set Settings → Pages → Source = "GitHub Actions". `daysite-version`
 selects the template revision; the default, `main`, means every rebuild takes the template's
 latest fixes, which is what the Day apps want. Without a `website/` directory,
 `deploy-web: true` keeps its original behavior — the bare web app at the Pages root.
 
 The job reads the network in two places only: the template's npm packages, installed from its
-lockfile as committed, and the repository's latest release, looked up with `gh api` and handed to
-the site generator as a file. The `day` CLI renders the icon family the favicons are copied from
-and describes the project (`day metadata --json`: the declared permissions, with their reasons
-in every locale) for the site's permissions card;
-the site build itself fetches nothing, and fails if the built site would load a resource from
-another origin.
+lockfile as committed, and the repository's latest release — its asset list through `gh api`, its
+screenshot bundle and web dist through `gh release download` — each handed to the site generator
+as a file or a directory. The `day` CLI merges each channel's screenshot index, renders the icon
+family the favicons are copied from, and describes the project (`day metadata --json`: the
+declared permissions, with their reasons in every locale) for the site's permissions card; the
+site build itself fetches nothing, and fails if the built site would load a resource from another
+origin.
 

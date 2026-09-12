@@ -778,16 +778,23 @@ jobs:
           echo "deploy_web=$deploy_web" | tee -a "$GITHUB_OUTPUT"
 
           # Website gate: a website/site.toml in the repo is the opt-in (no separate input), and
-          # the ref rule is deploy-web's — default branch, or web-deploy-tag-pattern when set.
-          # When it fires, the website job deploys the full daysite (with the web-dom build under
-          # its webapp/ subdirectory) and the root-deploy pages job stands down.
+          # the ref rule is deploy-web's — default branch, or web-deploy-tag-pattern when set —
+          # PLUS every release tag. When it fires, the website job deploys the full daysite (with
+          # the web-dom build under its webapp/ subdirectory) and the root-deploy pages job
+          # stands down.
+          #
+          # The tag is there because the site publishes two build channels (daysite's
+          # src/lib/channels.ts): the release channel is assembled from the newest release's own
+          # assets, so its content changes the moment a release is published. Without this, a
+          # freshly tagged version reached the site only on the next unrelated push to the
+          # default branch, and until then the release pages described the previous one.
           website=false
           if [ -f "${PROJECT_PATH:-.}/website/site.toml" ]; then
             if [ -n "${WEB_PATTERN// /}" ]; then
               if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ $WEB_PATTERN ]]; then
                 website=true
               fi
-            elif [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            elif [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ] || [ "$rel" = true ]; then
               website=true
             fi
             [ "$website" = true ] \
@@ -1763,6 +1770,12 @@ jobs:
           && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
+      # The checkout is for `day screenshot index` further down, which reads the project for
+      # website/site.toml's host and the app's locale set. Kept out of the workspace root so the
+      # artifact downloads below still land in bare `dist-in/` and `shots-in/`.
+      - uses: actions/checkout@v7
+        with:
+          path: app
       - name: Download packages
         uses: actions/download-artifact@v7
         with:
@@ -1829,6 +1842,59 @@ jobs:
             fi
           done
           [ -n "$(ls -A assets)" ] || { echo "::error::no release assets found under dist-in/ or shots-in/ — artifact download layout mismatch?"; exit 1; }
+      # --- the release's own screenshot bundle -----------------------------------------------
+      # One `screenshots.zip` holding every target's captures, and `gallery.json` beside it —
+      # the same index, published twice: once at the zip's root so the archive describes itself,
+      # once as an asset of its own so a tool can read what a release contains without
+      # downloading the images.
+      #
+      # This is what makes the project site's RELEASE channel buildable from the release alone
+      # (daysite's src/lib/channels.ts). The per-target `screenshots-<target>.zip` assets above
+      # stay: they are what someone grabbing one platform's captures wants, and every release
+      # since before this bundle existed has carried them, which is also the fallback the site
+      # build uses on a release that predates it.
+      - name: Merge the capture trees
+        id: shots
+        run: |
+          set -euo pipefail
+          rm -rf shots-merged
+          mkdir -p shots-merged
+          for d in shots-in/screenshots-*/; do
+            [ -d "$d" ] || continue
+            cp -R "$d." shots-merged/
+          done
+          if [ -n "$(find shots-merged -name '*.png' -print -quit)" ]; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no captures in this run — the release ships no screenshot bundle"
+          fi
+      # Best-effort, and only when there are captures to index: a cold `cargo install day-cli` is
+      # minutes, and a release with no screenshots has nothing for it to do. Without the CLI the
+      # bundle still ships — it carries each target's own gallery.json, which is what the site
+      # build merges when the standalone index is absent.
+      - name: Set up the day CLI
+        id: daycli
+        if: ${{ steps.shots.outputs.merged == 'true' }}
+        continue-on-error: true
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      - name: Bundle the screenshots
+        if: ${{ steps.shots.outputs.merged == 'true' }}
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.daycli.outcome }}" = success ]; then
+            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
+              --screenshot-paths shots-merged --out shots-merged/gallery.json
+            cp shots-merged/gallery.json assets/gallery.json
+          fi
+          (cd shots-merged && zip -qr "$GITHUB_WORKSPACE/assets/screenshots.zip" .)
+          ls -l assets/screenshots.zip
       # A curl-able `launch.sh` beside the packages, so the app has a one-line try-it path:
       #   curl -fsSL https://github.com/<repo>/releases/latest/download/launch.sh | bash
       # Generated per release and pinned to its own tag, so the URL a user fetches is what picks
@@ -2205,16 +2271,35 @@ jobs:
 
   # --- Project website (daysite) -------------------------------------------------------------
   # When the repository has website/site.toml, this job replaces the bare root deploy above: it
-  # builds the daybrite/daysite template against the repo's own data — Day.toml, store/ listings,
-  # the screenshot artifacts the build matrix just captured, and the latest release's assets —
-  # and deploys the result to the repo's GitHub Pages, with the web-dom build hosted under the
-  # site's webapp/ subdirectory (site.toml `webapp`, default "webapp"). Same permissions story
-  # as the pages job: the caller grants `pages: write` + `id-token: write` and points
-  # Settings → Pages at "GitHub Actions".
+  # builds the daybrite/daysite template against the repo's own data and deploys the result to
+  # the repo's GitHub Pages. Same permissions story as the pages job: the caller grants
+  # `pages: write` + `id-token: write` and points Settings → Pages at "GitHub Actions".
+  #
+  # The site publishes the app twice, as two BUILD CHANNELS (daysite's src/lib/channels.ts), and
+  # the two are assembled from deliberately different sources:
+  #
+  #   release  the newest GitHub release, from that release's own assets and nothing else — the
+  #            packages it carries, its screenshots.zip, its web-dom dist. It owns the locale
+  #            root (`/en/`), so the address someone shares is the released app.
+  #   main     the newest build of the default branch, from the artifacts THIS run produced —
+  #            the screenshots the dayscripts just captured, the packages the matrix just
+  #            packed, the dist the web-dom leg just built. It lives at `/en/main/`, its pages
+  #            carry a development-build notice, and its packages are served from the site
+  #            itself, because a branch build has no release to link.
+  #
+  # A repository with no release publishes main at the locale root instead, and its version
+  # picker, having one entry, is not drawn.
   website:
     name: deploy website
-    needs: [preflight, build]
-    if: ${{ needs.preflight.outputs.website == 'true' && !cancelled() }}
+    # `release` is a need so a tag build's site sees the release it just published: the release
+    # job creates the release as a draft and un-drafts it at the end, and `releases/latest`
+    # skips drafts. `!cancelled()` plus the explicit result keeps a SKIPPED release (every push
+    # to the default branch) from taking the deploy with it — the same gate the release job
+    # documents for sign-macos.
+    needs: [preflight, build, release]
+    if: >-
+      ${{ needs.preflight.outputs.website == 'true' && !cancelled()
+          && needs.release.result != 'cancelled' }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -2251,13 +2336,25 @@ jobs:
           else
             npm ci --no-audit --no-fund --omit=dev
           fi
+      # The CLI does three jobs here: it merges the per-target screenshot indexes for both
+      # channels, renders the icon family the favicons are copied from, and describes the
+      # project's permissions. Best-effort throughout — each consumer below degrades on its own.
+      - name: Set up the day CLI
+        id: daycli
+        continue-on-error: true
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      # --- the development channel's inputs: what this run built -------------------------------
       # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png — plus each
       # target's own gallery.json, written by the dayscript runner with every `screenshot:`
       # step's localized title/caption metadata — so merging them into one directory
       # reassembles exactly the capture tree `day screenshot index` merges and the gallery
       # assembler reads. Tolerated-absent: a run whose dayscripts captured nothing still
       # publishes a site — the gallery page is simply not generated.
-      - name: Download screenshots
+      - name: Download this run's screenshots
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
@@ -2267,17 +2364,9 @@ jobs:
       # `day screenshot index` merges the per-target indexes into shots/gallery.json — the
       # machine-readable index of every screenshot (URL, localized title/caption, theme,
       # locale, platform, dimensions, byte size, sha-256). The assembler republishes it at
-      # /gallery/gallery.json, where other sites reference this app's screenshots — the way
+      # /main/gallery/gallery.json, where other sites reference this app's screenshots — the way
       # daybrite.dev references the Day Showcase's. Best-effort like the download above: a
       # failure costs the published index, never the site.
-      - name: Set up the day CLI
-        id: daycli
-        continue-on-error: true
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
-        with:
-          version: ${{ inputs.day-version }}
-          git: ${{ inputs.day-git }}
-          source: ${{ inputs.day-source }}
       - name: Build the screenshot index
         if: ${{ steps.daycli.outcome == 'success' }}
         continue-on-error: true
@@ -2289,6 +2378,64 @@ jobs:
             "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
               --screenshot-paths shots --out shots/gallery.json
           fi
+      # The packages the matrix just packed. The development channel serves them from the site
+      # itself — a GitHub Actions artifact needs a signed-in account and expires with the run's
+      # retention window, so a link to one is a link most visitors cannot follow. The generator
+      # copies only real packages out of these directories (the provenance sidecars beside them
+      # describe a download, they are not one), which is what keeps the Pages payload to the
+      # installable files.
+      - name: Download this run's packages
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: ${{ inputs.artifact-prefix }}dist-*
+          path: dist-in
+      # --- the release channel's inputs: what the release carries ------------------------------
+      # The one place GitHub access is a given, so the lookup happens HERE and everything below
+      # reads files. A repository with no release yet writes an empty asset list, which the
+      # generator reads as "no release channel", the same as a local preview.
+      - name: Look up the latest release
+        id: release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            jq '[.assets[] | {name, size}]' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/release-assets.json"
+            echo "tag=$(jq -r .tag_name "$RUNNER_TEMP/release.json")" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo '[]' > "$RUNNER_TEMP/release-assets.json"
+            echo "::notice::no published release — the site carries the development channel alone"
+          fi
+      - name: Download the release's screenshots
+        if: ${{ steps.release.outputs.tag != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_PATH: ${{ inputs.project-path }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p rel-zips rel-shots
+          # The merged `screenshots.zip` when the release has one, and the per-target zips
+          # otherwise — every Day release carried those before the bundle existed, and they
+          # unzip to the same capture tree, so a release made before this change still gets a
+          # full gallery.
+          if jq -e 'any(.name == "screenshots.zip")' "$RUNNER_TEMP/release-assets.json" >/dev/null; then
+            gh release download "$TAG" --dir rel-zips --clobber --pattern 'screenshots.zip'
+          else
+            gh release download "$TAG" --dir rel-zips --clobber --pattern 'screenshots-*.zip'
+          fi
+          for z in rel-zips/*.zip; do [ -e "$z" ] || continue; unzip -qo "$z" -d rel-shots; done
+          # A merged bundle carries the index at its root; per-target zips carry only their own,
+          # so the CLI merges them the way it just did for the development channel.
+          if [ ! -f rel-shots/gallery.json ] && [ "${{ steps.daycli.outcome }}" = success ]; then
+            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
+              --screenshot-paths rel-shots --out rel-shots/gallery.json
+          fi
+          echo "$(find rel-shots -name '*.png' | wc -l) capture(s) from $TAG"
+      # --- shared inputs -----------------------------------------------------------------------
       # The raster favicon set (apple-touch, PWA tile, legacy favicon) comes from the renderer
       # every platform's icon does: `day icon -p web-dom` writes the size-exact png/ family
       # under build/day/host/, and the generator copies the sizes it needs. The site build
@@ -2310,72 +2457,88 @@ jobs:
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
         run: '"$DAY_BIN" --project "app/${PROJECT_PATH:-.}" metadata --json > "$RUNNER_TEMP/day-metadata.json"'
-      # The latest release's assets, looked up HERE — the one place GitHub access is a given —
-      # and handed to the generator as a file, so the generator never touches the network. A
-      # repository with no release yet gets an empty file, which the generator reads as "no
-      # download cards", the same as a local preview.
-      - name: Look up the latest release
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '[.assets[] | {name, size}]' \
-            > "$RUNNER_TEMP/release-assets.json"
       - name: Generate the site data
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
+          TAG: ${{ steps.release.outputs.tag }}
+          BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           SITE_DIR="$GITHUB_WORKSPACE/app/${PROJECT_PATH:-.}/website"
-          # This also copies the app's icon into the template's public/app/: the SVG master
-          # (resource/icons/icon.svg or day-icon.svg) when the project ships one — the site
-          # serves it raw as the favicon and the landing-page app mark — plus the png/ family
-          # rendered above (the raster favicon set, size for size) or, failing that, the
-          # largest PNG under resource/icons/. Nothing else supplies the site an icon, so a
-          # project without any gets the template's defaults and a line in this log saying why.
-          # ORDER MATTERS: the gallery assembler WRITES gallery-manifest.json, and the appindex
-          # generator READS it to fill each platform's landing-page carousel. Run the other way
-          # round — as this did — and the manifest does not exist yet on a fresh checkout (it is
-          # generated, so it is gitignored and never checked out), so every platform's carousel
-          # ships empty while the /gallery page looks fine. Assemble first, then index.
-          node daysite/scripts/assemble-gallery.mjs shots "$SITE_DIR"
-          node daysite/scripts/generate-appindex.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" \
-            --repo "$GITHUB_REPOSITORY" --release-assets "$RUNNER_TEMP/release-assets.json" \
-            --metadata "$RUNNER_TEMP/day-metadata.json"
+          # One entry per published channel, in picker order. generate-site.mjs decides which
+          # owns the locale root, then runs the gallery assembler and the appindex generator
+          # once per channel with that channel's prefixes — including copying the app's icon
+          # into the template's public/app/: the SVG master (resource/icons/icon.svg or
+          # day-icon.svg) when the project ships one, plus the png/ family rendered above or,
+          # failing that, the largest PNG under resource/icons/. Nothing else supplies the site
+          # an icon, so a project without any gets the template's defaults and a line in this
+          # log saying why.
+          jq -n \
+            --arg tag "${TAG:-}" --arg version "${TAG#v}" \
+            --arg relshots "$GITHUB_WORKSPACE/rel-shots" \
+            --arg relassets "$RUNNER_TEMP/release-assets.json" \
+            --arg branch "$BRANCH" --arg sha "$GITHUB_SHA" \
+            --arg shots "$GITHUB_WORKSPACE/shots" \
+            --arg dist "$GITHUB_WORKSPACE/dist-in" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '[ (if $tag == "" then empty else
+                 { id: "release", label: $version, tag: $tag,
+                   screenshots: $relshots, releaseAssets: $relassets } end),
+               { id: "main", label: $branch, ref: $branch, commit: $sha, development: true,
+                 screenshots: $shots, downloads: $dist, runURL: $run } ]' \
+            > "$RUNNER_TEMP/channels.json"
+          node daysite/scripts/generate-site.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" \
+            --channels "$RUNNER_TEMP/channels.json" \
+            --repo "$GITHUB_REPOSITORY" --metadata "$RUNNER_TEMP/day-metadata.json"
           echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
-      # The hosted web build: reuse the dist the build matrix produced, staged under the
-      # directory site.toml names (default "webapp"). Absent when web-dom is not a target —
-      # the site then simply has no "Open the web app" button.
+      # The hosted web builds, one per channel: the release's own dist under the directory
+      # site.toml names (default "webapp"), and this run's under the development channel's
+      # segment. Each channel's "Open the web app" then runs the version its pages describe.
+      # Absent when web-dom is not a target — the site simply has no such button.
       - name: Download the web-dom dist
         id: webdist
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          name: dist-web-dom
+          name: ${{ inputs.artifact-prefix }}dist-web-dom
           path: web-in
-      - name: Stage the web app inside the site
-        if: ${{ steps.webdist.outcome == 'success' }}
+      - name: Stage each channel's web app
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          WEBAPP="$(node --input-type=module -e '
-            import { readFileSync } from "node:fs";
-            import { parse } from "./daysite/node_modules/smol-toml/dist/index.js";
-            const t = parse(readFileSync(process.env.SITE_DIR + "/site.toml", "utf8"));
-            console.log(t.webapp ?? "webapp");
-          ')"
+          # Both directories may be absent — web-dom is not always a target, and not every
+          # release ships a dist — and an absent one would fail the `find` below under
+          # `pipefail` rather than reading as "nothing to stage".
+          mkdir -p web-in rel-web
+          # WHERE each build goes is channels.json's answer rather than this script's, so the
+          # workflow and the template cannot disagree about the path: `webapp/` for the channel
+          # that owns the locale root, `<segment>/webapp/` for the other.
+          stage() { # $1 = zip, $2 = directory under the site root
+            # Clear the target first. It is meant to be empty in a fresh checkout, but if
+            # anything ever ships one (a stray commit did), `unzip` asks whether to overwrite
+            # each file — and with no stdin it reads EOF, answers "[N]one", and fails the deploy
+            # on a prompt nobody saw. Removing the directory also drops files the new build no
+            # longer has, which overwriting alone would leave behind to be served.
+            rm -rf "daysite/public/$2"
+            mkdir -p "daysite/public/$2"
+            unzip -q "$1" -d "daysite/public/$2"
+            test -f "daysite/public/$2/index.html"
+            echo "staged $(basename "$1") under /$2/"
+          }
+          REL_DIR="$(jq -r '[.channels[] | select(.development | not) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
+          MAIN_DIR="$(jq -r '[.channels[] | select(.development) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
           # <stem>-web-dom.zip, by glob: the stem is the app's (see the build job's staging step).
           ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
-          [ -n "$ZIP" ] || { echo "::error::no web-dom dist zip in the dist-web-dom artifact"; exit 1; }
-          # Clear the target first. It is meant to be empty in a fresh checkout, but if anything
-          # ever ships one (a stray commit did), `unzip` asks whether to overwrite each file —
-          # and with no stdin it reads EOF, answers "[N]one", and fails the deploy on a prompt
-          # nobody saw. Removing the directory also drops files the new build no longer has,
-          # which overwriting alone would leave behind to be served.
-          rm -rf "daysite/public/$WEBAPP"
-          unzip -q "$ZIP" -d "daysite/public/$WEBAPP"
-          test -f "daysite/public/$WEBAPP/index.html"
-          echo "web app staged under /$WEBAPP/"
+          if [ -n "$ZIP" ] && [ -n "$MAIN_DIR" ]; then stage "$ZIP" "$MAIN_DIR"; fi
+          if [ -n "$REL_DIR" ] && [ -n "${TAG:-}" ]; then
+            gh release download "$TAG" --dir rel-web --clobber --pattern '*-web-dom.zip' \
+              || echo "::notice::$TAG ships no web-dom dist — the release channel has no hosted web app"
+            RZIP="$(find rel-web -maxdepth 1 -name '*.zip' | head -1)"
+            if [ -n "$RZIP" ]; then stage "$RZIP" "$REL_DIR"; fi
+          fi
+          du -sh daysite/public/* 2>/dev/null || true
       - name: Build the site
         working-directory: daysite
         env:
