@@ -521,6 +521,12 @@ your dayscripts capture in this very workflow, and the latest release's assets.
 host = "https://<owner>.github.io/<repo>"
 ```
 
+Everything else about the site is a key in that file rather than an input here, because it is a
+property of the app and not of the run: the accent color, which platform the picker opens on,
+and `icon-effect`, which decides what the landing page's app mark does when a visitor hovers it
+(the [daysite README](https://github.com/daybrite/daysite#icon-effect) lists the six). This
+workflow's inputs stay the things a build can vary.
+
 ### Two build channels
 
 The site publishes the app twice, with a version picker above the platform picker:
