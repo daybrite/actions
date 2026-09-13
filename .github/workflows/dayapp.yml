@@ -2413,6 +2413,12 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          # `gh release` subcommands name their repository from the working directory's git
+          # remote, and this job's working directory is not a checkout — the app is cloned into
+          # app/. Without this every download here failed with "not a git repository", the
+          # release channel published no screenshots, and <site>/gallery/gallery.json 404'd.
+          # (`gh api` above is unaffected: it spells the repository in its path.)
+          GH_REPO: ${{ github.repository }}
           PROJECT_PATH: ${{ inputs.project-path }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
@@ -2505,6 +2511,9 @@ jobs:
       - name: Stage each channel's web app
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout here for `gh release download` to read a remote from; see the release
+          # screenshots step above.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
