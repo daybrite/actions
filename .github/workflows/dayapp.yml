@@ -478,9 +478,6 @@ jobs:
       # The plan's Pages decisions, after the check that github-pages admits a tag.
       deploy_web: ${{ steps.pages.outputs.deploy_web }}
       website: ${{ steps.pages.outputs.website }}
-      upload_ios: ${{ steps.stores.outputs.upload_ios }}
-      upload_macos: ${{ steps.stores.outputs.upload_macos }}
-      upload_play: ${{ steps.stores.outputs.upload_play }}
       # The day revision every leg builds against, under inputs.update-day-deps. Empty when the
       # input is off, which is the signal each leg reads to leave the committed lock alone.
       day-rev: ${{ steps.day-dep.outputs.rev }}
@@ -886,71 +883,6 @@ jobs:
             echo "deploy_web=false" | tee -a "$GITHUB_OUTPUT"
             echo "website=false" | tee -a "$GITHUB_OUTPUT"
           fi
-
-      # Which store uploads run if this build is a release tag. An explicit upload-* input wins.
-      # Empty (auto) enables an upload only when the app is set up for that store: it has lanes
-      # for the platform (a fastlane/Fastfile under project-path, or the platform/ios and
-      # platform/android convention directories, containing the literal `platform :ios`,
-      # `platform :mac` or `platform :android` block; for iOS and Play also a store/app.toml
-      # listing, which `day store stage` turns into lanes) AND the store's upload credentials
-      # reached this workflow. Every app scaffold carries a store/ listing for its website and web
-      # manifest, so the listing alone does not mean the app publishes to a store, and without
-      # the credentials an upload job could only fail. Each auto decision is a ::notice so the
-      # run explains itself.
-      - name: Decide the store uploads
-        id: stores
-        env:
-          UPLOAD_IOS_IN: ${{ inputs.upload-ios }}
-          UPLOAD_MACOS_IN: ${{ inputs.upload-macos }}
-          UPLOAD_PLAY_IN: ${{ inputs.upload-play }}
-          PROJECT_PATH: ${{ inputs.project-path }}
-          # Whether each store's credentials are set is all that crosses into the step.
-          HAS_ASC: ${{ secrets.DAY_ASC_KEY_ID != '' && secrets.DAY_ASC_ISSUER != '' && secrets.DAY_ASC_KEY_B64 != '' }}
-          HAS_PLAY: ${{ secrets.DAY_PLAY_JSON_KEY != '' }}
-        run: |
-          set -euo pipefail
-          PP="${PROJECT_PATH:-.}"
-          # Where a platform's lanes come from, or nothing: $1=Fastfile marker, $2=whether a
-          # store/ listing counts, $3…=candidate Fastfiles.
-          lanes() {
-            local marker="$1" listing="$2" f
-            shift 2
-            for f in "$@"; do
-              if [ -f "$f" ] && grep -qF "$marker" "$f"; then echo "$f"; return 0; fi
-            done
-            if [ "$listing" = true ] && [ -f "$PP/store/app.toml" ]; then
-              echo "$PP/store/app.toml (lanes from 'day store stage')"
-            fi
-            return 0
-          }
-          decide() { # $1=output name, $2=explicit input, $3=where the lanes are, $4=credentials set, $5=their names
-            local name="$1" explicit="$2" lanes="$3" credentials="$4" names="$5" on=false
-            case "$explicit" in
-              true|false) on="$explicit" ;;
-              "")
-                if [ -z "$lanes" ]; then
-                  echo "::notice::$name=false (auto): the app has no lanes for this store"
-                elif [ "$credentials" != true ]; then
-                  echo "::notice::$name=false (auto): lanes in $lanes, but the credentials ($names) are not all set"
-                else
-                  on=true
-                  echo "::notice::$name=true (auto): lanes in $lanes, and the credentials ($names) are set"
-                fi
-                ;;
-              *) echo "::error::$name: inputs.upload-* accept '' (auto), 'true', or 'false' — got '$explicit'"; exit 1 ;;
-            esac
-            echo "$name=$on" | tee -a "$GITHUB_OUTPUT"
-          }
-          ASC="DAY_ASC_KEY_ID, DAY_ASC_ISSUER and DAY_ASC_KEY_B64"
-          decide upload_ios "$UPLOAD_IOS_IN" \
-            "$(lanes 'platform :ios' true "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile")" \
-            "$HAS_ASC" "$ASC"
-          decide upload_macos "$UPLOAD_MACOS_IN" \
-            "$(lanes 'platform :mac' false "$PP/fastlane/Fastfile")" \
-            "$HAS_ASC" "$ASC"
-          decide upload_play "$UPLOAD_PLAY_IN" \
-            "$(lanes 'platform :android' true "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile")" \
-            "$HAS_PLAY" "DAY_PLAY_JSON_KEY"
 
   build:
     # The bare target when the caller named no device profiles, `<target> · <device>` when it did
@@ -2096,14 +2028,95 @@ jobs:
   # a Mac App Store .pkg gets produced. Credentials never touch these jobs' env: `secrets:
   # inherit` puts the caller's secrets in scope, and the Fastfile reads its own (App Store
   # Connect API key envs, the Play JSON key). The artifact arrives as DAY_IPA / DAY_PKG_OR_APP /
-  # DAY_AAB. Whether each job runs was decided in preflight (an explicit upload-* input, or lanes
-  # for the platform plus that store's credentials); like sign-macos, `!cancelled()` keeps an unrelated
+  # DAY_AAB. Whether each job runs was decided in the stores job (an explicit upload-* input, or
+  # lanes for the platform plus that store's credentials); like sign-macos, `!cancelled()` keeps an unrelated
   # matrix leg's failure from silently skipping a release upload — if the leg that feeds a job
   # failed, its download-artifact step fails loudly instead.
+  # Which store uploads run on this release tag. It is a job of its own because the decision reads
+  # whether the store secrets are set, and GitHub masks every line of a secret a job reads, in that
+  # job's logs and in its outputs. A service-account JSON key has lines that are a lone `{` or `}`,
+  # so while preflight read it, preflight's JSON matrix outputs were dropped as possibly secret and
+  # no build job ran (Day-Showcase, 2026-09-14). This job's outputs are only true or false.
+  stores:
+    name: store uploads
+    needs: [preflight]
+    if: ${{ needs.preflight.outputs.release == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      upload_ios: ${{ steps.stores.outputs.upload_ios }}
+      upload_macos: ${{ steps.stores.outputs.upload_macos }}
+      upload_play: ${{ steps.stores.outputs.upload_play }}
+    steps:
+      - uses: actions/checkout@v7
+      # Which store uploads run if this build is a release tag. An explicit upload-* input wins.
+      # Empty (auto) enables an upload only when the app is set up for that store: it has lanes
+      # for the platform (a fastlane/Fastfile under project-path, or the platform/ios and
+      # platform/android convention directories, containing the literal `platform :ios`,
+      # `platform :mac` or `platform :android` block; for iOS and Play also a store/app.toml
+      # listing, which `day store stage` turns into lanes) AND the store's upload credentials
+      # reached this workflow. Every app scaffold carries a store/ listing for its website and web
+      # manifest, so the listing alone does not mean the app publishes to a store, and without
+      # the credentials an upload job could only fail. Each auto decision is a ::notice so the
+      # run explains itself.
+      - name: Decide the store uploads
+        id: stores
+        env:
+          UPLOAD_IOS_IN: ${{ inputs.upload-ios }}
+          UPLOAD_MACOS_IN: ${{ inputs.upload-macos }}
+          UPLOAD_PLAY_IN: ${{ inputs.upload-play }}
+          PROJECT_PATH: ${{ inputs.project-path }}
+          # Whether each store's credentials are set is all that crosses into the step.
+          HAS_ASC: ${{ secrets.DAY_ASC_KEY_ID != '' && secrets.DAY_ASC_ISSUER != '' && secrets.DAY_ASC_KEY_B64 != '' }}
+          HAS_PLAY: ${{ secrets.DAY_PLAY_JSON_KEY != '' }}
+        run: |
+          set -euo pipefail
+          PP="${PROJECT_PATH:-.}"
+          # Where a platform's lanes come from, or nothing: $1=Fastfile marker, $2=whether a
+          # store/ listing counts, $3…=candidate Fastfiles.
+          lanes() {
+            local marker="$1" listing="$2" f
+            shift 2
+            for f in "$@"; do
+              if [ -f "$f" ] && grep -qF "$marker" "$f"; then echo "$f"; return 0; fi
+            done
+            if [ "$listing" = true ] && [ -f "$PP/store/app.toml" ]; then
+              echo "$PP/store/app.toml (lanes from 'day store stage')"
+            fi
+            return 0
+          }
+          decide() { # $1=output name, $2=explicit input, $3=where the lanes are, $4=credentials set, $5=their names
+            local name="$1" explicit="$2" lanes="$3" credentials="$4" names="$5" on=false
+            case "$explicit" in
+              true|false) on="$explicit" ;;
+              "")
+                if [ -z "$lanes" ]; then
+                  echo "::notice::$name=false (auto): the app has no lanes for this store"
+                elif [ "$credentials" != true ]; then
+                  echo "::notice::$name=false (auto): lanes in $lanes, but the credentials ($names) are not all set"
+                else
+                  on=true
+                  echo "::notice::$name=true (auto): lanes in $lanes, and the credentials ($names) are set"
+                fi
+                ;;
+              *) echo "::error::$name: inputs.upload-* accept '' (auto), 'true', or 'false' — got '$explicit'"; exit 1 ;;
+            esac
+            echo "$name=$on" | tee -a "$GITHUB_OUTPUT"
+          }
+          ASC="DAY_ASC_KEY_ID, DAY_ASC_ISSUER and DAY_ASC_KEY_B64"
+          decide upload_ios "$UPLOAD_IOS_IN" \
+            "$(lanes 'platform :ios' true "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile")" \
+            "$HAS_ASC" "$ASC"
+          decide upload_macos "$UPLOAD_MACOS_IN" \
+            "$(lanes 'platform :mac' false "$PP/fastlane/Fastfile")" \
+            "$HAS_ASC" "$ASC"
+          decide upload_play "$UPLOAD_PLAY_IN" \
+            "$(lanes 'platform :android' true "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile")" \
+            "$HAS_PLAY" "DAY_PLAY_JSON_KEY"
+
   appstore-ios:
     name: upload (ios app store)
-    needs: [preflight, build]
-    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_ios == 'true' }}
+    needs: [preflight, build, stores]
+    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_ios == 'true' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
     steps:
       - uses: actions/checkout@v7
@@ -2172,8 +2185,8 @@ jobs:
   # build job's dev-tier dist when it is not (the skipped job costs nothing under !cancelled()).
   appstore-macos:
     name: upload (mac app store)
-    needs: [preflight, build, sign-macos]
-    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_macos == 'true' }}
+    needs: [preflight, build, sign-macos, stores]
+    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_macos == 'true' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
     steps:
       - uses: actions/checkout@v7
@@ -2212,8 +2225,8 @@ jobs:
 
   playstore-android:
     name: upload (google play)
-    needs: [preflight, build]
-    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.preflight.outputs.upload_play == 'true' }}
+    needs: [preflight, build, stores]
+    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_play == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -2290,10 +2303,11 @@ jobs:
   pages:
     name: deploy web
     needs: [preflight, build]
-    # !cancelled() so a cancelled run doesn't publish; an unrelated target failing does not block
-    # the web deploy (the artifact is per-target), but a failed web build leaves no dist-web-dom
-    # artifact and the download step below fails loudly.
-    if: ${{ needs.preflight.outputs.deploy_web == 'true' && needs.preflight.outputs.website != 'true' && !cancelled() }}
+    # The whole build is a prerequisite: every matrix leg must succeed before anything publishes,
+    # so a run that built nothing, or built only part of the app, leaves the live site as it was.
+    if: >-
+      ${{ needs.preflight.outputs.deploy_web == 'true' && needs.preflight.outputs.website != 'true'
+          && !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     # Bind the run to the repo's github-pages environment so the live URL shows in the UI.
     environment:
@@ -2401,9 +2415,15 @@ jobs:
     # skips drafts. `!cancelled()` plus the explicit result keeps a SKIPPED release (every push
     # to the default branch) from taking the deploy with it — the same gate the release job
     # documents for sign-macos.
+    #
+    # The whole build is a prerequisite too: the site hosts the web-dom build, the screenshots and
+    # the packages this run produced, so it deploys only after every matrix leg succeeded. A run
+    # whose build was skipped or failed leaves the live site as it was instead of publishing one
+    # without its web app.
     needs: [preflight, build, release]
     if: >-
       ${{ needs.preflight.outputs.website == 'true' && !cancelled()
+          && needs.build.result == 'success'
           && needs.release.result != 'cancelled' }}
     runs-on: ubuntu-latest
     environment:

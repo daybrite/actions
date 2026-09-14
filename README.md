@@ -391,8 +391,8 @@ review; `android validate`, `android upload`, and `android release`). An auto up
 the store's upload credentials: the App Store Connect key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
 `DAY_ASC_KEY_B64`) for iOS and the Mac App Store, and `DAY_PLAY_JSON_KEY` for Play. Every app
 scaffold carries a `store/` listing for its website and web manifest, so a tagged release of an
-app without those secrets skips the store jobs instead of failing in them. The `preflight` job
-prints a `::notice` for each auto decision.
+app without those secrets skips the store jobs instead of failing in them. The `store uploads` job
+runs on release tags and prints a `::notice` for each auto decision.
 
 Each job checks out the repo, downloads the built artifact, points its `DAY_*` variable at it
 (an absolute path), and runs the lane from the directory holding `fastlane/` — with
@@ -448,7 +448,8 @@ jobs:
 By default it publishes on a push to the repo's default branch; set `web-deploy-tag-pattern` to a
 regex to publish only on matching tags. The native release-assets job (on `vX.Y.Z` tags) is
 independent, so one caller can attach packages on tags *and* deploy the web build on every push to
-main.
+main. The deploy waits for every build leg to succeed, so a run whose build failed or never ran
+leaves the published web app as it was.
 
 **Re-running a job is safe.** Artifacts belong to the run, not to the attempt, so a re-run used to
 leave a second artifact named `github-pages` beside the first and `actions/deploy-pages` refused to
@@ -558,7 +559,9 @@ picker, having one entry, is not drawn.
 Deploys follow `deploy-web`'s ref rule — pushes to the default branch, or
 `web-deploy-tag-pattern` when set — **plus every `vX.Y.Z` tag**, because the release channel's
 content changes the moment a release is published, and the job waits for the release job so it
-sees the release it just made. They need the same one-time setup: grant `pages: write` +
+sees the release it just made. It also waits for every build leg to succeed: the site hosts the
+web app, screenshots and packages that build produced, so a run whose build failed or never ran
+leaves the live site as it was. They need the same one-time setup: grant `pages: write` +
 `id-token: write` and set Settings → Pages → Source = "GitHub Actions". `daysite-version`
 selects the template revision; the default, `main`, means every rebuild takes the template's
 latest fixes, which is what the Day apps want. Without a `website/` directory,
