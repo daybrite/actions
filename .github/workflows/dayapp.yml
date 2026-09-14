@@ -475,8 +475,9 @@ jobs:
       # PACKAGE wants, since only the primary profile row of a target packs one.
       pack-matrix: ${{ steps.plan.outputs.pack_matrix }}
       release: ${{ steps.plan.outputs.release }}
-      deploy_web: ${{ steps.plan.outputs.deploy_web }}
-      website: ${{ steps.plan.outputs.website }}
+      # The plan's Pages decisions, after the check that github-pages admits a tag.
+      deploy_web: ${{ steps.pages.outputs.deploy_web }}
+      website: ${{ steps.pages.outputs.website }}
       upload_ios: ${{ steps.stores.outputs.upload_ios }}
       upload_macos: ${{ steps.stores.outputs.upload_macos }}
       upload_play: ${{ steps.stores.outputs.upload_play }}
@@ -806,6 +807,85 @@ jobs:
               || echo "::notice::website/site.toml present but ref '$GITHUB_REF_NAME' does not qualify — skipping the website deploy."
           fi
           echo "website=$website" | tee -a "$GITHUB_OUTPUT"
+
+      # A tag reaches the github-pages environment only when that environment's deployment rules
+      # admit it. Turning Pages on creates the environment admitting the Pages branch alone, so a
+      # release tag's site deploy used to fail before its first step, and failed the run with it
+      # (Day-Games v0.1.2). This reads the rules the way GitHub applies them and stands both Pages
+      # jobs down with a warning when the tag would be refused. When the rules cannot be read, the
+      # deploys stay on and GitHub gives its verdict as the job starts, as before.
+      - name: Check that github-pages admits this tag
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_WEB: ${{ steps.plan.outputs.deploy_web }}
+          WEBSITE: ${{ steps.plan.outputs.website }}
+        run: |
+          set -euo pipefail
+          admitted=true
+          if [ "$GITHUB_REF_TYPE" = tag ] && { [ "$DEPLOY_WEB" = true ] || [ "$WEBSITE" = true ]; }; then
+            ENV_API="repos/$GITHUB_REPOSITORY/environments/github-pages"
+            ERR="$RUNNER_TEMP/github-pages-rules.err"
+            if ! env_json="$(gh api "$ENV_API" 2>"$ERR")"; then
+              if grep -q "HTTP 404" "$ERR"; then
+                echo "::notice::github-pages does not exist yet, so tag '$GITHUB_REF_NAME' can deploy; the deploy job creates the environment"
+              else
+                echo "::notice::could not read the github-pages rules ($(head -1 "$ERR")), so the site deploy runs and GitHub decides whether tag '$GITHUB_REF_NAME' may deploy"
+              fi
+            elif [ "$(jq -c '.deployment_branch_policy' <<<"$env_json")" = null ]; then
+              echo "::notice::github-pages admits every branch and tag, so tag '$GITHUB_REF_NAME' can deploy"
+            elif [ "$(jq -r '.deployment_branch_policy.protected_branches' <<<"$env_json")" = true ]; then
+              admitted=false
+              echo "::warning::github-pages admits protected branches only, so tag '$GITHUB_REF_NAME' cannot deploy the site and the site deploy is skipped. To publish on tags, set Settings > Environments > github-pages > Deployment branches and tags to 'Selected branches and tags' and add a tag rule such as v*"
+            elif ! rules="$(gh api --paginate "$ENV_API/deployment-branch-policies?per_page=100" \
+                --jq '.branch_policies[] | select(.type == "tag") | .name' 2>"$ERR")"; then
+              echo "::notice::could not read the github-pages deployment rules ($(head -1 "$ERR")), so the site deploy runs and GitHub decides whether tag '$GITHUB_REF_NAME' may deploy"
+            else
+              # GitHub matches a rule with Ruby's File.fnmatch, where a wildcard never matches `/`.
+              matched="$(RULES="$rules" python3 -c '
+          import os, re, sys
+
+          def regex(glob):
+              out, i = "", 0
+              while i < len(glob):
+                  if glob.startswith("**", i):
+                      out, i = out + ".*", i + 2
+                      continue
+                  c = glob[i]
+                  if c == "*":
+                      out += "[^/]*"
+                  elif c == "?":
+                      out += "[^/]"
+                  elif c == "[" and "]" in glob[i + 2:]:
+                      end = glob.index("]", i + 2)
+                      body = glob[i + 1:end]
+                      out += "[" + ("^" + body[1:] if body.startswith("!") else body) + "]"
+                      i = end
+                  else:
+                      out += re.escape(c)
+                  i += 1
+              return out
+
+          for glob in os.environ["RULES"].splitlines():
+              if glob and re.fullmatch(regex(glob), sys.argv[1]):
+                  print(glob)
+                  break
+          ' "$GITHUB_REF_NAME")"
+              if [ -n "$matched" ]; then
+                echo "::notice::github-pages admits tag '$GITHUB_REF_NAME' through its rule '$matched'"
+              else
+                admitted=false
+                echo "::warning::github-pages has no tag rule matching '$GITHUB_REF_NAME', so the tag cannot deploy the site and the site deploy is skipped. To publish on tags, add a rule: gh api -X POST $ENV_API/deployment-branch-policies -f name='v*' -f type=tag"
+              fi
+            fi
+          fi
+          if [ "$admitted" = true ]; then
+            echo "deploy_web=$DEPLOY_WEB" | tee -a "$GITHUB_OUTPUT"
+            echo "website=$WEBSITE" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "deploy_web=false" | tee -a "$GITHUB_OUTPUT"
+            echo "website=false" | tee -a "$GITHUB_OUTPUT"
+          fi
 
       # Which store uploads run if this build is a release tag. An explicit upload-* input wins.
       # Empty (auto) enables an upload only when the app is set up for that store: it has lanes

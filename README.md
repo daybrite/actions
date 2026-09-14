@@ -564,6 +564,20 @@ selects the template revision; the default, `main`, means every rebuild takes th
 latest fixes, which is what the Day apps want. Without a `website/` directory,
 `deploy-web: true` keeps its original behavior — the bare web app at the Pages root.
 
+A tag deploys only when the repository's `github-pages` environment admits it, and turning Pages
+on creates that environment admitting the Pages branch alone. The `preflight` job reads the
+environment's deployment rules for a tag build. When they would refuse the tag, it skips the site
+and web deploys with a warning instead of letting those jobs fail the run. To publish on release
+tags, add a tag rule under Settings → Environments → `github-pages` → Deployment branches and
+tags, or run:
+
+```sh
+gh api -X POST repos/<owner>/<repo>/environments/github-pages/deployment-branch-policies -f name='v*' -f type=tag
+```
+
+An environment set to protected branches only never admits a tag. When the rules cannot be read,
+the deploys run and GitHub decides as each job starts.
+
 The job reads the network in two places only: the template's npm packages, installed from its
 lockfile as committed, and the repository's latest release — its asset list through `gh api`, its
 screenshot bundle and web dist through `gh release download` — each handed to the site generator
