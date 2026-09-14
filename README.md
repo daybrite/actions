@@ -129,9 +129,9 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. A [project website](#project-website-daysite) also deploys on every `vX.Y.Z` tag when this is empty, since a new release changes what its release channel shows. |
 | `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
 | `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. |
-| `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios`, or a `store/app.toml` listing that `day store stage` turns into lanes. `"true"`/`"false"` override. |
-| `upload-macos` | string | — | Upload the `macos-appkit` build products to the Mac App Store on semantic-version tags through `macos-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` with `platform :mac`; `"true"`/`"false"` override. |
-| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/app.toml` listing that `day store stage` turns into lanes; `"true"`/`"false"` override. |
+| `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has lanes for it, either a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios` or a `store/app.toml` listing that `day store stage` turns into lanes, and the App Store Connect key secrets `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and `DAY_ASC_KEY_B64` are set. `"true"`/`"false"` override. |
+| `upload-macos` | string | — | Upload the `macos-appkit` build products to the Mac App Store on semantic-version tags through `macos-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` with `platform :mac` when the App Store Connect key secrets are set; `"true"`/`"false"` override. |
+| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/app.toml` listing that `day store stage` turns into lanes, when `DAY_PLAY_JSON_KEY` is set; `"true"`/`"false"` override. |
 | `ios-upload-lane` | string | `ios upload` | The fastlane arguments the `appstore-ios` job runs (platform + lane). The staged lanes are `ios validate`, `ios upload`, and `ios release`, which also submits the version for review. |
 | `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
 | `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. The staged lanes are `android validate`, `android upload` (internal track, draft), and `android release` (production track, completed, which is Play's submission). |
@@ -387,8 +387,12 @@ for that platform — a `fastlane/Fastfile` under `project-path` (for iOS also
 the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). For iOS and Play a
 `store/app.toml` listing counts as well: the job runs `day store stage` and uses the lanes it
 writes (`ios validate`, `ios upload`, and `ios release`, which also submits the version for
-review; `android validate`, `android upload`, and `android release`). The `preflight` job prints
-a `::notice` for each auto decision.
+review; `android validate`, `android upload`, and `android release`). An auto upload also needs
+the store's upload credentials: the App Store Connect key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
+`DAY_ASC_KEY_B64`) for iOS and the Mac App Store, and `DAY_PLAY_JSON_KEY` for Play. Every app
+scaffold carries a `store/` listing for its website and web manifest, so a tagged release of an
+app without those secrets skips the store jobs instead of failing in them. The `preflight` job
+prints a `::notice` for each auto decision.
 
 Each job checks out the repo, downloads the built artifact, points its `DAY_*` variable at it
 (an absolute path), and runs the lane from the directory holding `fastlane/` — with

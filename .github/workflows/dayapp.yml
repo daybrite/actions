@@ -369,9 +369,11 @@ on:
       upload-ios:
         description: >-
           Upload the packed .ipa to App Store Connect on semantic-version tags, via the app's own
-          fastlane lane (ios-upload-lane). Empty (default) auto-detects: on when a
-          fastlane/Fastfile (or platform/ios/fastlane/Fastfile) under project-path contains
-          `platform :ios`. "true"/"false" override the detection.
+          fastlane lane (ios-upload-lane). Empty (default) auto-detects: on when the app has lanes
+          for it (a fastlane/Fastfile or platform/ios/fastlane/Fastfile under project-path
+          containing `platform :ios`, or a store/app.toml listing that `day store stage` turns
+          into lanes) and the App Store Connect key secrets DAY_ASC_KEY_ID, DAY_ASC_ISSUER and
+          DAY_ASC_KEY_B64 are set. "true"/"false" override the detection.
         type: string
         required: false
         default: ""
@@ -379,17 +381,20 @@ on:
         description: >-
           Upload the macos-appkit build products to the Mac App Store on semantic-version tags,
           via the app's own fastlane lane (macos-upload-lane). Empty (default) auto-detects: on
-          when a fastlane/Fastfile under project-path contains `platform :mac`. "true"/"false"
-          override the detection.
+          when a fastlane/Fastfile under project-path contains `platform :mac` and the App Store
+          Connect key secrets DAY_ASC_KEY_ID, DAY_ASC_ISSUER and DAY_ASC_KEY_B64 are set.
+          "true"/"false" override the detection.
         type: string
         required: false
         default: ""
       upload-play:
         description: >-
           Upload the packed .aab to Google Play on semantic-version tags, via the app's own
-          fastlane lane (play-upload-lane). Empty (default) auto-detects: on when a
-          fastlane/Fastfile (or platform/android/fastlane/Fastfile) under project-path contains
-          `platform :android`. "true"/"false" override the detection.
+          fastlane lane (play-upload-lane). Empty (default) auto-detects: on when the app has lanes
+          for it (a fastlane/Fastfile or platform/android/fastlane/Fastfile under project-path
+          containing `platform :android`, or a store/app.toml listing that `day store stage` turns
+          into lanes) and the DAY_PLAY_JSON_KEY secret is set. "true"/"false" override the
+          detection.
         type: string
         required: false
         default: ""
@@ -802,11 +807,16 @@ jobs:
           fi
           echo "website=$website" | tee -a "$GITHUB_OUTPUT"
 
-      # Which store uploads run if this build is a release tag. An explicit upload-* input wins;
-      # empty (auto) enables an upload exactly when the repo carries a fastlane config for that
-      # platform — a fastlane/Fastfile under project-path (or the platform/ios / platform/android
-      # convention directory) containing the literal `platform :ios` / `platform :mac` /
-      # `platform :android` block. Each auto decision is a ::notice so the run explains itself.
+      # Which store uploads run if this build is a release tag. An explicit upload-* input wins.
+      # Empty (auto) enables an upload only when the app is set up for that store: it has lanes
+      # for the platform (a fastlane/Fastfile under project-path, or the platform/ios and
+      # platform/android convention directories, containing the literal `platform :ios`,
+      # `platform :mac` or `platform :android` block; for iOS and Play also a store/app.toml
+      # listing, which `day store stage` turns into lanes) AND the store's upload credentials
+      # reached this workflow. Every app scaffold carries a store/ listing for its website and web
+      # manifest, so the listing alone does not mean the app publishes to a store, and without
+      # the credentials an upload job could only fail. Each auto decision is a ::notice so the
+      # run explains itself.
       - name: Decide the store uploads
         id: stores
         env:
@@ -814,38 +824,53 @@ jobs:
           UPLOAD_MACOS_IN: ${{ inputs.upload-macos }}
           UPLOAD_PLAY_IN: ${{ inputs.upload-play }}
           PROJECT_PATH: ${{ inputs.project-path }}
+          # Whether each store's credentials are set is all that crosses into the step.
+          HAS_ASC: ${{ secrets.DAY_ASC_KEY_ID != '' && secrets.DAY_ASC_ISSUER != '' && secrets.DAY_ASC_KEY_B64 != '' }}
+          HAS_PLAY: ${{ secrets.DAY_PLAY_JSON_KEY != '' }}
         run: |
           set -euo pipefail
           PP="${PROJECT_PATH:-.}"
-          decide() { # $1=output name, $2=explicit input, $3=Fastfile marker, $4…=candidate Fastfiles
-            local name="$1" explicit="$2" marker="$3"; shift 3
-            local on=false
+          # Where a platform's lanes come from, or nothing: $1=Fastfile marker, $2=whether a
+          # store/ listing counts, $3…=candidate Fastfiles.
+          lanes() {
+            local marker="$1" listing="$2" f
+            shift 2
+            for f in "$@"; do
+              if [ -f "$f" ] && grep -qF "$marker" "$f"; then echo "$f"; return 0; fi
+            done
+            if [ "$listing" = true ] && [ -f "$PP/store/app.toml" ]; then
+              echo "$PP/store/app.toml (lanes from 'day store stage')"
+            fi
+            return 0
+          }
+          decide() { # $1=output name, $2=explicit input, $3=where the lanes are, $4=credentials set, $5=their names
+            local name="$1" explicit="$2" lanes="$3" credentials="$4" names="$5" on=false
             case "$explicit" in
               true|false) on="$explicit" ;;
               "")
-                for f in "$@"; do
-                  if [ -f "$f" ] && grep -qF "$marker" "$f"; then on=true; break; fi
-                done
-                echo "::notice::$name=$on (auto) — looked for '$marker' in: $*"
+                if [ -z "$lanes" ]; then
+                  echo "::notice::$name=false (auto): the app has no lanes for this store"
+                elif [ "$credentials" != true ]; then
+                  echo "::notice::$name=false (auto): lanes in $lanes, but the credentials ($names) are not all set"
+                else
+                  on=true
+                  echo "::notice::$name=true (auto): lanes in $lanes, and the credentials ($names) are set"
+                fi
                 ;;
               *) echo "::error::$name: inputs.upload-* accept '' (auto), 'true', or 'false' — got '$explicit'"; exit 1 ;;
             esac
             echo "$name=$on" | tee -a "$GITHUB_OUTPUT"
           }
-          # A `store/` listing counts too: `day store stage` writes the iOS lanes from it.
-          if [ -z "$UPLOAD_IOS_IN" ] && [ -f "$PP/store/app.toml" ]; then
-            echo "::notice::upload_ios=true (auto) — $PP/store/app.toml exists, lanes come from 'day store stage'"
-            echo "upload_ios=true" | tee -a "$GITHUB_OUTPUT"
-          else
-            decide upload_ios   "$UPLOAD_IOS_IN"   'platform :ios'     "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile"
-          fi
-          decide upload_macos "$UPLOAD_MACOS_IN" 'platform :mac'     "$PP/fastlane/Fastfile"
-          if [ -z "$UPLOAD_PLAY_IN" ] && [ -f "$PP/store/app.toml" ]; then
-            echo "::notice::upload_play=true (auto) — $PP/store/app.toml exists, lanes come from 'day store stage'"
-            echo "upload_play=true" | tee -a "$GITHUB_OUTPUT"
-          else
-            decide upload_play  "$UPLOAD_PLAY_IN"  'platform :android' "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile"
-          fi
+          ASC="DAY_ASC_KEY_ID, DAY_ASC_ISSUER and DAY_ASC_KEY_B64"
+          decide upload_ios "$UPLOAD_IOS_IN" \
+            "$(lanes 'platform :ios' true "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile")" \
+            "$HAS_ASC" "$ASC"
+          decide upload_macos "$UPLOAD_MACOS_IN" \
+            "$(lanes 'platform :mac' false "$PP/fastlane/Fastfile")" \
+            "$HAS_ASC" "$ASC"
+          decide upload_play "$UPLOAD_PLAY_IN" \
+            "$(lanes 'platform :android' true "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile")" \
+            "$HAS_PLAY" "DAY_PLAY_JSON_KEY"
 
   build:
     # The bare target when the caller named no device profiles, `<target> · <device>` when it did
@@ -1991,8 +2016,8 @@ jobs:
   # a Mac App Store .pkg gets produced. Credentials never touch these jobs' env: `secrets:
   # inherit` puts the caller's secrets in scope, and the Fastfile reads its own (App Store
   # Connect API key envs, the Play JSON key). The artifact arrives as DAY_IPA / DAY_PKG_OR_APP /
-  # DAY_AAB. Whether each job runs was decided in preflight (explicit upload-* input, or a
-  # Fastfile with the platform's block); like sign-macos, `!cancelled()` keeps an unrelated
+  # DAY_AAB. Whether each job runs was decided in preflight (an explicit upload-* input, or lanes
+  # for the platform plus that store's credentials); like sign-macos, `!cancelled()` keeps an unrelated
   # matrix leg's failure from silently skipping a release upload — if the leg that feeds a job
   # failed, its download-artifact step fails loudly instead.
   appstore-ios:
@@ -2538,14 +2563,22 @@ jobs:
           }
           REL_DIR="$(jq -r '[.channels[] | select(.development | not) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
           MAIN_DIR="$(jq -r '[.channels[] | select(.development) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
-          # <stem>-web-dom.zip, by glob: the stem is the app's (see the build job's staging step).
+          # This run's dist-web-dom artifact holds the one <stem>-web-dom.zip the build job staged.
           ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
           if [ -n "$ZIP" ] && [ -n "$MAIN_DIR" ]; then stage "$ZIP" "$MAIN_DIR"; fi
           if [ -n "$REL_DIR" ] && [ -n "${TAG:-}" ]; then
-            gh release download "$TAG" --dir rel-web --clobber --pattern '*-web-dom.zip' \
-              || echo "::notice::$TAG ships no web-dom dist — the release channel has no hosted web app"
-            RZIP="$(find rel-web -maxdepth 1 -name '*.zip' | head -1)"
-            if [ -n "$RZIP" ]; then stage "$RZIP" "$REL_DIR"; fi
+            # The release's dist is chosen by name from its asset list. A `*-web-dom.zip` glob
+            # also matches the web-dom target's screenshots-web-dom.zip, whose index.html is the
+            # capture index, and that zip was published as the web app whenever `find` listed it
+            # first (Day-Games v0.1.2).
+            REL_ZIP="$(jq -r '[.[].name | select(endswith("-web-dom.zip") and (startswith("screenshots-") | not))][0] // ""' "$RUNNER_TEMP/release-assets.json")"
+            if [ -z "$REL_ZIP" ]; then
+              echo "::notice::$TAG ships no web-dom dist, so the release channel has no hosted web app"
+            elif gh release download "$TAG" --dir rel-web --clobber --pattern "$REL_ZIP"; then
+              stage "rel-web/$REL_ZIP" "$REL_DIR"
+            else
+              echo "::warning::could not download $REL_ZIP from $TAG, so the release channel has no hosted web app in this deploy"
+            fi
           fi
           du -sh daysite/public/* 2>/dev/null || true
       - name: Build the site
