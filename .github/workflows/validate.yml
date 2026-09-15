@@ -97,6 +97,12 @@ jobs:
       # than iOS because the fan-out logic is shared and ubuntu minutes are the cheap ones — the
       # iOS half of the path (prefix-matching a simulator) runs on every single-profile build too.
       android-profiles: medium_phone, medium_tablet=tablet
+      # Exercise the per-target additions: linux-gtk installs a package the image lacks, then its
+      # setup command requires it, which fails the leg if the order between the two ever changes.
+      target-packages: |
+        linux-gtk: tree
+      target-setup: |
+        linux-gtk: command -v tree
       project-path: ci-app
       setup-command: >-
         day new app ci-app

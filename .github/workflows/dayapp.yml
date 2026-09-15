@@ -93,6 +93,41 @@ on:
         description: >-
           Optional shell command run at the repository root after the day CLI is installed and
           before anything else (e.g. `day new app …` to scaffold the project under test).
+          Setting it marks the project as GENERATED, which skips the preflight checks,
+          `update-day-deps` and the pristine check. For what one target needs on a checked-out
+          project, use `target-packages` and `target-setup` instead.
+        type: string
+        default: ""
+      target-packages:
+        description: >-
+          Extra packages particular targets need beyond Day's own set — one LINE per entry, as
+          `<targets>: <packages>`, where several targets may share a line and a target may appear
+          on several. Every leg of a named target installs them through setup-day-deps, with the
+          runner's package manager: apt on the Ubuntu runners (linux, android, harmony, web),
+          Homebrew on the macOS ones (macos-*, ios-uikit), Chocolatey for windows-xaml, and
+          MSYS2's MINGW64 packages for windows-qt and windows-gtk.
+
+              target-packages: |
+                linux-gtk, linux-qt: gstreamer1.0-plugins-good gstreamer1.0-libav
+                linux-qt: qt6-multimedia-dev
+
+          A line starting with `#` is skipped. A line naming something that is not a target fails
+          the run; a target this call does not build is only noted.
+        type: string
+        default: ""
+      target-setup:
+        description: >-
+          Shell commands particular targets run after their dependencies install and before
+          `day build` — one LINE per command, as `<targets>: <command>`, run with bash at the
+          repository root in line order. `$DAY_BIN` is on hand, and a command can hand a variable
+          to later steps through `$GITHUB_ENV`.
+
+              target-setup: |
+                linux-qt: echo "QT_MEDIA_BACKEND=gstreamer" >> "$GITHUB_ENV"
+
+          Unlike `setup-command`, neither this nor `target-packages` marks the project as
+          generated: the preflight checks, `update-day-deps` and the pristine check all still
+          apply, so anything a command downloads or writes belongs under `$RUNNER_TEMP`.
         type: string
         default: ""
       scripts:
@@ -578,6 +613,8 @@ jobs:
           IOS_DEVICES_IN: ${{ inputs.ios-devices }}
           ANDROID_PROFILES_IN: ${{ inputs.android-profiles }}
           ANDROID_DEVICES_IN: ${{ inputs.android-devices }}
+          TARGET_PACKAGES_IN: ${{ inputs.target-packages }}
+          TARGET_SETUP_IN: ${{ inputs.target-setup }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -656,12 +693,53 @@ jobs:
             echo "::error::set either android-profiles or android-devices, not both (android-devices supersedes it)"
             exit 1
           fi
+          # Per-target additions (inputs.target-packages / target-setup), one `<targets>: <value>`
+          # entry per line. jq folds them into each row below; this only refuses a line it cannot
+          # read and a name that is not a target, so a typo fails here instead of quietly
+          # installing nothing. A real target this call does not build is only noted, which lets
+          # one list serve calls with different target sets.
+          SUPPORTED="macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-mdc harmony-arkui windows-xaml windows-qt windows-gtk web-dom"
+          check_per_target() {
+            local input="$1" line names name
+            while IFS= read -r line; do
+              line="${line#"${line%%[![:space:]]*}"}"
+              case "$line" in "" | \#*) continue ;; esac
+              case "$line" in
+                *:*) ;;
+                *) echo "::error::$input: expected '<targets>: …' but found '$line'"; exit 1 ;;
+              esac
+              names="${line%%:*}"
+              # shellcheck disable=SC2086 # a deliberately word-split target list
+              for name in ${names//,/ }; do
+                case " $SUPPORTED " in
+                  *" $name "*) ;;
+                  *) echo "::error::$input names '$name', which is not a target — supported: $SUPPORTED"; exit 1 ;;
+                esac
+                case " ${TARGETS_IN//,/ } " in
+                  *" $name "*) ;;
+                  *) echo "::notice::$input names $name, which this call does not build" ;;
+                esac
+              done
+            done <<< "$2"
+          }
+          check_per_target target-packages "${TARGET_PACKAGES_IN:-}"
+          check_per_target target-setup "${TARGET_SETUP_IN:-}"
           matrix=$(printf '%s' "$matrix" | jq -c \
             --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" \
-            --arg androiddev "$ANDROID_D" '
+            --arg androiddev "$ANDROID_D" --arg packages "${TARGET_PACKAGES_IN:-}" \
+            --arg setup "${TARGET_SETUP_IN:-}" '
             def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-")
                          | sub("^-+"; "") | sub("-+$"; "");
             def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+            # `target-packages` / `target-setup`: the values of every line naming target $t, in
+            # line order. The line was checked above, so it has a colon; only the FIRST splits,
+            # since a command may carry more. Lines starting with a hash are comments.
+            def per_target($s; $t):
+              $s | split("\n") | map(trim) | map(select(length > 0 and (startswith("#") | not)))
+                 | map(index(":") as $at
+                       | {targets: (.[0:$at] | split(",") | map(trim)),
+                          value: (.[$at + 1:] | trim)})
+                 | map(select(any(.targets[]; . == $t)) | .value);
             # "iPhone 16, iPad Pro 13-inch (M4)=ipad" → [{device,slug}], slug defaulting to the
             # kebab-cased device name.
             def profiles($s):
@@ -750,6 +828,9 @@ jobs:
                     # First profile keeps the plain name every existing consumer reads.
                     shots_artifact: (if $i == 0 then "screenshots-\($r.target)"
                                      else "screenshots-\($r.target)-\($ps[$i].slug)" end),
+                    # What the caller added for this target, on every one of its rows.
+                    packages: (per_target($packages; $r.target) | join(" ")),
+                    setup: (per_target($setup; $r.target) | join("\n")),
                   }
               ] }')
           echo "matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
@@ -965,6 +1046,16 @@ jobs:
           java: true
           # The toolchain step above already installed the matrix's rust targets.
           rust: false
+          # What the caller's app needs for this target beyond Day's set (inputs.target-packages).
+          packages: ${{ matrix.packages }}
+
+      # The caller's own commands for this target (inputs.target-setup), after the dependencies
+      # above so a command can build on what they installed.
+      - name: Target setup (${{ matrix.target }})
+        if: matrix.setup != ''
+        env:
+          TARGET_SETUP: ${{ matrix.setup }}
+        run: bash -eo pipefail -c "$TARGET_SETUP"
 
       # --- validate the environment, then build ---------------------------------------------
       # Source-level checks before anything is built: fluent coverage, duplicate ids, unknown

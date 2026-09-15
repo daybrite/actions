@@ -56,6 +56,15 @@ inputs:
       already installed them through dtolnay/rust-toolchain can leave this on.
     required: false
     default: "true"
+  packages:
+    description: >-
+      Extra packages this target needs beyond Day's own set, space-separated — an app's own
+      needs, such as a media player's codecs. Installed after the toolkit's, with the runner's
+      package manager and its defaults: apt on Linux (recommended packages included), Homebrew
+      on macOS, Chocolatey for windows-xaml, and MSYS2's MINGW64 packages for windows-qt and
+      windows-gtk, beside the toolkit's own.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -157,6 +166,31 @@ runs:
         # shellcheck disable=SC2086 # deliberately word-split package lists
         sudo apt-get install -y --no-install-recommends $PKGS
 
+    # --- the caller's own packages (inputs.packages) --------------------------------------------
+    # After the toolkit's, so a package can extend what those installed. windows-qt and
+    # windows-gtk take theirs through MSYS2 below, where their toolkit comes from.
+    - name: Extra packages
+      if: inputs.packages != '' && inputs.target != 'windows-qt' && inputs.target != 'windows-gtk'
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC2086 # a deliberately word-split package list
+        case "$RUNNER_OS" in
+          Linux)
+            sudo apt-get update
+            sudo apt-get install -y $PACKAGES
+            ;;
+          macOS) brew install $PACKAGES ;;
+          # Chocolatey edits the MACHINE PATH, which later steps do not see (see the NSIS step);
+          # a tool installed here is best located and exported by the caller's own setup.
+          Windows) choco install -y --no-progress $PACKAGES ;;
+          *) echo "::error::setup-day-deps: no package manager for runner OS '$RUNNER_OS'"; exit 1 ;;
+        esac
+
     # --- Android --------------------------------------------------------------------------------
     - name: JDK 21 (android / harmony)
       if: inputs.java == 'true' && (inputs.target == 'android-mdc' || inputs.target == 'harmony-arkui')
@@ -246,6 +280,7 @@ runs:
           mingw-w64-x86_64-gcc
           mingw-w64-x86_64-pkgconf
           ${{ inputs.target == 'windows-qt' && 'mingw-w64-x86_64-qt6-base' || 'mingw-w64-x86_64-gtk4 mingw-w64-x86_64-libadwaita' }}
+          ${{ inputs.packages }}
     - name: Pin the MSYS2 mingw toolchain
       if: inputs.target == 'windows-qt' || inputs.target == 'windows-gtk'
       # MSVC cannot link MSYS2's import libraries, and the C++ shim is built from pkg-config's

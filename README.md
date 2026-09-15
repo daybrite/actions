@@ -106,7 +106,9 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
 | `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |
 | `project-path` | string | `.` | Directory of the Day project within the repository. |
-| `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. |
+| `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. Setting it marks the project as generated, which skips the preflight checks, `update-day-deps` and the pristine check; for what one target needs, use `target-packages` or `target-setup`. |
+| `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, Chocolatey for `windows-xaml`, and MSYS2 packages for `windows-qt` and `windows-gtk`. A line naming something that is not a target fails the run. |
+| `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `update-day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
 | `scripts` | string | `auto` | Dayscripts to run on each target, comma- or space-separated paths relative to the project. `auto` runs every `dayscript/*.yaml` (or `scripts/*.yaml`); `none` runs nothing. |
 | `launch-env` | string | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`; values must not contain spaces. |
 | `locales` | string | — | Locales to run each dayscript under, comma- or space-separated (`en fr ar zh-CN`). Each locale captures its own screenshot variant. |
@@ -491,6 +493,7 @@ than spelled out again in every workflow.
     extras: false       # walkthrough extras: web view dev libs, xvfb, imagemagick, CJK fonts
     java: false         # pin JDK 21 + Gradle for android/harmony (else the runner's own JDK)
     rust: true          # rustup target add this target's std
+    packages: ""        # the app's own extra packages, via apt / brew / choco / MSYS2
 ```
 
 Everything that is not "make this target buildable" stays with the caller: checking out the app,
