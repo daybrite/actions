@@ -137,10 +137,41 @@ on:
           "none" skips scripts entirely.
         type: string
         default: auto
+      target-scripts:
+        description: >-
+          Dayscripts for particular targets, overriding `scripts` for those targets only — one
+          LINE per rule, as `<targets>: <scripts>`, in the same shape as `target-setup` and
+          `target-packages`. A target the list does not name falls back to `scripts`.
+
+              target-scripts: |
+                macos-appkit, windows-xaml: dayscript/walkthrough.yaml dayscript/windows.yaml
+                android-mdc: dayscript/walkthrough.yaml dayscript/clipboard-roundtrip.yaml
+                web-dom: dayscript/walkthrough.yaml dayscript/speech.yaml
+
+          What this is for: a script can be meaningful on one target and meaningless on another,
+          and `auto` (every dayscript in the project) is all-or-nothing. An app with a script per
+          platform feature — a window script only the desktop toolkits have windows for, an
+          emulator script only Android runs — names them per target here instead of running the
+          whole directory everywhere and relying on each script to skip itself.
+
+          The values are script lists exactly as `scripts` takes them, including `none` to run
+          nothing on a target that should only build.
+        type: string
+        default: ""
       launch-env:
         description: >-
           Space-separated KEY=VALUE pairs passed to every scripted launch as `--env` (values must
           not contain spaces). Example: "WEATHER_MOCK=1".
+        type: string
+        default: ""
+      capture-size:
+        description: >-
+          Pixel size of the desktop-class screenshots (the desktop toolkits and web-dom), passed to
+          every scripted launch as `--capture-size`: `2560x1600`, `2880x1800@2` (`@` names the
+          render scale), or `window` for the app's own `[window]` size at the runner display's
+          scale. Empty (default) leaves it to the app's Day.toml `[screenshots]` table, whose own
+          default is 2560x1600 at 2x: a 1280x800-point window, and a size the Mac App Store
+          accepts. Phones and tablets capture their device's panel and ignore it.
         type: string
         default: ""
       locales:
@@ -213,11 +244,12 @@ on:
           comma-separated set of `key=value` fields. Each becomes its own PARALLEL job, so two
           profiles cost two jobs rather than two script runs in one.
 
-          Fields: `device` (required), `os`, `orientation`, `slug`.
+          Fields: `device` (required), `os`, `orientation`, `slug`, `optional`.
 
               ios-devices: |
                 device=iPhone * Pro Max,     os=iOS 26, orientation=portrait,  slug=iphone
                 device=iPad Pro 13-inch,     os=iOS 26, orientation=landscape, slug=ipad
+                device=iPhone * Pro Max,     os=iOS 16, optional=true
 
           `device` matches as a PREFIX against the simulators the runner has, and `os` as a major
           version taking the newest point release installed — because runner images rotate exact
@@ -237,9 +269,20 @@ on:
           a simulator at all where 27 ships one (642.15) that turns them.
 
           `slug` fixes the artifact suffix and the CAPTURE DIRECTORY; it defaults to the
-          kebab-cased device name. Captures land in `<target>/<slug>/<variant>/`, so two devices
-          of one target no longer overwrite each other when the site job merges every screenshot
-          artifact into one tree — and the published gallery gives each its own column.
+          kebab-cased device name AND the `os` when one is named (`device=iPhone * Pro Max,
+          os=iOS 16` → `iphone-pro-max-ios16`). Captures land in `<target>/<slug>/<variant>/`, so
+          two devices of one target no longer overwrite each other when the site job merges every
+          screenshot artifact into one tree — and the published gallery gives each its own column.
+          The OS is in the default because a back-deployment row is usually the SAME device as a
+          current row: without it the two would collide on one artifact name and one capture
+          directory, and the older captures would overwrite the newer. Name `slug` yourself to
+          override, as the rows above do for the primary pair.
+
+          `optional=true` marks a row whose failure does not fail the run — a probe against the
+          floor the app declares (`IPHONEOS_DEPLOYMENT_TARGET`, `minSdk`), where the point is to
+          learn whether the app still builds and runs down there. It is ignored on a target's
+          FIRST row, which packs and feeds the release jobs. Combine it with an older `os` to add
+          floor coverage to an existing matrix one line at a time.
 
           The FIRST profile is the primary one: it packs, uploads the packages and release
           assets, and keeps the plain `screenshots-ios-uikit` artifact name. Later profiles build,
@@ -262,12 +305,13 @@ on:
       android-devices:
         description: >-
           Device profiles for `android-mdc`, one per LINE, in the same shape as `ios-devices`:
-          `device=…, os=…, orientation=…, slug=…`. Each line becomes its own parallel job with its
-          own screenshot artifact and gallery column.
+          `device=…, os=…, orientation=…, density=…, slug=…, optional=…`. Each line becomes its own
+          parallel job with its own screenshot artifact and gallery column.
 
               android-devices: |
                 device=medium_phone,  os=36, orientation=portrait,  slug=phone
                 device=medium_tablet, os=36, orientation=landscape, slug=tablet
+                device=medium_phone,  os=24, optional=true
 
           `device` is an exact `avdmanager list device` id (`medium_phone`, `pixel_5`), not a
           prefix — unlike iOS, these ids are stable and an unknown one should fail loudly. `os` is
@@ -299,6 +343,12 @@ on:
           screenshot and a layout at once: every stock tablet that clears Play's 1080 does it at
           320 dpi, and `Nexus 7 2013` at 320 lays out as 960x600 points — short enough that
           Day-Showcase's Query page collapses its list and three walkthrough steps fail.
+
+          `slug` and `optional` work as they do for `ios-devices`: the API level joins the default
+          slug (`device=medium_phone, os=24` → `medium-phone-24`), and `optional=true` lets a row
+          at the app's `minSdk` report without failing the run. The two default rows keep their
+          literal `phone` and `tablet` slugs, so an app that names no devices publishes exactly
+          the artifact names and gallery columns it always has.
 
           Supersedes `android-profiles`, which stays for callers that already set it.
         type: string
@@ -608,6 +658,7 @@ jobs:
         id: plan
         env:
           TARGETS_IN: ${{ inputs.targets }}
+          TARGET_SCRIPTS_IN: ${{ inputs.target-scripts }}
           ANDROID_ABIS_IN: ${{ inputs.android-abis }}
           IOS_PROFILES_IN: ${{ inputs.ios-profiles }}
           IOS_DEVICES_IN: ${{ inputs.ios-devices }}
@@ -727,7 +778,7 @@ jobs:
           matrix=$(printf '%s' "$matrix" | jq -c \
             --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" \
             --arg androiddev "$ANDROID_D" --arg packages "${TARGET_PACKAGES_IN:-}" \
-            --arg setup "${TARGET_SETUP_IN:-}" '
+            --arg setup "${TARGET_SETUP_IN:-}" --arg tscripts "${TARGET_SCRIPTS_IN:-}" '
             def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-")
                          | sub("^-+"; "") | sub("-+$"; "");
             def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -755,6 +806,9 @@ jobs:
                     | map(split("=") | {key: (.[0] | trim | ascii_downcase),
                                         value: (.[1:] | join("=") | trim)})
                     | from_entries;
+            # The `os` reduced to a naming part: lowercased, non-alphanumerics dropped. `iOS 16`
+            # becomes `ios16` and `24` stays `24`, so a slug says which OS produced the captures.
+            def osname: ascii_downcase | gsub("[^a-z0-9]+"; "");
             def devices($s):
               $s | split("\n") | map(trim) | map(select(length > 0))
                  | map(fields(.))
@@ -763,7 +817,19 @@ jobs:
                         os: (.os // ""),
                         orientation: (.orientation // "portrait"),
                         density: (.density // ""),
-                        slug: ((.slug // .device) | slugify)});
+                        # An explicit `slug` still wins. Otherwise the OS joins the device in the
+                        # default, because a floor row and a current row are usually the SAME
+                        # device and would collide on one artifact name and one capture directory
+                        # — `medium_phone` twice, with the API 24 captures overwriting API 36.
+                        slug: ((.slug // (if ((.os // "") | test("[^ ]")) 
+                                          then (.device + "-" + (.os | osname))
+                                          else .device end)) | slugify),
+                        # `optional=true` marks a row whose failure must not fail the run: a
+                        # back-deployment probe against the floor an app declares, where the point
+                        # is to learn where it stands. Ignored on the first row of a target, which
+                        # packs and feeds the release jobs (see `primary` below) — a release that
+                        # silently skipped its build is not a result anyone wants.
+                        optional: ((.optional // "") | ascii_downcase | . == "true" or . == "yes" or . == "1")});
             # What a mobile target runs on when the caller named nothing: a phone AND a tablet,
             # because those are the two device classes a store listing asks for and the two an
             # adaptive UI has to be looked at on. The iOS pair is sized for App Store Connect;
@@ -778,14 +844,16 @@ jobs:
             def fallback($t):
               if $t == "ios-uikit" then
                 [{device: "iPhone * Pro Max", os: "", orientation: "portrait",  density: "",
-                  slug: "iphone"},
+                  slug: "iphone", optional: false},
                  {device: "iPad Pro 13-inch", os: "", orientation: "landscape", density: "",
-                  slug: "ipad"}]
+                  slug: "ipad", optional: false}]
               elif $t == "android-mdc" then
+                # These slugs stay literal (`phone`, not `phone-36`): they are the artifact names
+                # and gallery columns every app that names no devices already publishes under.
                 [{device: "medium_phone",  os: "36", orientation: "portrait",  density: "",
-                  slug: "phone"},
+                  slug: "phone", optional: false},
                  {device: "medium_tablet", os: "36", orientation: "landscape", density: "",
-                  slug: "tablet"}]
+                  slug: "tablet", optional: false}]
               else [] end;
             { include: [
                 .include[] as $r
@@ -820,10 +888,16 @@ jobs:
                     # Only the first row of a target packs, uploads packages, and feeds the
                     # release/signing/store jobs. The rest exist for their screenshots.
                     primary: ($i == 0),
+                    # Never on the packing row, whatever the caller wrote.
+                    optional: (($ps[$i].optional // false) and ($i != 0)),
                     # The job name stays the bare target for a target running on one device, so
                     # required status checks configured against it keep matching. Two jobs cannot
                     # share a name, so a phone-and-tablet target names each after its device.
+                    # The OS rides the job name too when the caller named one, so two rows on the
+                    # same device are told apart in the checks list as well as in the artifacts.
                     label: (if ($named | length) == 0 and ($ps | length) == 1 then $r.target
+                            elif (($ps[$i].os // "") | test("[^ ]"))
+                              then "\($r.target) · \($ps[$i].device) · \($ps[$i].os)"
                             else "\($r.target) · \($ps[$i].device)" end),
                     # First profile keeps the plain name every existing consumer reads.
                     shots_artifact: (if $i == 0 then "screenshots-\($r.target)"
@@ -831,6 +905,9 @@ jobs:
                     # What the caller added for this target, on every one of its rows.
                     packages: (per_target($packages; $r.target) | join(" ")),
                     setup: (per_target($setup; $r.target) | join("\n")),
+                    # The dayscript list for this target, when `target-scripts` names it. Empty
+                    # means "no rule for this target", which the leg reads as `scripts`.
+                    scripts: (per_target($tscripts; $r.target) | join(" ")),
                   }
               ] }')
           echo "matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
@@ -971,6 +1048,10 @@ jobs:
     name: ${{ matrix.label }}
     needs: [preflight]
     runs-on: ${{ matrix.os }}
+    # A row marked `optional=true` (a back-deployment probe against the app's floor) reports its
+    # result without failing the run. The planner refuses the flag on a target's first row, so
+    # the packing row always gates.
+    continue-on-error: ${{ matrix.optional }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -1239,10 +1320,12 @@ jobs:
         id: scripts
         working-directory: ${{ inputs.project-path }}
         env:
-          SCRIPTS_IN: ${{ inputs.scripts }}
+          # The row's per-target list (inputs.target-scripts) wins over the global one.
+          SCRIPTS_IN: ${{ matrix.scripts != '' && matrix.scripts || inputs.scripts }}
           LOCALES_IN: ${{ inputs.locales }}
           THEMES_IN: ${{ inputs.themes }}
           LAUNCH_ENV_IN: ${{ inputs.launch-env }}
+          CAPTURE_SIZE_IN: ${{ inputs.capture-size }}
           COMBO: ${{ matrix.target }}
           DEVICE_SLUG: ${{ matrix.device_slug }}
         run: |
@@ -1287,6 +1370,17 @@ jobs:
             # other when the site job merges every screenshot artifact into one tree.
             DEVFLAG=""
             [ -n "${DEVICE_SLUG:-}" ] && DEVFLAG=" --device-slug \"$DEVICE_SLUG\""
+            # The desktop-class capture size, when the caller overrides the app's Day.toml
+            # [screenshots]. Only a CLI that knows the flag gets it; an older one keeps capturing
+            # at the app's window size, and says why here rather than failing on the flag.
+            CAPFLAG=""
+            if [ -n "${CAPTURE_SIZE_IN// /}" ]; then
+              if $DAY_BIN launch --help 2>/dev/null | grep -q -- --capture-size; then
+                CAPFLAG=" --capture-size \"${CAPTURE_SIZE_IN// /}\""
+              else
+                echo "::warning::capture-size: ignored — the installed day CLI predates --capture-size"
+              fi
+            fi
             cat > "$OUT" <<EOF
           #!/usr/bin/env bash
           set -euo pipefail
@@ -1294,7 +1388,7 @@ jobs:
           run_one() {
             local flags=()
             for s in "\$@"; do flags+=(--script "\$s"); done
-            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$ENVS
+            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$CAPFLAG$ENVS
           }
           EOF
             if [ "$COMBO" = web-dom ]; then
@@ -1381,6 +1475,20 @@ jobs:
           [ -n "${DEVICE_OS:-}" ] && args+=(--os "$DEVICE_OS")
           [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
           "$DAY_BIN" "${args[@]}"
+
+      # A hosted Windows runner's desktop is 1024x768, and Windows will not open a window larger
+      # than the desktop: the 1280x800 window the default capture size asks for would come back
+      # clipped to it. Raise the resolution first. Best-effort: on an image without the cmdlet
+      # the captures are smaller, which the gallery shows and no build should fail over.
+      - name: Size the desktop for the capture window (windows)
+        if: steps.scripts.outputs.found == 'true' && runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "desktop is now $($b.Width)x$($b.Height)"
 
       - name: Run dayscripts (${{ matrix.target }})
         if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
