@@ -1508,6 +1508,15 @@ jobs:
       # megabytes, and identical for every run on that API level. The AVD built from it is made
       # fresh each run by `day devices setup`, which takes about a second and so can never go
       # stale against a changed profile.
+      # `${{ env.ANDROID_HOME }}` below reads the ENV CONTEXT, which sees only what a workflow,
+      # job or step `env:` set — not what the runner image exported into the shell. It was
+      # therefore empty, and the cache path resolved to `/system-images/android-<api>`: a
+      # directory at the filesystem root that never holds the image, so every run re-downloaded
+      # several hundred megabytes and cached nothing. Publishing it through $GITHUB_ENV is what
+      # puts it in that context for the steps that follow.
+      - name: Expose ANDROID_HOME to later expressions
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+        run: echo "ANDROID_HOME=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}" >> "$GITHUB_ENV"
       - name: Cache the Android system image
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
         uses: actions/cache@v6
