@@ -129,6 +129,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
 | `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
+| `deploy-website` | string | — | Whether this call deploys the project website. Empty auto-detects from `website/site.toml` and the ref; `"false"` turns it off, which a second call of the workflow in one job graph needs (see [Project website](#project-website-daysite)); `"true"` forces it. |
 | `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. A [project website](#project-website-daysite) also deploys on every `vX.Y.Z` tag when this is empty, since a new release changes what its release channel shows. |
 | `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
 | `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. |
@@ -243,6 +244,13 @@ layout's size in points and leaves the capture's pixels alone.
 The default pair captures 1080x2400 on the phone and, because `day devices boot` halves a
 headless panel past three million pixels, 1280x800 on the tablet — which is also 1280x800 in
 points, the tablet layout Day-Showcase's walkthrough is written against.
+
+Android CI explicitly disables system crash/ANR dialogs on each emulator before launching
+the app and verifies that setting. Current Day CLI builds also inspect system windows before
+and after every device screenshot. If a dialog remains or the inspection fails, the capture
+falls back to the app's own view; if that fails too, the screenshot step fails instead of
+publishing an obstructed image. These capture checks require a Day CLI containing the safeguard;
+the workflow's emulator settings also apply when using an older pinned CLI.
 
 #### Store-sized Android profiles
 
@@ -571,6 +579,11 @@ selects the template revision; the default, `main`, means every rebuild takes th
 latest fixes, which is what the Day apps want. Without a `website/` directory,
 `deploy-web: true` keeps its original behavior — the bare web app at the Pages root.
 
+A workflow that calls `dayapp.yml` twice in one run (a second call with `artifact-prefix`, say,
+to pack a demo-data variant) must set `deploy-website: "false"` on the second call. Left to the
+`site.toml` rule, both calls deploy: the first publishes a site assembled from its own
+artifacts, and the second finds a duplicate Pages artifact in the run and fails.
+
 A tag deploys only when the repository's `github-pages` environment admits it, and turning Pages
 on creates that environment admitting the Pages branch alone. The `preflight` job reads the
 environment's deployment rules for a tag build. When they would refuse the tag, it skips the site
@@ -593,4 +606,3 @@ family the favicons are copied from, and describes the project (`day metadata --
 declared permissions, with their reasons in every locale) for the site's permissions card; the
 site build itself fetches nothing, and fails if the built site would load a resource from another
 origin.
-

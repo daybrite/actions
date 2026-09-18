@@ -418,6 +418,18 @@ on:
           used when the repository has a website/ directory.
         type: string
         required: false
+      deploy-website:
+        description: >-
+          Whether this call deploys the project website (daysite) to the caller's GitHub Pages.
+          Empty (default) auto-detects: on when the repository has website/site.toml and the ref
+          qualifies (see web-deploy-tag-pattern). "false" turns it off for a call that must not
+          publish, which every SECOND call of this workflow in one job graph must be: two calls
+          that both deploy upload two Pages artifacts into one run, and whichever deploys last
+          fails on the duplicate, or publishes a site built from the other call's artifacts.
+          "true" forces it regardless of the ref.
+        type: string
+        required: false
+        default: ""
         default: "main"
       web-deploy-tag-pattern:
         description: >-
@@ -667,6 +679,7 @@ jobs:
           TARGET_PACKAGES_IN: ${{ inputs.target-packages }}
           TARGET_SETUP_IN: ${{ inputs.target-setup }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
+          DEPLOY_WEBSITE_IN: ${{ inputs.deploy-website }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PROJECT_PATH: ${{ inputs.project-path }}
@@ -949,18 +962,31 @@ jobs:
           # assets, so its content changes the moment a release is published. Without this, a
           # freshly tagged version reached the site only on the next unrelated push to the
           # default branch, and until then the release pages described the previous one.
+          #
+          # An explicit deploy-website input outranks all of that. "false" is for a second call
+          # of this workflow in the same job graph (Day-Trader's demo-data call): with the
+          # site.toml rule alone, both calls deployed, both uploaded a Pages artifact named for
+          # the same run attempt, and whichever deployed second failed on the duplicate — after
+          # the first had published a site assembled from the wrong call's artifacts.
           website=false
-          if [ -f "${PROJECT_PATH:-.}/website/site.toml" ]; then
-            if [ -n "${WEB_PATTERN// /}" ]; then
-              if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ $WEB_PATTERN ]]; then
-                website=true
+          case "$DEPLOY_WEBSITE_IN" in
+            true) website=true ;;
+            false) echo "::notice::deploy-website: false — this call does not deploy the website." ;;
+            "")
+              if [ -f "${PROJECT_PATH:-.}/website/site.toml" ]; then
+                if [ -n "${WEB_PATTERN// /}" ]; then
+                  if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ $WEB_PATTERN ]]; then
+                    website=true
+                  fi
+                elif [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ] || [ "$rel" = true ]; then
+                  website=true
+                fi
+                [ "$website" = true ] \
+                  || echo "::notice::website/site.toml present but ref '$GITHUB_REF_NAME' does not qualify — skipping the website deploy."
               fi
-            elif [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ] || [ "$rel" = true ]; then
-              website=true
-            fi
-            [ "$website" = true ] \
-              || echo "::notice::website/site.toml present but ref '$GITHUB_REF_NAME' does not qualify — skipping the website deploy."
-          fi
+              ;;
+            *) echo "::error::deploy-website: accepts '' (auto), 'true', or 'false' — got '$DEPLOY_WEBSITE_IN'"; exit 1 ;;
+          esac
           echo "website=$website" | tee -a "$GITHUB_OUTPUT"
 
       # A tag reaches the github-pages environment only when that environment's deployment rules
@@ -1578,6 +1604,13 @@ jobs:
           # poll instead — worth doing when a boot hangs rather than fails.
           SERIAL="$($DAY_BIN devices boot -p android-mdc --device "$AVD" --wait --headless \
             ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"})"
+          # Set and verify this even when the caller pins an older Day CLI. Error
+          # dialogs must not cover gallery captures; crashes still appear in logcat.
+          ADB="$ANDROID_HOME/platform-tools/adb"
+          "$ADB" -s "$SERIAL" shell settings put global hide_error_dialogs 1
+          "$ADB" -s "$SERIAL" shell settings put secure immersive_mode_confirmations confirmed
+          test "$("$ADB" -s "$SERIAL" shell settings get global hide_error_dialogs | tr -d '\r')" = 1
+          "$ADB" -s "$SERIAL" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS
           echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
       - name: Run dayscripts (android emulator · ${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
@@ -2554,11 +2587,13 @@ jobs:
       # This works because the upload and the deploy are steps of the SAME job: whichever attempt
       # runs them, both read the same `github.run_attempt`. (The name is only ever used to look
       # the artifact up — `deploy-pages` sends the resolved artifact ID to the Pages API — so any
-      # name deploys the same site.)
+      # name deploys the same site.) The artifact prefix is in the name for the same reason: a
+      # second call of this workflow in one run names its packages `<prefix>dist-<target>`, and
+      # its Pages artifact must not collide either, should both calls ever deploy.
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          name: github-pages-${{ github.run_attempt }}
+          name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
           # The whole self-contained static site, all relative — the directory IS the Pages site.
           path: web-dist
       # Belt and braces for the OTHER way duplicates appear, which the attempt suffix cannot
@@ -2574,7 +2609,7 @@ jobs:
       - name: Drop duplicate Pages artifacts from a retried upload
         env:
           GH_TOKEN: ${{ github.token }}
-          ART: github-pages-${{ github.run_attempt }}
+          ART: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
         run: |
           set -uo pipefail
           if ! ids=$(gh api --paginate \
@@ -2594,7 +2629,7 @@ jobs:
         id: deploy
         uses: actions/deploy-pages@v5
         with:
-          artifact_name: github-pages-${{ github.run_attempt }}
+          artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
 
   # --- Project website (daysite) -------------------------------------------------------------
   # When the repository has website/site.toml, this job replaces the bare root deploy above: it
@@ -2905,11 +2940,13 @@ jobs:
       # This works because the upload and the deploy are steps of the SAME job: whichever attempt
       # runs them, both read the same `github.run_attempt`. (The name is only ever used to look
       # the artifact up — `deploy-pages` sends the resolved artifact ID to the Pages API — so any
-      # name deploys the same site.)
+      # name deploys the same site.) The artifact prefix is in the name for the same reason: a
+      # second call of this workflow in one run names its packages `<prefix>dist-<target>`, and
+      # its Pages artifact must not collide either, should both calls ever deploy.
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          name: github-pages-${{ github.run_attempt }}
+          name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
           path: daysite/dist
       # Belt and braces for the OTHER way duplicates appear, which the attempt suffix cannot
       # separate: `upload-pages-artifact`'s own retry when finalizing times out can leave two
@@ -2924,7 +2961,7 @@ jobs:
       - name: Drop duplicate Pages artifacts from a retried upload
         env:
           GH_TOKEN: ${{ github.token }}
-          ART: github-pages-${{ github.run_attempt }}
+          ART: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
         run: |
           set -uo pipefail
           if ! ids=$(gh api --paginate \
@@ -2944,4 +2981,4 @@ jobs:
         id: deploy
         uses: actions/deploy-pages@v5
         with:
-          artifact_name: github-pages-${{ github.run_attempt }}
+          artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
