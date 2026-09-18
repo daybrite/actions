@@ -1547,7 +1547,12 @@ jobs:
           # `day launch` drives every booted simulator, so this job owns exactly one. Each profile
           # is its own job, so there is no sibling run whose captures could be mixed in.
           xcrun simctl shutdown all || true
-          args=(devices boot -p ios-uikit --device "$PROFILE" --wait)
+          # --headless: a runner has no display to put a simulator window on, so skip opening one
+          # (Simulator.app up to Xcode 26, Device Hub from 27) and the extra wait that getting one
+          # would need. Without it, an Xcode 27 runner used to print "Unable to find application
+          # named 'Simulator'" into this log while the boot itself succeeded. Orientation does not
+          # need the window; `devicectl` turns the device itself.
+          args=(devices boot -p ios-uikit --device "$PROFILE" --wait --headless)
           [ -n "${DEVICE_OS:-}" ] && args+=(--os "$DEVICE_OS")
           [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
           "$DAY_BIN" "${args[@]}"
