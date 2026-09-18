@@ -158,6 +158,24 @@ on:
           nothing on a target that should only build.
         type: string
         default: ""
+      scripts-once:
+        description: >-
+          Scripts that run ONCE, in the app's own theme and locale, instead of once per
+          `themes` × `locales` variant — comma- or space-separated paths, matched against the
+          scripts that would otherwise run.
+
+              scripts-once: dayscript/crash.yaml dayscript/crash-report.yaml
+
+          For a script that CONSUMES the state it asserts on, where a second run has nothing left
+          to find. The crash pair is the worked example: one script crashes the app to leave a
+          report, the next asserts the report is there and taps Clear. Crossed with eight
+          variants, the first run passes and the other seven fail on the report the first one
+          cleared — the app is behaving correctly and the script is being asked the question twice.
+
+          These run AFTER the crossed scripts, in the order given, so a pair like the above still
+          sees the state the earlier scripts left.
+        type: string
+        default: ""
       launch-env:
         description: >-
           Space-separated KEY=VALUE pairs passed to every scripted launch as `--env` (values must
@@ -1351,6 +1369,7 @@ jobs:
           LOCALES_IN: ${{ inputs.locales }}
           THEMES_IN: ${{ inputs.themes }}
           LAUNCH_ENV_IN: ${{ inputs.launch-env }}
+          SCRIPTS_ONCE_IN: ${{ inputs.scripts-once }}
           CAPTURE_SIZE_IN: ${{ inputs.capture-size }}
           COMBO: ${{ matrix.target }}
           DEVICE_SLUG: ${{ matrix.device_slug }}
@@ -1367,6 +1386,26 @@ jobs:
             echo "no dayscripts to run"
             exit 0
           fi
+          # Scripts the caller marked `scripts-once` leave the crossed list and run last, once.
+          # Membership is by path as written, matched whole, so `crash.yaml` cannot catch
+          # `pre-crash.yaml`.
+          # `if`, not `&&`: under `set -e` a failing `&&` compound aborts the shell, and a
+          # non-match here is the ordinary case rather than an error.
+          ONCE=""
+          REST=""
+          for f in $LIST; do
+            keep=yes
+            for o in ${SCRIPTS_ONCE_IN//,/ }; do
+              if [ "$f" = "$o" ]; then keep=no; fi
+            done
+            if [ "$keep" = yes ]; then REST="$REST $f"; else ONCE="$ONCE $f"; fi
+          done
+          for o in ${SCRIPTS_ONCE_IN//,/ }; do
+            case " $LIST " in
+              *" $o "*) ;;
+              *) echo "::warning::scripts-once: $o is not among the scripts this target runs" ;;
+            esac
+          done
           LOCALES="${LOCALES_IN//,/ }"
           THEMES="${THEMES_IN//,/ }"
           ENVS=""
@@ -1416,6 +1455,13 @@ jobs:
             for s in "\$@"; do flags+=(--script "\$s"); done
             $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$CAPFLAG$ENVS
           }
+          # Same launch without the theme/locale cross (inputs.scripts-once): one run in the
+          # app's own appearance and language.
+          run_once() {
+            local flags=()
+            for s in "\$@"; do flags+=(--script "\$s"); done
+            $DAY_BIN launch -p $COMBO "\${flags[@]}"$DEVFLAG$CAPFLAG$ENVS
+          }
           EOF
             if [ "$COMBO" = web-dom ]; then
               # All scripts in ONE launch: web state (OPFS in the driver's throwaway browser
@@ -1424,10 +1470,14 @@ jobs:
               # launch — the CLI runs them in sequence against the one app instance. Native
               # targets keep one launch per script: their stores persist on disk, and the
               # relaunch between scripts doubles as cold-start coverage over the stored data.
-              echo "run_one $LIST" >> "$OUT"
+              if [ -n "${REST// /}" ]; then echo "run_one $REST" >> "$OUT"; fi
+              if [ -n "${ONCE// /}" ]; then echo "run_once $ONCE" >> "$OUT"; fi
             else
-              for f in $LIST; do
+              for f in $REST; do
                 echo "run_one \"$f\"" >> "$OUT"
+              done
+              for f in $ONCE; do
+                echo "run_once \"$f\"" >> "$OUT"
               done
             fi
           else
