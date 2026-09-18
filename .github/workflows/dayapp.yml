@@ -418,6 +418,7 @@ on:
           used when the repository has a website/ directory.
         type: string
         required: false
+        default: "main"
       deploy-website:
         description: >-
           Whether this call deploys the project website (daysite) to the caller's GitHub Pages.
@@ -430,7 +431,6 @@ on:
         type: string
         required: false
         default: ""
-        default: "main"
       web-deploy-tag-pattern:
         description: >-
           When deploy-web is set: empty (default) deploys on a push to the repository's default
