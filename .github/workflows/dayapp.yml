@@ -1154,7 +1154,7 @@ jobs:
       # --- everything this target needs, in one step ---------------------------------------
       # The toolkit's dev libraries, the Rust std for its cross-compile and the SDK a mobile target
       # builds through — a property of the TARGET, so it lives in one action (this repo's
-      # setup-day-deps) that daybrite/day's checkup.yml calls too, rather than a ladder of
+      # setup-day-deps) that daybrite/day's doctor-verify.yml calls too, rather than a ladder of
       # `if: matrix.target == …` steps kept in step by hand across three repositories.
       #
       # `extras` brings what a walkthrough needs beyond a build (the web view's dev libs, a virtual
@@ -1577,8 +1577,7 @@ jobs:
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       - name: Enable KVM group perms (android / harmony emulator)
-        # Make /dev/kvm world-accessible so the emulators can open it (`day ohos emulator
-        # launch` auto-selects `-accel kvm` when /dev/kvm exists).
+        # Make /dev/kvm world-accessible so the emulators can open it (`day devices boot -p harmony-arkui` auto-selects `-accel kvm` when /dev/kvm exists).
         if: steps.scripts.outputs.found == 'true' && (matrix.target == 'android-mdc' || matrix.target == 'harmony-arkui')
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -1692,12 +1691,16 @@ jobs:
         with:
           path: ~/.cache/oniro-emulator/v6.1
           key: oniro-emulator-v6.1-oniro_emulator.zip
-      - name: Boot the Oniro emulator (day ohos emulator launch --headless)
+      - name: Boot the Oniro emulator (day devices boot -p harmony-arkui --headless)
         id: ohosemu
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
         continue-on-error: true
         run: |
           set -euo pipefail
+          if ! "$DAY_BIN" devices boot --help | grep -Fq "starts Oniro without a window"; then
+            echo "::error::This workflow requires a current day CLI with HarmonyOS headless device boot. Update day-version."
+            exit 1
+          fi
           ZIP="$HOME/.cache/oniro-emulator/v6.1/oniro_emulator.zip"
           if [ ! -f "$ZIP" ]; then
             mkdir -p "$(dirname "$ZIP")"
@@ -1708,7 +1711,7 @@ jobs:
           unzip -q "$ZIP" -d "$RUNNER_TEMP/oniro-emulator"
           IMAGES="$(dirname "$(find "$RUNNER_TEMP/oniro-emulator" -name bzImage -print -quit)")"
           echo "DAY_OHOS_EMULATOR=$IMAGES" >> "$GITHUB_ENV"
-          DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" ohos emulator launch --headless
+          DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" devices boot -p harmony-arkui --headless
       - name: Run dayscripts (harmony emulator)
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.ohosemu.outcome == 'success'
         continue-on-error: true
@@ -2866,7 +2869,7 @@ jobs:
           echo "$(find rel-shots -name '*.png' | wc -l) capture(s) from $TAG"
       # --- shared inputs -----------------------------------------------------------------------
       # The raster favicon set (apple-touch, PWA tile, legacy favicon) comes from the renderer
-      # every platform's icon does: `day icon -p web-dom` writes the size-exact png/ family
+      # every platform's icon does: `day icon build -p web-dom` writes the size-exact png/ family
       # under build/day/host/, and the generator copies the sizes it needs. The site build
       # carries no image library. Best-effort: without the CLI the site keeps the SVG master
       # (or the largest PNG under resource/icons/) as its only icon.
@@ -2875,7 +2878,12 @@ jobs:
         continue-on-error: true
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
-        run: '"$DAY_BIN" --project "app/${PROJECT_PATH:-.}" icon -p web-dom'
+        run: |
+          if ! "$DAY_BIN" icon build --help >/dev/null 2>&1; then
+            echo "::error::The installed day CLI lacks 'icon build'. Update day-version to build website icons."
+            exit 1
+          fi
+          "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" icon build -p web-dom
       # The CLI's own view of the project — the declared permissions with their native keys per
       # platform and reasons per locale (docs/permissions.md) — for the site's permissions
       # card. Handed to the generator as a file, like the release lookup, so the generator
