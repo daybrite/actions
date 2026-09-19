@@ -566,6 +566,9 @@ hundreds of megabytes on every Pages deploy (Day Rise's is 117 MB).
 A repository with no release publishes the branch build at the locale root instead, and the
 picker, having one entry, is not drawn.
 
+With `deploy-web: true`, a missing web artifact fails deployment. Webapp directories are cleared
+before staging, including channels without an artifact, so template leftovers cannot be served.
+
 ### Deploys and setup
 
 Deploys follow `deploy-web`'s ref rule — pushes to the default branch, or

@@ -2926,7 +2926,7 @@ jobs:
       # Absent when web-dom is not a target — the site simply has no such button.
       - name: Download the web-dom dist
         id: webdist
-        continue-on-error: true
+        continue-on-error: ${{ !inputs.deploy-web }}
         uses: actions/download-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}dist-web-dom
@@ -2938,6 +2938,7 @@ jobs:
           # screenshots step above.
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag }}
+          REQUIRE_WEB: ${{ inputs.deploy-web }}
         run: |
           set -euo pipefail
           # Both directories may be absent — web-dom is not always a target, and not every
@@ -2961,8 +2962,17 @@ jobs:
           }
           REL_DIR="$(jq -r '[.channels[] | select(.development | not) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
           MAIN_DIR="$(jq -r '[.channels[] | select(.development) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
+          # Remove template leftovers even when a channel has no artifact to replace them.
+          # An old Day-Skies build in public/webapp otherwise posed as a release's web app.
+          for dir in "$REL_DIR" "$MAIN_DIR"; do
+            if [ -n "$dir" ]; then rm -rf "daysite/public/$dir"; fi
+          done
           # This run's dist-web-dom artifact holds the one <stem>-web-dom.zip the build job staged.
           ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
+          if [ "$REQUIRE_WEB" = true ] && { [ -z "$ZIP" ] || [ -z "$MAIN_DIR" ]; }; then
+            echo "::error::deploy-web requires this run's web-dom dist and a development channel destination"
+            exit 1
+          fi
           if [ -n "$ZIP" ] && [ -n "$MAIN_DIR" ]; then stage "$ZIP" "$MAIN_DIR"; fi
           if [ -n "$REL_DIR" ] && [ -n "${TAG:-}" ]; then
             # The release's dist is chosen by name from its asset list. A `*-web-dom.zip` glob
