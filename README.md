@@ -106,6 +106,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
 | `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |
 | `project-path` | string | `.` | Directory of the Day project within the repository. |
+| `flavors` | string | — | [Build flavors](#build-flavors) to add to the matrix, comma- or space-separated. Each name is a `Day-<name>.toml` beside the project's `Day.toml`, and each gets a leg per target built with `DAY_FLAVOR=<name>`. The base app always builds. A flavor leg uploads `flavor-<name>-dist-<target>` and `flavor-<name>-screenshots-<target>`; release assets, notarization, store uploads and Pages stay with the base app. |
 | `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. Setting it marks the project as generated, which skips the preflight checks, `update-day-deps` and the pristine check; for what one target needs, use `target-packages` or `target-setup`. |
 | `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, Chocolatey for `windows-xaml`, and MSYS2 packages for `windows-qt` and `windows-gtk`. A line naming something that is not a target fails the run. |
 | `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `update-day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
@@ -362,6 +363,35 @@ job that was already the slowest in the matrix. Profiles do the same work as par
 which uploads the same `screenshots-ios-uikit-ipad` and `screenshots-android-mdc-tablet` the old
 input did. Passing `tablet-walkthroughs` now fails the run — GitHub rejects an input a reusable
 workflow does not define — so a caller still setting it has to change one of these two lines.
+
+### Build flavors
+
+A flavor ships one source tree as more than one app — a paid build beside a free one, a
+white-label build per customer — and is written in a `Day-<name>.toml` beside the project's
+`Day.toml`, stating what differs: app id, title, targets, cargo features, environment, the
+`resource/` and `store/` directories it uses. [Build flavors](https://daybrite.dev/docs/flavors)
+covers the file.
+
+```yaml
+with:
+  targets: macos-appkit,ios-uikit,android-mdc,web-dom
+  flavors: custom
+```
+
+Each name adds a leg per target, alongside the base app's, built with `DAY_FLAVOR=<name>` in the
+environment so every `day` command in the leg — build, the scripted launches, pack — builds that
+flavor. A flavor's output is kept apart on the runner (`build/day/flavors/<name>/`) and uploaded
+under names of its own:
+
+| artifact | contents |
+|---|---|
+| `flavor-<name>-dist-<target>` | the packages `day pack` produced for that flavor |
+| `flavor-<name>-screenshots-<target>` | its dayscript captures, in the same variant layout |
+
+Release assets, macOS notarization, the store uploads and the Pages deployment read the base
+app's artifacts and are unaffected, so adding a flavor to a repository that already ships does
+not change what the tag publishes. A flavor named here whose `Day-<name>.toml` the project does
+not carry fails the run in preflight, before any leg starts.
 
 ### Signing
 

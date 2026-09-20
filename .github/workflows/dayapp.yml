@@ -89,6 +89,24 @@ on:
         description: Directory of the Day project within the repository.
         type: string
         default: "."
+      flavors:
+        description: >-
+          Build flavors to add to the matrix, comma- or space-separated. A flavor is a
+          `Day-<name>.toml` beside the project's Day.toml that restates what differs — app id,
+          title, targets, cargo features, resources, store listing — and a flavor named here gets
+          a leg per target, built, scripted and packed with `DAY_FLAVOR=<name>` in the
+          environment. The base app always builds: flavors add legs, they do not replace them.
+
+              flavors: custom
+
+          A flavor leg uploads `flavor-<name>-dist-<target>` and
+          `flavor-<name>-screenshots-<target>`. Release assets, macOS notarization, the store
+          uploads and the Pages deployment stay with the base app, so a flavor is built and
+          exercised in CI without a second release path appearing under the same tag.
+
+          A flavor whose `Day-<name>.toml` the project does not carry fails the run in preflight.
+        type: string
+        default: ""
       setup-command:
         description: >-
           Optional shell command run at the repository root after the day CLI is installed and
@@ -696,6 +714,7 @@ jobs:
           ANDROID_DEVICES_IN: ${{ inputs.android-devices }}
           TARGET_PACKAGES_IN: ${{ inputs.target-packages }}
           TARGET_SETUP_IN: ${{ inputs.target-setup }}
+          FLAVORS_IN: ${{ inputs.flavors }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           DEPLOY_WEBSITE_IN: ${{ inputs.deploy-website }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
@@ -941,6 +960,62 @@ jobs:
                     scripts: (per_target($tscripts; $r.target) | join(" ")),
                   }
               ] }')
+          # Build flavors (inputs.flavors): one more leg per row per flavor, the base app always
+          # among them. A flavor is a Day-<name>.toml layered over Day.toml, and the leg carries
+          # it in DAY_FLAVOR rather than in a flag, so every day command the leg runs — build,
+          # the scripted launches, pack — builds the same app without a flag per step.
+          FLAVORS="${FLAVORS_IN:-}"
+          for f in ${FLAVORS//,/ }; do
+            case "$f" in
+              *[!A-Za-z0-9_-]*) echo "::error::flavor '$f' — a flavor name takes letters, digits, '-' and '_'"; exit 1 ;;
+            esac
+            # The manifest has to exist here, or the failure would be N identical build-job
+            # failures for one typo, each after a toolchain install.
+            file="${PROJECT_PATH:-.}/Day-$f.toml"
+            [ -f "$file" ] || { echo "::error::inputs.flavors names '$f', but $file does not exist"; exit 1; }
+          done
+          # A flavor may ship on fewer targets than the app (`targets` in its own [app] table), so
+          # read each one's list here and give it legs only for the targets it declares. Building
+          # the others would fail in the leg, on a manifest that never claimed them.
+          flavor_targets=$(FLAVORS="$FLAVORS" PROJECT_PATH="${PROJECT_PATH:-.}" python3 - <<'PYEOF'
+          import json, os, pathlib, tomllib
+          root = pathlib.Path(os.environ["PROJECT_PATH"])
+          out = {}
+          for name in os.environ.get("FLAVORS", "").replace(",", " ").split():
+              data = tomllib.loads((root / f"Day-{name}.toml").read_text())
+              targets = data.get("app", {}).get("targets")
+              out[name] = targets if isinstance(targets, list) else None
+          print(json.dumps(out))
+          PYEOF
+          )
+          matrix=$(printf '%s' "$matrix" | jq -c --arg flavors "$FLAVORS" --argjson ftargets "$flavor_targets" '
+            def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+            ([""] + ($flavors | gsub(","; " ") | split(" ") | map(trim)
+                     | map(select(length > 0)))) as $fs
+            | { include: [
+                  .include[] as $r
+                  | $fs[] as $f
+                  # The base app builds every target the caller named; a flavor builds the ones
+                  # it declares, and all of them when it declares none.
+                  | select($f == "" or ($ftargets[$f] == null)
+                           or (($ftargets[$f] | index($r.target)) != null))
+                  | $r + {
+                      flavor: $f,
+                      # Artifact names and job names stay exactly what they were for the base
+                      # app, so existing status checks and artifact consumers see no change.
+                      label: (if $f == "" then $r.label else "\($r.label) · \($f)" end),
+                      shots_artifact: (if $f == "" then $r.shots_artifact
+                                       else "flavor-\($f)-\($r.shots_artifact)" end),
+                      # Not `dist-…` for a flavor: the release job attaches every `dist-*`
+                      # artifact, and a flavor build is not part of the base app release.
+                      dist_artifact: (if $f == "" then "dist-\($r.target)"
+                                      else "flavor-\($f)-dist-\($r.target)" end),
+                    }
+                ] }')
+          for f in ${FLAVORS//,/ }; do
+            n=$(printf '%s' "$matrix" | jq --arg f "$f" '[.include[] | select(.flavor == $f)] | length')
+            [ "$n" -gt 0 ] || echo "::warning::flavor '$f' declares no target that inputs.targets builds, so it has no legs in this run"
+          done
           echo "matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
           rel=false
           if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -1102,6 +1177,12 @@ jobs:
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
+      # The build flavor this leg builds (inputs.flavors), empty for the base app. Every `day`
+      # command reads it, so no step below carries a `--flavor` flag of its own.
+      DAY_FLAVOR: ${{ matrix.flavor }}
+      # Where that build writes: a flavor keeps its compiled and staged output apart, the way
+      # `--day-src` does, so two flavors of one app never overwrite each other.
+      DAY_BUILD_DIR: build/day${{ matrix.flavor != '' && format('/flavors/{0}', matrix.flavor) || '' }}
       # Verbose day CLI (inputs.day-verbose): lint/doctor stay terse either way; build, pack,
       # and every scripted launch — including the ones the generated dayscript runner performs,
       # which no flag from this file could reach — forward their sub-commands' raw output.
@@ -1253,10 +1334,10 @@ jobs:
         run: |
           set -euo pipefail
           $DAY_BIN build -p web-dom --profile release
-          dist="build/day/cargo/web-dom/release/dist"
+          dist="$DAY_BUILD_DIR/cargo/web-dom/release/dist"
           if [ ! -f "$dist/index.html" ]; then
             echo "::error::web-dom release build produced no dist at $dist — does the app's Cargo.toml declare the 'dom = [\"day/dom\"]' feature? (day new app scaffolds it.)"
-            find build/day/cargo/web-dom -maxdepth 3 2>/dev/null || true
+            find "$DAY_BUILD_DIR/cargo/web-dom" -maxdepth 3 2>/dev/null || true
             exit 1
           fi
           # The web artifact IS the built dist folder, zipped: index.html + shim.js + day.css +
@@ -1316,7 +1397,7 @@ jobs:
       # The handoff to `sign-macos`: the built .app, its entitlements, and the provenance sidecars,
       # so the signing job can produce a notarized .dmg without ever seeing this build tree.
       - name: Stage the unsigned .app for signing
-        if: matrix.target == 'macos-appkit'
+        if: matrix.target == 'macos-appkit' && matrix.flavor == ''
         working-directory: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
@@ -1334,7 +1415,7 @@ jobs:
           basename "$(find build/day/dist -maxdepth 1 -name '*.dmg' | head -1)" > "$RUNNER_TEMP/appout/dmg-name.txt"
 
       - name: Upload the unsigned .app
-        if: matrix.target == 'macos-appkit'
+        if: matrix.target == 'macos-appkit' && matrix.flavor == ''
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}app-macos-appkit
@@ -1351,7 +1432,7 @@ jobs:
         if: always() && matrix.primary && steps.build.outcome == 'success' && steps.pack.outcome != 'failure'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
+          name: ${{ inputs.artifact-prefix }}${{ matrix.dist_artifact }}
           path: ${{ inputs.project-path }}/build/day/dist/
           if-no-files-found: ${{ matrix.tier == 'primary' && 'error' || 'warn' }}
 
@@ -1808,7 +1889,7 @@ jobs:
           # `screenshots-<target>` for the primary profile — the name every consumer already
           # reads — and `screenshots-<target>-<slug>` for each additional device.
           name: ${{ matrix.shots_artifact }}
-          path: ${{ inputs.project-path }}/build/day/screenshots/
+          path: ${{ inputs.project-path }}/build/day${{ matrix.flavor != '' && format('/flavors/{0}', matrix.flavor) || '' }}/screenshots/
           if-no-files-found: ignore
       # The emulator's own output, kept by `day devices boot` on the host. A walkthrough that ends
       # in "the device stopped answering" leaves no crash to find — the guest froze, and every adb
@@ -1818,7 +1899,7 @@ jobs:
         if: failure() && matrix.target == 'android-mdc'
         uses: actions/upload-artifact@v7
         with:
-          name: emulator-log-${{ matrix.target }}-${{ matrix.profile }}
+          name: emulator-log-${{ matrix.target }}-${{ matrix.profile }}${{ matrix.flavor != '' && format('-{0}', matrix.flavor) || '' }}
           path: /tmp/day-emulator-*.log
           if-no-files-found: ignore
 
