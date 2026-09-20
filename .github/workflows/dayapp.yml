@@ -107,6 +107,22 @@ on:
           A flavor whose `Day-<name>.toml` the project does not carry fails the run in preflight.
         type: string
         default: ""
+      store-flavor:
+        description: >-
+          Which build the store-upload jobs publish on a semantic-version tag: the base app when
+          empty (the default), or the named flavor. The flavor must also be in `flavors:`, since
+          what gets uploaded is the package that leg packed.
+
+              flavors: appfair
+              store-flavor: appfair
+
+          The upload jobs then take the `flavor-<name>-dist-<target>` artifact and stage that
+          flavor's listing (`store-<name>/`, per its `Day-<name>.toml`), so the submission carries
+          the flavor's app id, version, build number and store copy. What this is for: an app
+          whose store records belong to a flavor rather than to the base build — a white-label
+          release, or a rebuilt app continuing another one's listing.
+        type: string
+        default: ""
       setup-command:
         description: >-
           Optional shell command run at the repository root after the day CLI is installed and
@@ -428,6 +444,16 @@ on:
         type: boolean
         required: false
         default: false
+      release-assets:
+        description: >-
+          Whether this call assembles the GitHub release for a semantic-version tag. True (the
+          default) is what a repository with one workflow wants. False leaves the release to
+          another call — the case a second workflow in the same repository creates, where one
+          call owns the release and the other exists to build and publish something else (a
+          `store-flavor` submission, say). Two calls both assembling one release race each
+          other over its notes.
+        type: boolean
+        default: true
       publish-release:
         description: >-
           Publish the GitHub release for the tag, or leave it as a draft for a human to review and
@@ -2182,6 +2208,7 @@ jobs:
     # signed .dmg replaces the plain one) or skipped (unsigned release), never failed.
     if: >-
       ${{ !cancelled()
+          && inputs.release-assets
           && needs.preflight.outputs.release == 'true'
           && needs.build.result == 'success'
           && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
@@ -2445,6 +2472,7 @@ jobs:
           UPLOAD_MACOS_IN: ${{ inputs.upload-macos }}
           UPLOAD_PLAY_IN: ${{ inputs.upload-play }}
           PROJECT_PATH: ${{ inputs.project-path }}
+          STORE_FLAVOR_IN: ${{ inputs.store-flavor }}
           # Whether each store's credentials are set is all that crosses into the step.
           HAS_ASC: ${{ secrets.DAY_ASC_KEY_ID != '' && secrets.DAY_ASC_ISSUER != '' && secrets.DAY_ASC_KEY_B64 != '' }}
           HAS_PLAY: ${{ secrets.DAY_PLAY_JSON_KEY != '' }}
@@ -2459,8 +2487,14 @@ jobs:
             for f in "$@"; do
               if [ -f "$f" ] && grep -qF "$marker" "$f"; then echo "$f"; return 0; fi
             done
-            if [ "$listing" = true ] && [ -f "$PP/store/app.toml" ]; then
-              echo "$PP/store/app.toml (lanes from 'day store stage')"
+            # With inputs.store-flavor, the listing that gets published is the flavor's. The
+            # convention is `store-<flavor>/`, which is what a flavor manifest names; an app that
+            # points its `store` key somewhere else sets upload-ios / upload-play explicitly
+            # rather than leaving this to guess.
+            local toml="$PP/store/app.toml"
+            [ -n "${STORE_FLAVOR_IN:-}" ] && toml="$PP/store-$STORE_FLAVOR_IN/app.toml"
+            if [ "$listing" = true ] && [ -f "$toml" ]; then
+              echo "$toml (lanes from 'day store stage')"
             fi
             return 0
           }
@@ -2498,17 +2532,21 @@ jobs:
     needs: [preflight, build, stores]
     if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_ios == 'true' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
+    env:
+      # `day store stage` below reads the listing of the build being published: the base app's
+      # `store/`, or the flavor's `store-<name>/` when the caller named one (inputs.store-flavor).
+      DAY_FLAVOR: ${{ inputs.store-flavor }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.artifact-prefix }}dist-ios-uikit
+          name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-ios-uikit', inputs.store-flavor) || 'dist-ios-uikit' }}
           path: dist
       - name: Point DAY_IPA at the .ipa
         run: |
           set -euo pipefail
           IPA="$(find dist -type f -name '*.ipa' | head -1)"
-          [ -n "$IPA" ] || { echo "::error::no .ipa in the ${{ inputs.artifact-prefix }}dist-ios-uikit artifact — is ios-uikit in inputs.targets?"; exit 1; }
+          [ -n "$IPA" ] || { echo "::error::no .ipa in the downloaded dist artifact — is ios-uikit in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
           case "$IPA" in
             *-unsigned.ipa) echo "::error::the packed .ipa is unsigned — the store refuses it. Set DAY_APPLE_TEAM, DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64, DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 so pack signs"; exit 1 ;;
           esac
@@ -2568,11 +2606,15 @@ jobs:
     needs: [preflight, build, sign-macos, stores]
     if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_macos == 'true' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
+    env:
+      # `day store stage` below reads the listing of the build being published: the base app's
+      # `store/`, or the flavor's `store-<name>/` when the caller named one (inputs.store-flavor).
+      DAY_FLAVOR: ${{ inputs.store-flavor }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.artifact-prefix }}dist-macos-appkit
+          name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-macos-appkit', inputs.store-flavor) || 'dist-macos-appkit' }}
           path: dist
       # A Mac App Store submission needs a .pkg signed with the MAS installer identity. Producing
       # or re-signing that .pkg is the lane's job, not this workflow's: DAY_PKG_OR_APP points at
@@ -2585,7 +2627,7 @@ jobs:
             FOUND="$(find dist -maxdepth 3 -name "$pat" | head -1)"
             [ -n "$FOUND" ] && break
           done
-          [ -n "$FOUND" ] || { echo "::error::no .pkg/.app/.dmg in the ${{ inputs.artifact-prefix }}dist-macos-appkit artifact — is macos-appkit in inputs.targets?"; exit 1; }
+          [ -n "$FOUND" ] || { echo "::error::no .pkg/.app/.dmg in the downloaded dist artifact — is macos-appkit in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
           echo "DAY_PKG_OR_APP=$PWD/$FOUND" | tee -a "$GITHUB_ENV"
       - name: Run the app's fastlane lane
         working-directory: ${{ inputs.project-path }}
@@ -2608,17 +2650,21 @@ jobs:
     needs: [preflight, build, stores]
     if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_play == 'true' }}
     runs-on: ubuntu-latest
+    env:
+      # `day store stage` below reads the listing of the build being published: the base app's
+      # `store/`, or the flavor's `store-<name>/` when the caller named one (inputs.store-flavor).
+      DAY_FLAVOR: ${{ inputs.store-flavor }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.artifact-prefix }}dist-android-mdc
+          name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-android-mdc', inputs.store-flavor) || 'dist-android-mdc' }}
           path: dist
       - name: Point DAY_AAB at the .aab
         run: |
           set -euo pipefail
           AAB="$(find dist -type f -name '*.aab' | head -1)"
-          [ -n "$AAB" ] || { echo "::error::no .aab in the ${{ inputs.artifact-prefix }}dist-android-mdc artifact — is android-mdc in inputs.targets?"; exit 1; }
+          [ -n "$AAB" ] || { echo "::error::no .aab in the downloaded dist artifact — is android-mdc in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
           # A dev-tier pack signs with the debug keystore, which Play refuses; the signer's
           # certificate says which key it was.
           if keytool -printcert -jarfile "$AAB" 2>/dev/null | grep -q "CN=Android Debug"; then

@@ -107,6 +107,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |
 | `project-path` | string | `.` | Directory of the Day project within the repository. |
 | `flavors` | string | — | [Build flavors](#build-flavors) to add to the matrix, comma- or space-separated. Each name is a `Day-<name>.toml` beside the project's `Day.toml`, and each gets a leg per target built with `DAY_FLAVOR=<name>`. The base app always builds. A flavor leg uploads `flavor-<name>-dist-<target>` and `flavor-<name>-screenshots-<target>`; release assets, notarization, store uploads and Pages stay with the base app. |
+| `store-flavor` | string | — | Which build the store-upload jobs publish on a tag: the base app when empty, or this flavor (which must also be in `flavors`). The jobs then take `flavor-<name>-dist-<target>` and stage that flavor's `store-<name>/` listing, so the submission carries its app id, version and copy. |
 | `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. Setting it marks the project as generated, which skips the preflight checks, `update-day-deps` and the pristine check; for what one target needs, use `target-packages` or `target-setup`. |
 | `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, Chocolatey for `windows-xaml`, and MSYS2 packages for `windows-qt` and `windows-gtk`. A line naming something that is not a target fails the run. |
 | `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `update-day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
@@ -127,6 +128,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `assert-pristine` | boolean | `True` | Fail if the checkout has uncommitted changes before packing. An artifact packed from a dirty tree records a commit that cannot reproduce it. |
 | `signing-environment` | string | — | GitHub environment holding the macOS release-signing secrets (`DAY_MACOS_CERT_P12`, `DAY_MACOS_CERT_PASSWORD`, `DAY_SIGN_MACOS_IDENTITY`, `DAY_NOTARY_KEY_ID`, `DAY_NOTARY_ISSUER`, `DAY_NOTARY_KEY_B64`). When set, a tag build signs and notarizes the `.dmg` in a separate job that checks out no code, and fails rather than shipping unsigned when the material is missing. |
 | `validate-rebuild` | boolean | `False` | After packing, rebuild each artifact from its own recorded provenance and compare (`day rebuild --strict`). Off by default: the check needs a fixed day revision to be meaningful. |
+| `release-assets` | boolean | `True` | Whether this call assembles the GitHub release for a semantic-version tag. `false` leaves it to another call, which is what a second workflow in the same repository needs — one owns the release, the other builds and uploads a `store-flavor` submission. |
 | `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
 | `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
@@ -388,10 +390,24 @@ under names of its own:
 | `flavor-<name>-dist-<target>` | the packages `day pack` produced for that flavor |
 | `flavor-<name>-screenshots-<target>` | its dayscript captures, in the same variant layout |
 
-Release assets, macOS notarization, the store uploads and the Pages deployment read the base
-app's artifacts and are unaffected, so adding a flavor to a repository that already ships does
-not change what the tag publishes. A flavor named here whose `Day-<name>.toml` the project does
-not carry fails the run in preflight, before any leg starts.
+Release assets, macOS notarization and the Pages deployment read the base app's artifacts and are
+unaffected, so adding a flavor to a repository that already ships does not change what the tag
+publishes. A flavor named here whose `Day-<name>.toml` the project does not carry fails the run in
+preflight, before any leg starts, and a flavor that declares `targets` gets legs only for the
+targets it names.
+
+The store uploads follow `store-flavor`. Left empty they publish the base app as before; set to a
+flavor, the three upload jobs take that flavor's packages and stage its `store-<name>/` listing:
+
+```yaml
+with:
+  targets: ios-uikit,android-mdc
+  flavors: appfair
+  store-flavor: appfair
+```
+
+That is the shape of an app whose store records belong to a flavor — a white-label release, or a
+rebuilt app continuing the listing of the app it replaces.
 
 ### Signing
 
