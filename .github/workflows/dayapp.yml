@@ -107,6 +107,17 @@ on:
           A flavor whose `Day-<name>.toml` the project does not carry fails the run in preflight.
         type: string
         default: ""
+      release-flavor:
+        description: >-
+          Attach this flavor's packages to the release as well as the base app's. Empty (the
+          default) leaves a flavor's packages as workflow artifacts alone.
+
+          What this is for: a flavor whose packages someone else has to be able to fetch and check
+          — the App Fair's submission queue rebuilds an app from its tag and compares what it
+          built against the release the maintainer published, and it can only do that when the
+          release carries the same flavor's packages.
+        type: string
+        default: ""
       store-flavor:
         description: >-
           Which build the store-upload jobs publish on a semantic-version tag: the base app when
@@ -2225,6 +2236,14 @@ jobs:
         with:
           pattern: dist-*
           path: dist-in
+      # A flavor's packages, when the caller asked for them (inputs.release-flavor). They upload
+      # under a name of their own, which is what keeps every other flavor out of the release.
+      - name: Download the flavor's packages
+        if: inputs.release-flavor != ''
+        uses: actions/download-artifact@v7
+        with:
+          pattern: flavor-${{ inputs.release-flavor }}-dist-*
+          path: dist-in
       - name: Download screenshots
         uses: actions/download-artifact@v7
         with:
@@ -2255,12 +2274,14 @@ jobs:
           }
           normalize dist-in dist
           normalize shots-in screenshots
+          # With only a flavor's packages downloaded, the flat-mode fallback above named the
+          # directory `dist-<target>`; the loop below reads both shapes, so either name works.
           # Flatten the per-target package dirs. `day pack` already names every artifact
           # `<stem>-<platform>-<toolkit>[-extra].<ext>` and every provenance sidecar after the
           # artifact it describes (`…dmg.buildinfo.json`), so the packed file name IS the release
           # asset name — nothing is spliced in here, which is what keeps a sidecar's prefix equal
           # to its artifact.
-          for d in dist-in/dist-*/; do
+          for d in dist-in/dist-*/ dist-in/flavor-*-dist-*/; do
             [ -d "$d" ] || continue
             find "$d" -type f | while read -r f; do
               base="$(basename "$f")"
