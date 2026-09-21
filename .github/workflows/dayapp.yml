@@ -623,6 +623,11 @@ defaults:
   run:
     shell: bash
 
+env:
+  # fastlane reports usage to its own servers unless told not to. Set for every job, so an app's
+  # own Fastfile is covered as well as the ones `day store stage` generates.
+  FASTLANE_OPT_OUT_USAGE: "1"
+
 jobs:
   # The gate every other job waits on: run the cheap Rust first-pass checks, turn the `targets`
   # input into a build matrix (target → runner, doctor toolkit, extra rust std targets), decide
