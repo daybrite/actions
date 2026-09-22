@@ -42,6 +42,20 @@
 # upload-ios/-macos/-play inputs. The Fastfile owns credentials and store policy; the workflow
 # hands it the artifact via DAY_IPA / DAY_PKG_OR_APP / DAY_AAB.
 #
+# Staging a release: `release-mode: pre-release` publishes the tag's release behind GitHub's
+# pre-release flag, so its packages are downloadable by tag while `releases/latest` and the
+# project website's release channel keep describing the version before it. Marking the release
+# Latest fires a `release: released` event; a caller that listens for it
+#
+#   on:
+#     push:
+#       tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+#     release:
+#       types: [released]
+#
+# rebuilds and redeploys the site against the new latest release. That run assembles no release
+# and uploads to no store, since the tag's own build did both.
+#
 # Web deploy: with `deploy-web: true` (and web-dom among the targets), a final `pages` job
 # publishes the web-dom build to the CALLER's own GitHub Pages — reusing the release-profile dist
 # the build job already produced, so there is no second build. The dist is relative-path, so it
@@ -478,6 +492,34 @@ on:
         type: boolean
         required: false
         default: true
+      release-mode:
+        description: >-
+          What the tag's release becomes once this run has assembled it:
+
+            publish      public, and the release `releases/latest` answers with (today's default)
+            pre-release  public and flagged a pre-release, which `releases/latest` skips
+            draft        a complete draft, visible only to people with write access
+
+          `pre-release` stages a version: every package, checksum and install command is on the
+          release and anyone with the link can install it, while `releases/latest/download/…`,
+          the project website's release channel and anything else that reads "the latest
+          release" keep describing the previous version. Marking it Latest in the GitHub UI, or
+          `gh release edit <tag> --prerelease=false`, fires a `release: released` event; a caller
+          that listens for it
+
+              on:
+                release:
+                  types: [released]
+
+          rebuilds and redeploys the site, and the release channel then describes the new
+          version. That run assembles no release and uploads to no store, since the tag build
+          already did both.
+
+          A release that is already public and not a pre-release is never demoted by a re-run.
+          Empty follows `publish-release`, which this input replaces.
+        type: string
+        required: false
+        default: ""
       deploy-web:
         description: >-
           Publish the web-dom build to the CALLER's GitHub Pages after the build matrix (reusing
@@ -651,6 +693,11 @@ jobs:
       # PACKAGE wants, since only the primary profile row of a target packs one.
       pack-matrix: ${{ steps.plan.outputs.pack_matrix }}
       release: ${{ steps.plan.outputs.release }}
+      # What the release job makes of the release: publish, pre-release or draft.
+      release_mode: ${{ steps.plan.outputs.release_mode }}
+      # True when a `release: released` event started this run, which rebuilds the site and
+      # nothing else: the tag's build assembled the release and uploaded to the stores already.
+      promotion: ${{ steps.plan.outputs.promotion }}
       # The plan's Pages decisions, after the check that github-pages admits a tag.
       deploy_web: ${{ steps.pages.outputs.deploy_web }}
       website: ${{ steps.pages.outputs.website }}
@@ -758,6 +805,8 @@ jobs:
           TARGET_PACKAGES_IN: ${{ inputs.target-packages }}
           TARGET_SETUP_IN: ${{ inputs.target-setup }}
           FLAVORS_IN: ${{ inputs.flavors }}
+          RELEASE_MODE_IN: ${{ inputs.release-mode }}
+          PUBLISH_RELEASE_IN: ${{ inputs.publish-release }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           DEPLOY_WEBSITE_IN: ${{ inputs.deploy-website }}
           WEB_PATTERN: ${{ inputs.web-deploy-tag-pattern }}
@@ -1066,6 +1115,24 @@ jobs:
           fi
           echo "release=$rel" | tee -a "$GITHUB_OUTPUT"
 
+          # What the release becomes (inputs.release-mode), with the older boolean as the default.
+          case "${RELEASE_MODE_IN// /}" in
+            "") [ "$PUBLISH_RELEASE_IN" = true ] && mode=publish || mode=draft ;;
+            publish|pre-release|draft) mode="${RELEASE_MODE_IN// /}" ;;
+            *) echo "::error::release-mode: publish, pre-release or draft — got '$RELEASE_MODE_IN'"; exit 1 ;;
+          esac
+          echo "release_mode=$mode" | tee -a "$GITHUB_OUTPUT"
+
+          # A `release: released` event: the maintainer marked a staged release Latest. The tag's
+          # own build already attached the packages and ran the store lanes, so this run exists to
+          # rebuild the site against the release that is now the latest one.
+          promotion=false
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            promotion=true
+            [ "$mode" = pre-release ] || echo "::warning::a release event arrived while release-mode is '$mode'; the trigger belongs with release-mode: pre-release, and this run rebuilds the site for nothing else"
+          fi
+          echo "promotion=$promotion" | tee -a "$GITHUB_OUTPUT"
+
           # Web-dom → GitHub Pages deploy gate (inputs.deploy-web + web-deploy-tag-pattern). The
           # pages job reuses the dist-web-dom artifact, so web-dom must be a target.
           deploy_web=false
@@ -1209,6 +1276,9 @@ jobs:
     # — so a run that never asked for profiles keeps the job names its branch protection knows.
     name: ${{ matrix.label }}
     needs: [preflight]
+    # A promotion run rebuilds for the website alone, so one that deploys no website has nothing
+    # to do: the release it was fired by already carries everything this would build.
+    if: ${{ needs.preflight.outputs.promotion != 'true' || needs.preflight.outputs.website == 'true' }}
     runs-on: ${{ matrix.os }}
     # A row marked `optional=true` (a back-deployment probe against the app's floor) reports its
     # result without failing the run. The planner refuses the flag on a target's first row, so
@@ -2047,7 +2117,10 @@ jobs:
     # without it an unrelated leg (macos-gtk's walkthrough, say) failing would silently SKIP the
     # release signing. Skipping is the one outcome a release must never take quietly — if the
     # appkit leg itself failed, this job fails at download-artifact instead, which is honest.
-    if: ${{ !cancelled() && inputs.signing-environment != '' && needs.preflight.outputs.release == 'true' }}
+    if: >-
+      ${{ !cancelled() && inputs.signing-environment != ''
+          && needs.preflight.outputs.release == 'true'
+          && needs.preflight.outputs.promotion != 'true' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
     environment: ${{ inputs.signing-environment }}
     permissions:
@@ -2244,6 +2317,7 @@ jobs:
       ${{ !cancelled()
           && inputs.release-assets
           && needs.preflight.outputs.release == 'true'
+          && needs.preflight.outputs.promotion != 'true'
           && needs.build.result == 'success'
           && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
     runs-on: ubuntu-latest
@@ -2457,21 +2531,41 @@ jobs:
                /<!-- \/day:install -->/ { skip = 0 }' body.md | sed '/./,$!d' > kept.md
           cat install.md kept.md > notes.md
           gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
-      # The one step that makes the release public. `publish-release: false` skips it and leaves a
-      # complete draft behind: assets, checksums, launch scripts and notes are all already in
-      # place, so publishing is one click and needs no re-run. It is also why nothing here ever
-      # sets `--draft=true` — a release that went out cannot be recalled by a later build.
+      # The one step that decides what the assembled release is (inputs.release-mode). Nothing
+      # here ever sets `--draft=true` or demotes a public release: a release that went out
+      # cannot be recalled by a later build, and a maintainer who marked a staged release Latest
+      # must not find a re-run putting it back.
       - name: Publish the release
-        if: ${{ inputs.publish-release }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
-      - name: Note that the release is a draft
-        if: ${{ !inputs.publish-release }}
+          MODE: ${{ needs.preflight.outputs.release_mode }}
         run: |
-          echo "::notice::$GITHUB_REF_NAME is ready as a DRAFT (publish-release: false) — \
-          publish it to make its assets and the install commands in its notes reachable."
+          set -euo pipefail
+          state=$(gh release view "$GITHUB_REF_NAME" --json isDraft,isPrerelease)
+          draft=$(jq -r .isDraft <<<"$state")
+          pre=$(jq -r .isPrerelease <<<"$state")
+          case "$MODE" in
+            draft)
+              echo "::notice::$GITHUB_REF_NAME is ready as a DRAFT (release-mode: draft) — \
+              publish it to make its assets and the install commands in its notes reachable."
+              ;;
+            pre-release)
+              if [ "$draft" = false ] && [ "$pre" = false ]; then
+                echo "::notice::$GITHUB_REF_NAME is already the latest release; this run leaves it there."
+              else
+                gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease
+                echo "::notice::$GITHUB_REF_NAME is a PRE-RELEASE: its packages are downloadable \
+                by their tag, and releases/latest still answers with the version before it. Mark \
+                it Latest when it passes review, which rebuilds the site against it."
+              fi
+              ;;
+            publish)
+              gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false
+              echo "::notice::$GITHUB_REF_NAME is published."
+              ;;
+            *) echo "::error::release_mode '$MODE' is not one this job knows"; exit 1 ;;
+          esac
 
   # --- store uploads (semantic-version tags only) ---------------------------------------------
   # Three independent jobs that hand the packed artifacts to the APP'S OWN fastlane config. The
@@ -2491,7 +2585,9 @@ jobs:
   stores:
     name: store uploads
     needs: [preflight]
-    if: ${{ needs.preflight.outputs.release == 'true' }}
+    if: >-
+      ${{ needs.preflight.outputs.release == 'true'
+          && needs.preflight.outputs.promotion != 'true' }}
     runs-on: ubuntu-latest
     outputs:
       upload_ios: ${{ steps.stores.outputs.upload_ios }}

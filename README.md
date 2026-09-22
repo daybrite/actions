@@ -131,6 +131,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `validate-rebuild` | boolean | `False` | After packing, rebuild each artifact from its own recorded provenance and compare (`day rebuild --strict`). Off by default: the check needs a fixed day revision to be meaningful. |
 | `release-assets` | boolean | `True` | Whether this call assembles the GitHub release for a semantic-version tag. `false` leaves it to another call, which is what a second workflow in the same repository needs — one owns the release, the other builds and uploads a `store-flavor` submission. |
 | `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
+| `release-mode` | string | — | What the tag's release becomes: `publish` (public and latest), `pre-release` (public, flagged, so `releases/latest` skips it), or `draft`. Empty follows `publish-release`. See [Staging a release](#staging-a-release). |
 | `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
 | `deploy-website` | string | — | Whether this call deploys the project website. Empty auto-detects from `website/site.toml` and the ref; `"false"` turns it off, which a second call of the workflow in one job graph needs (see [Project website](#project-website-daysite)); `"true"` forces it. |
@@ -409,6 +410,50 @@ with:
 
 That is the shape of an app whose store records belong to a flavor — a white-label release, or a
 rebuilt app continuing the listing of the app it replaces.
+
+### Staging a release
+
+By default a `vX.Y.Z` tag ends the run with a published release, and that release is what
+`releases/latest` answers with the moment the run finishes. `release-mode: pre-release` stages it
+instead:
+
+```yaml
+    with:
+      release-mode: pre-release
+```
+
+The release is assembled and published exactly as before, with every package, checksum, launch
+script and install command, and it carries GitHub's pre-release flag. What that changes:
+
+- `https://<owner>/<repo>/releases/download/<tag>/<asset>` works, so the version can be installed
+  and tested by anyone with the link.
+- `releases/latest/download/<asset>` and the project website's release channel keep describing the
+  version before it, because `releases/latest` skips pre-releases.
+- The store lanes ran on the tag build as usual. Staging governs what the release page says is
+  current, not what the stores received.
+
+Marking the release **Latest** in the GitHub UI, or `gh release edit <tag> --prerelease=false`,
+fires a `release: released` event. A caller that listens for it rebuilds and redeploys:
+
+```yaml
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  release:
+    types: [released]
+```
+
+That run builds the tag, deploys the website, and stops there: it assembles no release and
+uploads to no store, since the tag's own build did both. Its release channel is the version just
+promoted; its development channel shows the tag rather than the default branch, until the next
+push to the branch rebuilds it.
+
+Add the trigger only with `release-mode: pre-release`. With `publish`, publishing the release
+fires the same event and the run rebuilds for nothing, which the preflight warns about.
+
+A release that is already public and not a pre-release is never demoted, so re-running a tag
+after promoting it leaves it alone. `release-mode: draft` is the older `publish-release: false`:
+a complete draft, visible only to people with write access.
 
 ### Signing
 
