@@ -239,9 +239,10 @@ on:
         default: ""
       locales:
         description: >-
-          Locales to run each dayscript under, comma- or space-separated (e.g. "en fr ar zh-CN").
-          Each locale's screenshots land in their own variant directory. Empty = one run in the
-          default locale.
+          Locales to run each dayscript under, comma- or space-separated (e.g. "en fr ar zh-CN"),
+          or "all" for every locale the app ships (its `resource/locales/<tag>/` catalogs, default
+          locale first). Each locale's screenshots land in their own variant directory. Empty =
+          one run in the default locale.
         type: string
         default: ""
       android-abis:
@@ -1530,6 +1531,23 @@ jobs:
             esac
           done
           LOCALES="${LOCALES_IN//,/ }"
+          # `all` is the app's own locale set, read from the catalogs it ships. An app that adds
+          # a language then has it walked through without also editing its workflow, which is the
+          # whole point: the list that decides what ships and the list CI exercises are one list.
+          # Order follows day-build's own default rule — `en` first when the app has it, the rest
+          # in tag order — so the default locale is the first to fail and the variant directories
+          # come out in a stable order.
+          if [ "${LOCALES// /}" = all ]; then
+            LOCALES="$(find resource/locales -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+              | sed 's|.*/||' | sort \
+              | awk '$0 == "en" { en = $0; next } { rest = rest " " $0 } \
+                     END { sub(/^ /, "", rest); print (en ? en (rest ? " " rest : "") : rest) }')"
+            if [ -z "${LOCALES// /}" ]; then
+              echo "::error::locales: all — no locale catalogs under ${PWD}/resource/locales"
+              exit 1
+            fi
+            echo "locales: all → $LOCALES"
+          fi
           THEMES="${THEMES_IN//,/ }"
           ENVS=""
           for kv in $LAUNCH_ENV_IN; do ENVS="$ENVS --env $kv"; done

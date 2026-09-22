@@ -91,7 +91,7 @@ jobs:
     with:
       targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
       scripts: dayscript/walkthrough.yaml
-      locales: en fr
+      locales: all   # every locale the app ships; or name them, `en fr`
       # preflight-checks: fmt clippy   # opt into clippy before the matrix (fmt alone is the default)
 ```
 
@@ -115,7 +115,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `scripts` | string | `auto` | Dayscripts to run on each target, comma- or space-separated paths relative to the project. `auto` runs every `dayscript/*.yaml` (or `scripts/*.yaml`); `none` runs nothing. |
 | `launch-env` | string | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`; values must not contain spaces. |
 | `capture-size` | string | — | Pixel size of the desktop-class screenshots (the desktop toolkits and web-dom), passed to every scripted launch as `--capture-size`: `2560x1600`, `2880x1800@2`, or `window` for the app's own `[window]` size. Empty leaves it to the app's Day.toml `[screenshots]` table, whose default is 2560x1600 at 2x, a size the Mac App Store accepts. |
-| `locales` | string | — | Locales to run each dayscript under, comma- or space-separated (`en fr ar zh-CN`). Each locale captures its own screenshot variant. |
+| `locales` | string | — | Locales to run each dayscript under, comma- or space-separated (`en fr ar zh-CN`), or `all` for every locale the app ships — its `resource/locales/<tag>/` catalogs, default locale first, so adding a language to the app adds it to the walkthrough. Each locale captures its own screenshot variant. |
 | `android-abis` | string | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK and AAB, comma- or space-separated; each adds its own `lib/<abi>/`. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 | `day-source` | string | `install` | Where the day CLI comes from: `install` builds it with cargo per `day-version`; `artifact` downloads the `day-<os>-<arch>` artifact an earlier job in the same run uploaded. |
 | `artifact-prefix` | string | — | Prefix for the package artifact names (`<prefix>dist-<target>`), so a repository that already publishes `dist-<target>` from another workflow can keep both. |
