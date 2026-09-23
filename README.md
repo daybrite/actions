@@ -144,6 +144,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `ios-upload-lane` | string | `ios upload` | The fastlane arguments the `appstore-ios` job runs (platform + lane). The staged lanes are `ios validate`, `ios upload`, and `ios release`, which also submits the version for review. |
 | `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
 | `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. The staged lanes are `android validate`, `android upload` (internal track, draft), and `android release` (production track, completed, which is Play's submission). |
+| `store-screenshots` | boolean | `False` | Replace the App Store and Google Play listings' screenshots on each upload with the captures the walkthrough marked `store: N`, taken from this run's own `screenshots-<target>` artifact and checked against each store's rules first. See [Store screenshots](#store-screenshots). |
 
 ### Targets and runners
 
@@ -525,6 +526,49 @@ platform :android do
   lane(:upload) { upload_to_play_store(aab: ENV.fetch("DAY_AAB"), track: "internal") }
 end
 ```
+
+### Store screenshots
+
+By default an upload leaves the screenshots each store already shows. With
+`store-screenshots: true`, the upload replaces them with the captures the app's walkthrough
+marked for the listing:
+
+```yaml
+- screenshot: { name: home, title: Home, store: 1 }
+- screenshot: { name: editor, title: Editing, store: 2 }
+```
+
+One mark covers every locale, theme and device the walkthrough runs on. The captures are this
+run's own: the build legs for the target uploaded them as `screenshots-<target>` and
+`screenshots-<target>-<slug>`, one per device profile (a flavor submission's as
+`flavor-<name>-screenshots-<target>…`), so the set is the tagged version's, and no website,
+release or earlier run is consulted. Each upload job downloads those artifacts into one capture
+tree, indexes it with `day screenshot index`, runs `day store screenshots` on the index, and
+stages the listing with `day store stage --screenshots`. Every locale the store knows gets its own set; the theme is
+`screenshot-theme` in `store/app.toml`, `light` by default.
+
+What the check requires, and fails the upload on before anything is signed:
+
+| store | device | rule |
+|---|---|---|
+| App Store | `iphone`, `ipad` | one of Apple's exact sizes per device, at most 10 per locale; the default profiles `iPhone * Pro Max` and `iPad Pro 13-inch` produce 1320×2868 and 2752×2064 |
+| Google Play | `phone`, `tablet` | 320 to 3840 px a side, the long side at most twice the short, at most 8 per locale; the tablet set is optional |
+
+Every locale the walkthrough captured needs a capture on each required device. Play's ratio
+rule refuses the workflow's default 20:9 `medium_phone` profile (1080×2400), so an app that
+uploads screenshots names a 9:16 phone in `android-devices`, such as `device=pixel` (1080×1920):
+
+```yaml
+      android-devices: |
+        device=pixel,         os=36, orientation=portrait,  slug=phone
+        device=medium_tablet, os=36, orientation=landscape, slug=tablet
+      store-screenshots: true
+```
+
+The input needs a dayscript with marked `screenshot:` steps running on the target, and the
+lanes `day store stage` writes: an app with its own Fastfile places its own screenshots, and the
+run fails rather than guess. An artifact with no captures, or a set the stores would refuse,
+fails in the upload job with the reason. The Mac App Store upload is unchanged.
 
 ### Web deploy
 
