@@ -1204,6 +1204,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEPLOY_WEB: ${{ steps.plan.outputs.deploy_web }}
           WEBSITE: ${{ steps.plan.outputs.website }}
+          PROMOTION: ${{ steps.plan.outputs.promotion }}
         run: |
           set -euo pipefail
           admitted=true
@@ -1269,6 +1270,10 @@ jobs:
           else
             echo "deploy_web=false" | tee -a "$GITHUB_OUTPUT"
             echo "website=false" | tee -a "$GITHUB_OUTPUT"
+            # A promotion run exists to rebuild the site. Refused the environment, it has nothing
+            # left to do, and every job below stands down; without this the run ends green and
+            # silent, which reads as "the promotion worked".
+            [ "$PROMOTION" != true ] || echo "::warning::$GITHUB_REF_NAME was marked Latest, and this run cannot deploy the site, so it does nothing. Admit the tag to github-pages (the rule above) and re-run it."
           fi
 
   build:

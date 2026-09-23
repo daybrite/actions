@@ -448,6 +448,9 @@ uploads to no store, since the tag's own build did both. Its release channel is 
 promoted; its development channel shows the tag rather than the default branch, until the next
 push to the branch rebuilds it.
 
+The `github-pages` environment has to admit the tag, or the promotion run has nothing to do; see
+[Project website](#project-website-daysite) for the one-line rule.
+
 Add the trigger only with `release-mode: pre-release`. With `publish`, publishing the release
 fires the same event and the run rebuilds for nothing, which the preflight warns about.
 
@@ -692,6 +695,10 @@ gh api -X POST repos/<owner>/<repo>/environments/github-pages/deployment-branch-
 
 An environment set to protected branches only never admits a tag. When the rules cannot be read,
 the deploys run and GitHub decides as each job starts.
+
+This rule is a prerequisite for [staging a release](#staging-a-release), not a nicety: a
+promotion run's ref is the tag, so an environment that admits `main` alone refuses it, and the
+run has nothing left to do. It says so and stands every job down.
 
 The job reads the network in two places only: the template's npm packages, installed from its
 lockfile as committed, and the repository's latest release — its asset list through `gh api`, its
