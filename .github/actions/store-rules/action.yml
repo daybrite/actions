@@ -1,0 +1,17 @@
+name: Store rules
+description: >-
+  The stores' rules the shared workflow holds a listing to — each store's fields and limits,
+  locale spellings and screenshot sizes — as a file for `day store stage --rules`, `day store
+  screenshots --rules` and `day lint`. Kept here rather than only inside the day CLI, so a store
+  changing what it accepts is a data edit in this repository, in force for every app on its next
+  run, with no CLI release in between. The CLI ships the same file as its default, and `day store
+  export` carries the rules in force.
+outputs:
+  path:
+    description: The rules file, for DAY_STORE_RULES or `--rules`.
+    value: ${{ github.action_path }}/store-rules.toml
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "store rules from ${{ github.action_path }}/store-rules.toml"

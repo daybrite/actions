@@ -584,7 +584,7 @@ on:
           Upload the packed .ipa to App Store Connect on semantic-version tags, via the app's own
           fastlane lane (ios-upload-lane). Empty (default) auto-detects: on when the app has lanes
           for it (a fastlane/Fastfile or platform/ios/fastlane/Fastfile under project-path
-          containing `platform :ios`, or a store/app.toml listing that `day store stage` turns
+          containing `platform :ios`, or a store/storefront.toml listing that `day store stage` turns
           into lanes) and the App Store Connect key secrets DAY_ASC_KEY_ID, DAY_ASC_ISSUER and
           DAY_ASC_KEY_B64 are set. "true"/"false" override the detection.
         type: string
@@ -605,7 +605,7 @@ on:
           Upload the packed .aab to Google Play on semantic-version tags, via the app's own
           fastlane lane (play-upload-lane). Empty (default) auto-detects: on when the app has lanes
           for it (a fastlane/Fastfile or platform/android/fastlane/Fastfile under project-path
-          containing `platform :android`, or a store/app.toml listing that `day store stage` turns
+          containing `platform :android`, or a store/storefront.toml listing that `day store stage` turns
           into lanes) and the DAY_PLAY_JSON_KEY secret is set. "true"/"false" override the
           detection.
         type: string
@@ -629,14 +629,18 @@ on:
       store-screenshots:
         description: >-
           Replace the App Store and Google Play listings' screenshots on each upload with the
-          captures the walkthrough marked `store: N`, taken from this run's own screenshot
+          captures store/storefront.toml `[storefront…screenshots]` declares per store and device kind (naming the
+          walkthrough's `screenshot:` steps), taken from this run's own screenshot
           artifacts (the `screenshots-<target>` bundle the build leg uploaded, so the set is the
           tagged version's). The upload checks the set against each store's rules (Apple's exact
-          sizes per device, Play's 320-3840 px range with the long side at most twice the short,
-          the ceiling per locale, a capture in every locale on every required device) and fails
-          on any refusal before it signs anything. Needs the lanes `day store stage` writes; an
-          app with its own Fastfile places its own screenshots. Off by default, which leaves what
-          each store already shows.
+          sizes per device; Play's 1080-7680 px range with the long side at most 2.3× the short,
+          as its API enforces; the ceiling per locale; a capture in every locale on every
+          required device) and fails on any refusal before it signs anything. The default
+          `medium_tablet` captures 1280x800 and is refused, so this needs `android-devices`
+          naming a tablet that clears 1080 px (`Nexus 7 2013` at `density=240`); preflight
+          refuses the run otherwise. Needs the lanes `day store stage` writes; an app with its
+          own Fastfile places its own screenshots. Off by default, which leaves what each store
+          already shows.
         type: boolean
         required: false
         default: false
@@ -820,6 +824,7 @@ jobs:
           TARGET_SETUP_IN: ${{ inputs.target-setup }}
           FLAVORS_IN: ${{ inputs.flavors }}
           RELEASE_MODE_IN: ${{ inputs.release-mode }}
+          STORE_SCREENSHOTS_IN: ${{ inputs.store-screenshots }}
           PUBLISH_RELEASE_IN: ${{ inputs.publish-release }}
           DEPLOY_WEB_IN: ${{ inputs.deploy-web }}
           DEPLOY_WEBSITE_IN: ${{ inputs.deploy-website }}
@@ -898,6 +903,17 @@ jobs:
           fi
           if [ -n "$(echo "$ANDROID_P" | tr -d '[:space:]')" ] && [ -n "$(echo "$ANDROID_D" | tr -d '[:space:]')" ]; then
             echo "::error::set either android-profiles or android-devices, not both (android-devices supersedes it)"
+            exit 1
+          fi
+          # A store upload of this run's captures needs profiles the stores accept, and the
+          # default Android tablet is not one: `medium_tablet` is captured halved (1280x800),
+          # under Google Play's 1080 px floor. Stopping here spares a full build that would only
+          # be refused at the upload.
+          if [ "${STORE_SCREENSHOTS_IN:-false}" = true ] && [ -z "$(echo "$ANDROID_D$ANDROID_P" | tr -d '[:space:]')" ] \
+             && printf '%s' "${TARGETS_IN:-}" | tr ', ' '\n\n' | grep -qx android-mdc; then
+            echo "::error::store-screenshots is on and android-devices is not set: the default medium_tablet captures 1280x800, which Google Play refuses (it takes 1080 px on the short side at least). Name the profiles, for example: android-devices: |
+              device=medium_phone,  os=36, orientation=portrait,  slug=phone
+              device=Nexus 7 2013,  os=36, orientation=landscape, density=240, slug=tablet"
             exit 1
           fi
           # Per-target additions (inputs.target-packages / target-setup), one `<targets>: <value>`
@@ -2556,19 +2572,28 @@ jobs:
             echo "merged=false" >> "$GITHUB_OUTPUT"
             echo "::notice::no captures in this run — the release ships no screenshot bundle"
           fi
-      # Best-effort, and only when there are captures to index: a cold `cargo install day-cli` is
-      # minutes, and a release with no screenshots has nothing for it to do. Without the CLI the
-      # bundle still ships — it carries each target's own gallery.json, which is what the site
-      # build merges when the standalone index is absent.
+      # Best-effort: a cold `cargo install day-cli` is minutes. Without the CLI the release still
+      # ships — the screenshot bundle carries each target's own gallery.json, which is what the
+      # site build merges when the standalone index is absent, and the storefront document is
+      # simply not attached.
       - name: Set up the day CLI
         id: daycli
-        if: ${{ steps.shots.outputs.merged == 'true' }}
         continue-on-error: true
         uses: daybrite/actions/.github/actions/setup-day-cli@main
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+      # The listing as the CLI resolves it (docs/store.md "Exporting"): the text per target,
+      # store and locale, the submission info, the screenshot declarations, the live store
+      # records and the permissions, one JSON document a store queue or a catalog reads
+      # without a checkout of the app.
+      - name: Export the storefront
+        if: ${{ steps.daycli.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: '"$DAY_BIN" --project "app/${PROJECT_PATH:-.}" store export --out assets/storefront.json'
       - name: Bundle the screenshots
         if: ${{ steps.shots.outputs.merged == 'true' }}
         env:
@@ -2729,7 +2754,7 @@ jobs:
       # Empty (auto) enables an upload only when the app is set up for that store: it has lanes
       # for the platform (a fastlane/Fastfile under project-path, or the platform/ios and
       # platform/android convention directories, containing the literal `platform :ios`,
-      # `platform :mac` or `platform :android` block; for iOS and Play also a store/app.toml
+      # `platform :mac` or `platform :android` block; for iOS and Play also a store/storefront.toml
       # listing, which `day store stage` turns into lanes) AND the store's upload credentials
       # reached this workflow. Every app scaffold carries a store/ listing for its website and web
       # manifest, so the listing alone does not mean the app publishes to a store, and without
@@ -2761,10 +2786,12 @@ jobs:
             # convention is `store-<flavor>/`, which is what a flavor manifest names; an app that
             # points its `store` key somewhere else sets upload-ios / upload-play explicitly
             # rather than leaving this to guess.
-            local toml="$PP/store/app.toml"
-            [ -n "${STORE_FLAVOR_IN:-}" ] && toml="$PP/store-$STORE_FLAVOR_IN/app.toml"
-            if [ "$listing" = true ] && [ -f "$toml" ]; then
-              echo "$toml (lanes from 'day store stage')"
+            local dir="$PP/store" f
+            [ -n "${STORE_FLAVOR_IN:-}" ] && dir="$PP/store-$STORE_FLAVOR_IN"
+            if [ "$listing" = true ]; then
+              for f in storefront.toml storefront.yaml storefront.yml app.toml app.yaml app.yml; do
+                if [ -f "$dir/$f" ]; then echo "$dir/$f (lanes from 'day store stage')"; break; fi
+              done
             fi
             return 0
           }
@@ -2834,7 +2861,7 @@ jobs:
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
       # With inputs.store-screenshots, the listing's screenshots are the captures this run's
-      # walkthrough marked `store: N`, from the screenshots-ios-uikit artifacts the build legs
+      # listing declares (store/storefront.toml [storefront]), from the screenshots-ios-uikit artifacts the build legs
       # uploaded (`<target>/<device>/<variant>/<shot>.png` plus the target's own gallery.json).
       # `day screenshot index` merges that into the index `day store stage --screenshots` reads,
       # and `day store screenshots` holds the set to the store's rules before anything is staged
@@ -2853,10 +2880,17 @@ jobs:
         with:
           pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-ios-uikit*', inputs.store-flavor) || 'screenshots-ios-uikit*' }}
           path: shots-in
+      # The limits each store enforces, as data in this repository (the CLI carries the same
+      # file as its default); the check and the staging below read them through the variable.
+      - name: Take the stores' screenshot rules
+        id: rules
+        if: ${{ inputs.store-screenshots }}
+        uses: daybrite/actions/.github/actions/store-rules@main
       - name: Check the listing's screenshots
         id: shots
         if: ${{ inputs.store-screenshots }}
         env:
+          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
           TARGET: ios-uikit
           PROJECT_PATH: ${{ inputs.project-path }}
           OWN_FASTFILE: ${{ hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) != '' || hashFiles(format('{0}/platform/ios/fastlane/Fastfile', inputs.project-path)) != '' }}
@@ -2867,7 +2901,7 @@ jobs:
             exit 1
           fi
           if [ -z "$(find shots-in -name '*.png' -print -quit 2>/dev/null)" ]; then
-            echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript run on $TARGET with 'screenshot:' steps marked 'store: N'?"
+            echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript with 'screenshot:' steps run on $TARGET, and does store/storefront.toml [storefront] name them?"
             exit 1
           fi
           # A single matching artifact is extracted flat into shots-in/; give it the
@@ -2891,6 +2925,7 @@ jobs:
         working-directory: ${{ inputs.project-path }}
         env:
           SHOTS_INDEX: ${{ steps.shots.outputs.index }}
+          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
         run: |
           set -euo pipefail
           if [ -n "${SHOTS_INDEX:-}" ]; then
@@ -3016,7 +3051,7 @@ jobs:
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
       # With inputs.store-screenshots, the listing's screenshots are the captures this run's
-      # walkthrough marked `store: N`, from the screenshots-android-mdc artifacts the build legs
+      # listing declares (store/storefront.toml [storefront]), from the screenshots-android-mdc artifacts the build legs
       # uploaded (`<target>/<device>/<variant>/<shot>.png` plus the target's own gallery.json).
       # `day screenshot index` merges that into the index `day store stage --screenshots` reads,
       # and `day store screenshots` holds the set to the store's rules before anything is staged
@@ -3035,10 +3070,17 @@ jobs:
         with:
           pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-android-mdc*', inputs.store-flavor) || 'screenshots-android-mdc*' }}
           path: shots-in
+      # The limits each store enforces, as data in this repository (the CLI carries the same
+      # file as its default); the check and the staging below read them through the variable.
+      - name: Take the stores' screenshot rules
+        id: rules
+        if: ${{ inputs.store-screenshots }}
+        uses: daybrite/actions/.github/actions/store-rules@main
       - name: Check the listing's screenshots
         id: shots
         if: ${{ inputs.store-screenshots }}
         env:
+          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
           TARGET: android-mdc
           PROJECT_PATH: ${{ inputs.project-path }}
           OWN_FASTFILE: ${{ hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) != '' || hashFiles(format('{0}/platform/android/fastlane/Fastfile', inputs.project-path)) != '' }}
@@ -3049,7 +3091,7 @@ jobs:
             exit 1
           fi
           if [ -z "$(find shots-in -name '*.png' -print -quit 2>/dev/null)" ]; then
-            echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript run on $TARGET with 'screenshot:' steps marked 'store: N'?"
+            echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript with 'screenshot:' steps run on $TARGET, and does store/storefront.toml [storefront] name them?"
             exit 1
           fi
           # A single matching artifact is extracted flat into shots-in/; give it the
@@ -3073,6 +3115,7 @@ jobs:
         working-directory: ${{ inputs.project-path }}
         env:
           SHOTS_INDEX: ${{ steps.shots.outputs.index }}
+          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
         run: |
           set -euo pipefail
           if [ -n "${SHOTS_INDEX:-}" ]; then
@@ -3429,16 +3472,23 @@ jobs:
             exit 1
           fi
           "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" icon build -p web-dom
-      # The CLI's own view of the project — the declared permissions with their native keys per
-      # platform and reasons per locale (docs/permissions.md) — for the site's permissions
-      # card. Handed to the generator as a file, like the release lookup, so the generator
-      # itself runs no tool. Best-effort: without the CLI the card says none are declared.
-      - name: Describe the project
-        if: ${{ steps.daycli.outcome == 'success' }}
-        continue-on-error: true
+      # The storefront as the CLI resolves it (docs/store.md "Exporting"): the app's identity
+      # and locales, the listing text per target, store and locale, the live store records,
+      # and the declared permissions with their native keys per platform and reasons per
+      # locale. Everything the site says about the app comes from this one document, handed
+      # to the generator as a file, like the release lookup, so the generator itself runs no
+      # tool. Without the CLI there is no site: the generator refuses rather than describe an
+      # app it has not read.
+      - name: Export the storefront
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
-        run: '"$DAY_BIN" --project "app/${PROJECT_PATH:-.}" metadata --json > "$RUNNER_TEMP/day-metadata.json"'
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.daycli.outcome }}" != success ]; then
+            echo "::error::the website needs the day CLI (\`day store export\` describes the app to the site generator), and it could not be installed"
+            exit 1
+          fi
+          "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" store export --out "$RUNNER_TEMP/day-storefront.json"
       - name: Generate the site data
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
@@ -3471,7 +3521,7 @@ jobs:
             > "$RUNNER_TEMP/channels.json"
           node daysite/scripts/generate-site.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" \
             --channels "$RUNNER_TEMP/channels.json" \
-            --repo "$GITHUB_REPOSITORY" --metadata "$RUNNER_TEMP/day-metadata.json"
+            --repo "$GITHUB_REPOSITORY" --storefront "$RUNNER_TEMP/day-storefront.json"
           echo "SITE_DIR=$SITE_DIR" >> "$GITHUB_ENV"
       # The hosted web builds, one per channel: the release's own dist under the directory
       # site.toml names (default "webapp"), and this run's under the development channel's

@@ -140,13 +140,13 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. A [project website](#project-website-daysite) also deploys on every `vX.Y.Z` tag when this is empty, since a new release changes what its release channel shows. |
 | `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
 | `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. |
-| `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has lanes for it, either a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios` or a `store/app.toml` listing that `day store stage` turns into lanes, and the App Store Connect key secrets `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and `DAY_ASC_KEY_B64` are set. `"true"`/`"false"` override. |
+| `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has lanes for it, either a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios` or a `store/storefront.toml` listing that `day store stage` turns into lanes, and the App Store Connect key secrets `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and `DAY_ASC_KEY_B64` are set. `"true"`/`"false"` override. |
 | `upload-macos` | string | — | Upload the `macos-appkit` build products to the Mac App Store on semantic-version tags through `macos-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` with `platform :mac` when the App Store Connect key secrets are set; `"true"`/`"false"` override. |
-| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/app.toml` listing that `day store stage` turns into lanes, when `DAY_PLAY_JSON_KEY` is set; `"true"`/`"false"` override. |
+| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/storefront.toml` listing that `day store stage` turns into lanes, when `DAY_PLAY_JSON_KEY` is set; `"true"`/`"false"` override. |
 | `ios-upload-lane` | string | `ios upload` | The fastlane arguments the `appstore-ios` job runs (platform + lane). The staged lanes are `ios validate`, `ios upload`, and `ios release`, which also submits the version for review. |
 | `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
 | `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. The staged lanes are `android validate`, `android upload` (internal track, draft), and `android release` (production track, completed, which is Play's submission). |
-| `store-screenshots` | boolean | `False` | Replace the App Store and Google Play listings' screenshots on each upload with the captures the walkthrough marked `store: N`, taken from this run's own `screenshots-<target>` artifact and checked against each store's rules first. See [Store screenshots](#store-screenshots). |
+| `store-screenshots` | boolean | `False` | Replace the App Store and Google Play listings' screenshots on each upload with the captures `store/storefront.toml` `[storefront…screenshots]` declares for each store and device kind, taken from this run's own `screenshots-<target>` artifact and checked against each store's rules first. See [Store screenshots](#store-screenshots). |
 
 ### Targets and runners
 
@@ -502,7 +502,7 @@ With an `upload-*` input left empty, the upload runs exactly when the repo has a
 for that platform — a `fastlane/Fastfile` under `project-path` (for iOS also
 `platform/ios/fastlane/Fastfile`, for Play also `platform/android/fastlane/Fastfile`) containing
 the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). For iOS and Play a
-`store/app.toml` listing counts as well: the job runs `day store stage` and uses the lanes it
+`store/storefront.toml` listing counts as well: the job runs `day store stage` and uses the lanes it
 writes (`ios validate`, `ios upload`, and `ios release`, which also submits the version for
 review; `android validate`, `android upload`, and `android release`). An auto upload also needs
 the store's upload credentials: the App Store Connect key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
@@ -540,40 +540,56 @@ end
 ### Store screenshots
 
 By default an upload leaves the screenshots each store already shows. With
-`store-screenshots: true`, the upload replaces them with the captures the app's walkthrough
-marked for the listing:
+`store-screenshots: true`, the upload replaces them with the captures the app declares for the
+listing in `store/storefront.toml`, naming its walkthrough's `screenshot:` steps per store and device
+kind (the [store listings](https://daybrite.dev/docs/store#screenshots) doc has the whole shape):
 
-```yaml
-- screenshot: { name: home, title: Home, store: 1 }
-- screenshot: { name: editor, title: Editing, store: 2 }
+```toml
+[storefront.ios-uikit.apple-app-store.screenshots]
+iphone = ["home", { name = "editor", theme = "dark" }]
+ipad = ["home", "editor"]
+
+[storefront.android-mdc.google-play-store.screenshots]
+default = ["home", "editor"]
 ```
 
-One mark covers every locale, theme and device the walkthrough runs on. The captures are this
+Each list applies to every locale the walkthrough captured. The captures are this
 run's own: the build legs for the target uploaded them as `screenshots-<target>` and
 `screenshots-<target>-<slug>`, one per device profile (a flavor submission's as
 `flavor-<name>-screenshots-<target>…`), so the set is the tagged version's, and no website,
 release or earlier run is consulted. Each upload job downloads those artifacts into one capture
 tree, indexes it with `day screenshot index`, runs `day store screenshots` on the index, and
 stages the listing with `day store stage --screenshots`. Every locale the store knows gets its own set; the theme is
-`screenshot-theme` in `store/app.toml`, `light` by default.
+the theme each item names in `store/storefront.toml`, `light` unless the item says `{ name = "…", theme = "dark" }`.
 
 What the check requires, and fails the upload on before anything is signed:
 
 | store | device | rule |
 |---|---|---|
 | App Store | `iphone`, `ipad` | one of Apple's exact sizes per device, at most 10 per locale; the default profiles `iPhone * Pro Max` and `iPad Pro 13-inch` produce 1320×2868 and 2752×2064 |
-| Google Play | `phone`, `tablet` | 320 to 3840 px a side, the long side at most twice the short, at most 8 per locale; the tablet set is optional |
+| Google Play | `phone`, `tablet` | 1080 to 7680 px a side, the long side at most 2.3× the short, at most 8 per locale; the tablet set is optional. These are the numbers Play's publishing API enforces ("min size: [1080], max size: [7680], max aspect ratio: [2.3]"), not the 320 px and 2:1 of its help page |
 
-Every locale the walkthrough captured needs a capture on each required device. Play's ratio
-rule refuses the workflow's default 20:9 `medium_phone` profile (1080×2400), so an app that
-uploads screenshots names a 9:16 phone in `android-devices`, such as `device=pixel` (1080×1920):
+Every locale the walkthrough captured needs a capture on each required device. The workflow's
+default `medium_tablet` is captured halved (1280×800, see [Device profiles](#device-profiles))
+and Play refuses it, so an app that uploads screenshots names its Android profiles, and
+preflight stops a run that has `store-screenshots` on without them:
 
 ```yaml
       android-devices: |
-        device=pixel,         os=36, orientation=portrait,  slug=phone
-        device=medium_tablet, os=36, orientation=landscape, slug=tablet
+        device=medium_phone,  os=36, orientation=portrait,  slug=phone
+        device=Nexus 7 2013,  os=36, orientation=landscape, density=240, slug=tablet
       store-screenshots: true
 ```
+
+`Nexus 7 2013` at `density=240` captures 1920×1200 and lays out as the same 1280×800 points
+the default tablet has; any 1080-wide phone (`medium_phone`, `pixel_7`, `pixel`) clears the
+phone slot.
+
+The limits themselves are data in this repository,
+[`.github/actions/store-rules/store-rules.toml`](.github/actions/store-rules/store-rules.toml),
+handed to the CLI through `DAY_STORE_RULES`; the day CLI embeds the same file as its
+default. When a store changes what it accepts, edit the file here and every app takes it on its
+next run.
 
 The input needs a dayscript with marked `screenshot:` steps running on the target, and the
 lanes `day store stage` writes: an app with its own Fastfile places its own screenshots, and the
@@ -758,7 +774,8 @@ The job reads the network in two places only: the template's npm packages, insta
 lockfile as committed, and the repository's latest release — its asset list through `gh api`, its
 screenshot bundle and web dist through `gh release download` — each handed to the site generator
 as a file or a directory. The `day` CLI merges each channel's screenshot index, renders the icon
-family the favicons are copied from, and describes the project (`day metadata --json`: the
-declared permissions, with their reasons in every locale) for the site's permissions card; the
-site build itself fetches nothing, and fails if the built site would load a resource from another
-origin.
+family the favicons are copied from, and exports the storefront (`day store export`: the app's
+identity, the listing text per locale, the store records, and the declared permissions with
+their reasons in every locale), which is everything the site says about the app; the site build
+itself fetches nothing, and fails if the built site would load a resource from another origin.
+A release also carries that document as `storefront.json`, beside `gallery.json`.
