@@ -471,10 +471,12 @@ dev-signed, even when the secrets exist.
 
 An App Store `.ipa` is packed unsigned by the build leg (`day pack --no-sign`, which produces
 `<stem>-ios-uikit-unsigned.ipa`) and signed afterwards by `sign-ios`, a job that checks out no
-code, the way `sign-macos` signs the `.app`: it imports the distribution certificate
+code, the way `sign-macos` signs the `.app`. The job hands the package and the material to the
+[`sign-package`](#sign-package) action, which imports the distribution certificate
 (`DAY_APPLE_CERT_P12` with `DAY_APPLE_CERT_PASSWORD`) into an ephemeral keychain, decodes the App
 Store provisioning profile (`DAY_IOS_PROFILE_B64`), runs `day sign apply` over the package, and
-republishes `dist-ios-uikit` with the signed `.ipa` in place of the unsigned one. The job that
+destroys the keychain; the job republishes `dist-ios-uikit` with the signed `.ipa` in place of
+the unsigned one. The App Fair's queue signs with the same action. The job that
 builds and runs the app's code never holds Apple material. Without both secrets the unsigned
 `.ipa` ships as it is and the App Store upload refuses it. The upload itself takes
 `DAY_APPLE_TEAM` and the API key trio `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64`.
@@ -511,16 +513,19 @@ scaffold carries a `store/` listing for its website and web manifest, so a tagge
 app without those secrets skips the store jobs instead of failing in them. The `store uploads` job
 runs on release tags and prints a `::notice` for each auto decision.
 
-Each job checks out the repo, downloads the built artifact, points its `DAY_*` variable at it
-(an absolute path), and runs the lane from the directory holding `fastlane/` — with
-`bundle install && bundle exec fastlane <lane>` when a `Gemfile` is present, plain
-`fastlane <lane>` otherwise (installed with `gem install fastlane` on ubuntu; macOS runners ship
-it). The iOS job hands the lane the App Store Connect API key as `DAY_ASC_KEY_ID`,
-`DAY_ASC_ISSUER`, and `DAY_ASC_KEY` (the `.p8` written from `DAY_ASC_KEY_B64`), which is what
-the staged lanes read; a repository's own Fastfile may read the same names or its own. The Play
-job writes `DAY_PLAY_JSON_KEY` (the service-account JSON) to a file and hands it to the lane as
-`SUPPLY_JSON_KEY`. The macOS job sets no store credentials: forward yours with `secrets: inherit`
-and have the Fastfile read them. A Mac App Store submission needs a `.pkg`
+Each job checks out the repo, downloads the built artifact, finds the package, and hands it to
+the [`store-upload`](#store-upload) action with the lane, the listing's screenshot index and the
+credentials. The action stages the listing (or takes the app's own `fastlane/`), points the
+`DAY_*` variable at the package (an absolute path), and runs the lane from the directory holding
+`fastlane/` — with `bundle install && bundle exec fastlane <lane>` when a `Gemfile` is present,
+plain `fastlane <lane>` otherwise (installed with `gem install fastlane` on ubuntu; macOS runners
+ship it). The iOS job hands it the App Store Connect API key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
+`DAY_ASC_KEY_B64`), which reaches the lane as `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and
+`DAY_ASC_KEY` (the `.p8` as a file), what the staged lanes read; a repository's own Fastfile may
+read the same names or its own. The Play job hands it `DAY_PLAY_JSON_KEY` (the service-account
+JSON), which reaches the lane as `SUPPLY_JSON_KEY`. The macOS job sets no store credentials:
+forward yours with `secrets: inherit` and have the Fastfile read them. The App Fair's queue
+uploads with the same action. A Mac App Store submission needs a `.pkg`
 signed with the MAS installer identity; producing or re-signing it from `DAY_PKG_OR_APP` is the
 lane's job — the workflow hands over build products, not store policy. Caller permissions are
 unchanged: the upload jobs need nothing beyond what the workflow already uses.
@@ -558,8 +563,9 @@ run's own: the build legs for the target uploaded them as `screenshots-<target>`
 `screenshots-<target>-<slug>`, one per device profile (a flavor submission's as
 `flavor-<name>-screenshots-<target>…`), so the set is the tagged version's, and no website,
 release or earlier run is consulted. Each upload job downloads those artifacts into one capture
-tree, indexes it with `day screenshot index`, runs `day store screenshots` on the index, and
-stages the listing with `day store stage --screenshots`. Every locale the store knows gets its own set; the theme is
+tree and indexes it with `day screenshot index`; the `store-upload` action then runs `day store
+screenshots` on the index and stages the listing with `day store stage --screenshots`. Every
+locale the store knows gets its own set; the theme is
 the theme each item names in `store/storefront.toml`, `light` unless the item says `{ name = "…", theme = "dark" }`.
 
 What the check requires, and fails the upload on before anything is signed:
@@ -680,6 +686,55 @@ Installs the `day` CLI and exports `DAY_BIN` — from crates.io, a git ref, or a
 built (`day-source: artifact`, how daybrite/day tests the CLI it just compiled). Source installs
 build cold on purpose: a cached build directory once handed `--branch main` installs a stale
 binary labeled with the new commit, and correctness beats the minutes saved.
+
+### `sign-package`
+
+Signs a packed app with key material named on the command line, through `day sign apply`, which
+re-signs the package as an archive so no app code runs. An iOS `.ipa` takes a distribution
+certificate and an App Store profile — a stored one, or one the action issues now from an App
+Store Connect key (`fastlane sigh`) so the caller stores none per app; an Android `.aab` or
+`.apk` takes the upload keystore, with further `.apk` files signed best-effort. The certificate
+lives in an ephemeral keychain the action destroys when it ends, whatever happened in between.
+A package named `<stem>-unsigned.<ext>` is signed to `<stem>.<ext>` with its provenance sidecars
+renamed along. The caller sets up the CLI first (`setup-day-cli`).
+
+```yaml
+- uses: daybrite/actions/.github/actions/sign-package@main
+  id: sign
+  with:
+    target: ios-uikit
+    package: ${{ runner.temp }}/dist/app-ios-uikit-unsigned.ipa
+    apple-cert-p12: ${{ secrets.DAY_APPLE_CERT_P12 }}
+    apple-cert-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
+    apple-profile-b64: ${{ secrets.DAY_IOS_PROFILE_B64 }}   # or app-id + the App Store Connect key
+# ${{ steps.sign.outputs.package }} is the signed .ipa
+```
+
+### `store-upload`
+
+Stages an app's store listing and runs a fastlane lane over a signed package. `day store stage`
+writes the fastlane project from `store/storefront.toml` (holding the text to `day lint`'s rules
+first, and placing the listing's screenshots from a gallery index the action checks against the
+stores' rules); an app with a `fastlane/Fastfile` of its own (or `platform/<os>/fastlane/`) keeps
+it, and the lane runs there instead. The package reaches the lane as `DAY_IPA`, `DAY_AAB` or
+`DAY_PKG_OR_APP`, the credentials as `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY` and
+`SUPPLY_JSON_KEY`, each given as a value or as a file already on the runner. The caller sets up
+the CLI first.
+
+```yaml
+- uses: daybrite/actions/.github/actions/store-upload@main
+  with:
+    target: android-mdc
+    package: ${{ steps.sign.outputs.package }}
+    lane: android upload
+    project-path: .                      # the app's checkout
+    screenshots: shots/gallery.json      # empty leaves the store's screenshots alone
+    rules: ${{ steps.rules.outputs.path }}
+    play-json-key: ${{ secrets.DAY_PLAY_JSON_KEY }}
+```
+
+Both actions are what `dayapp.yml`'s `sign-ios` and upload jobs run, and what the App Fair's
+queue runs in its signing stage, so the two pipelines sign and upload one way.
 
 ## Validation
 

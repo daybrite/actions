@@ -1379,6 +1379,27 @@ jobs:
         if: inputs.setup-command != ''
         run: ${{ inputs.setup-command }}
 
+      # An iOS Simulator's cold boot is a minute and a half of the job's clock (iOS 27 on a
+      # hosted runner, 2026-09-24). Started here, the moment the CLI is on the runner, it runs
+      # under the dependency setup and the build, and the device is up by the time the
+      # walkthrough wants it; the boot step below then finds it booted (or still booting, which
+      # it waits out) and turns it. In the background, so nothing here waits on it, and
+      # best-effort: a boot that fails here fails there, with the report.
+      - name: Start booting the iOS Simulator (${{ matrix.profile }})
+        if: matrix.target == 'ios-uikit' && (matrix.scripts != '' && matrix.scripts || inputs.scripts) != 'none'
+        env:
+          PROFILE: ${{ matrix.profile }}
+          DEVICE_OS: ${{ matrix.device_os }}
+        run: |
+          set -euo pipefail
+          # `day launch` drives every booted simulator, so this job owns exactly one. Each profile
+          # is its own job, so there is no sibling run whose captures could be mixed in.
+          xcrun simctl shutdown all || true
+          args=(devices boot -p ios-uikit --device "$PROFILE" --headless)
+          [ -n "${DEVICE_OS:-}" ] && args+=(--os "$DEVICE_OS")
+          nohup "$DAY_BIN" "${args[@]}" > "$RUNNER_TEMP/simulator-boot.log" 2>&1 &
+          echo "booting $PROFILE in the background; the boot step below waits for it"
+
       # --- everything this target needs, in one step ---------------------------------------
       # The toolkit's dev libraries, the Rust std for its cross-compile and the SDK a mobile target
       # builds through — a property of the TARGET, so it lives in one action (this repo's
@@ -1776,9 +1797,9 @@ jobs:
           DEVICE_ORIENTATION: ${{ matrix.device_orientation }}
         run: |
           set -euo pipefail
-          # `day launch` drives every booted simulator, so this job owns exactly one. Each profile
-          # is its own job, so there is no sibling run whose captures could be mixed in.
-          xcrun simctl shutdown all || true
+          # The boot started under the build (the step after the CLI setup); what it printed
+          # belongs to this step's log, since this is where a failed boot is reported.
+          cat "$RUNNER_TEMP/simulator-boot.log" 2>/dev/null || true
           # --headless: a runner has no display to put a simulator window on, so skip opening one
           # (Simulator.app up to Xcode 26, Device Hub from 27) and the extra wait that getting one
           # would need. Without it, an Xcode 27 runner used to print "Unable to find application
@@ -2368,44 +2389,6 @@ jobs:
           IPA="$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name '*-unsigned.ipa' | head -1)"
           [ -n "$IPA" ] || { echo "::error::no *-unsigned.ipa in dist-ios-uikit; the build leg packs the iOS app unsigned for this job to sign"; exit 1; }
           echo "IPA=$IPA" >> "$GITHUB_ENV"
-          echo "SIGNED=${IPA%-unsigned.ipa}.ipa" >> "$GITHUB_ENV"
-      - name: Create an ephemeral signing keychain
-        if: steps.material.outputs.present == 'true'
-        env:
-          CERT_P12: ${{ secrets.DAY_APPLE_CERT_P12 }}
-          CERT_PASSWORD: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
-          PROFILE_B64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
-        run: |
-          set -euo pipefail
-          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
-          KEYCHAIN_PASS="$(openssl rand -base64 24)"
-          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
-          security set-keychain-settings -lut 900 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
-          umask 077
-          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          MAGIC="$(head -c 2 "$RUNNER_TEMP/cert.p12" | xxd -p)"
-          if [ "$MAGIC" != 3082 ]; then
-            echo "::error::DAY_APPLE_CERT_P12 decoded to $(wc -c < "$RUNNER_TEMP/cert.p12" | tr -d ' ') byte(s) that are not a PKCS#12 certificate (expected DER 30 82, got '${MAGIC:-nothing}'). The secret must hold the output of \`base64 -i Certificates.p12\`, not the certificate itself."
-            rm -f "$RUNNER_TEMP/cert.p12"
-            exit 1
-          fi
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
-            -T /usr/bin/codesign -f pkcs12
-          rm -f "$RUNNER_TEMP/cert.p12"
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
-          security find-identity -v -p codesigning "$KEYCHAIN"
-          COUNT="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -c '^[[:space:]]*[0-9][0-9]*)')"
-          [ "$COUNT" = 1 ] || { echo "::error::expected exactly 1 identity in the keychain, found $COUNT"; exit 1; }
-          SIGN_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/^[[:space:]]*1\)/ {print $2; exit}')"
-          printf '%s' "$PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/appstore.mobileprovision"
-          security cms -D -i "$RUNNER_TEMP/appstore.mobileprovision" | plutil -extract UUID raw -o - - >/dev/null \
-            || { echo "::error::DAY_IOS_PROFILE_B64 is not a base64 .mobileprovision"; exit 1; }
-          {
-            echo "KEYCHAIN=$KEYCHAIN"
-            echo "SIGN_ID=$SIGN_ID"
-          } >> "$GITHUB_ENV"
       - name: Set up the day CLI
         if: steps.material.outputs.present == 'true'
         uses: daybrite/actions/.github/actions/setup-day-cli@main
@@ -2413,23 +2396,21 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
-      # `day sign apply` re-signs the package as an archive: the profile is embedded, every
-      # binary inside is signed with the identity, and no app code runs. The provenance sidecars
-      # beside the unsigned .ipa are renamed after the signed one, the way the release job names
-      # its assets, so `day rebuild` still finds them beside the artifact.
+      # The certificate goes into an ephemeral keychain the action destroys when it is done,
+      # `day sign apply` re-signs the package as an archive (the profile is embedded, every
+      # binary inside is signed with the identity, and no app code runs), and the provenance
+      # sidecars beside the unsigned .ipa are renamed after the signed one, the way the release
+      # job names its assets, so `day rebuild` still finds them beside the artifact. The App
+      # Fair's queue signs with the same action.
       - name: Sign the .ipa
         if: steps.material.outputs.present == 'true'
-        run: |
-          set -euo pipefail
-          "$DAY_BIN" sign apply "$IPA" --out "$SIGNED" \
-            --profile "$RUNNER_TEMP/appstore.mobileprovision" --identity "$SIGN_ID"
-          [ -f "$SIGNED" ] || { echo "::error::day sign apply wrote no $SIGNED"; exit 1; }
-          rm -f "$IPA"
-          for side in "$IPA".*; do
-            [ -e "$side" ] || continue
-            mv "$side" "$SIGNED${side#"$IPA"}"
-          done
-          ls -1 "$RUNNER_TEMP/dist"
+        uses: daybrite/actions/.github/actions/sign-package@main
+        with:
+          target: ios-uikit
+          package: ${{ env.IPA }}
+          apple-cert-p12: ${{ secrets.DAY_APPLE_CERT_P12 }}
+          apple-cert-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
+          apple-profile-b64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
       - name: Upload the signed package
         if: steps.material.outputs.present == 'true'
         uses: actions/upload-artifact@v7
@@ -2437,11 +2418,6 @@ jobs:
           name: ${{ inputs.artifact-prefix }}dist-ios-uikit
           path: ${{ runner.temp }}/dist/
           if-no-files-found: error
-      - name: Destroy the signing keychain
-        if: always()
-        run: |
-          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/appstore.mobileprovision" "$RUNNER_TEMP/cert.p12"
 
   release:
     name: release assets
@@ -2842,7 +2818,8 @@ jobs:
         with:
           name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-ios-uikit', inputs.store-flavor) || 'dist-ios-uikit' }}
           path: dist
-      - name: Point DAY_IPA at the .ipa
+      - name: Find the .ipa
+        id: package
         run: |
           set -euo pipefail
           IPA="$(find dist -type f -name '*.ipa' | head -1)"
@@ -2850,22 +2827,21 @@ jobs:
           case "$IPA" in
             *-unsigned.ipa) echo "::error::the packed .ipa is unsigned — the store refuses it. Set DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 so the sign-ios job signs it (and DAY_APPLE_TEAM, DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64 for the upload)"; exit 1 ;;
           esac
-          echo "DAY_IPA=$PWD/$IPA" | tee -a "$GITHUB_ENV"
-      # An app with no fastlane directory of its own gets the lanes `day store stage` writes
-      # from its store/ listing (docs/store.md), so the day CLI is needed here too.
+          echo "path=$PWD/$IPA" | tee -a "$GITHUB_OUTPUT"
+      # The CLI indexes this run's screenshots and, for an app with no fastlane directory of
+      # its own, writes the lanes from its store/ listing (docs/store.md).
       - name: Set up the day CLI
-        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/ios/fastlane/Fastfile', inputs.project-path)) == ''
         uses: daybrite/actions/.github/actions/setup-day-cli@main
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
       # With inputs.store-screenshots, the listing's screenshots are the captures this run's
-      # listing declares (store/storefront.toml [storefront]), from the screenshots-ios-uikit artifacts the build legs
-      # uploaded (`<target>/<device>/<variant>/<shot>.png` plus the target's own gallery.json).
-      # `day screenshot index` merges that into the index `day store stage --screenshots` reads,
-      # and `day store screenshots` holds the set to the store's rules before anything is staged
-      # or signed. No site is involved: the artifact is the tagged version's own captures.
+      # listing declares (store/storefront.toml [storefront]), from the screenshots-ios-uikit
+      # artifacts the build legs uploaded (`<target>/<device>/<variant>/<shot>.png` plus the
+      # target's own gallery.json). `day screenshot index` merges them into the index the
+      # store-upload action holds to the store's rules and stages the listing with. No site is
+      # involved: the artifact is the tagged version's own captures.
       # One artifact per device profile: the first profile's is `screenshots-ios-uikit`, the
       # others' `screenshots-ios-uikit-<slug>`, each holding `ios-uikit/<slug>/<variant>/…` and
       # its own index. They are NOT merged by the download: `merge-multiple` extracts artifacts
@@ -2880,26 +2856,14 @@ jobs:
         with:
           pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-ios-uikit*', inputs.store-flavor) || 'screenshots-ios-uikit*' }}
           path: shots-in
-      # The limits each store enforces, as data in this repository (the CLI carries the same
-      # file as its default); the check and the staging below read them through the variable.
-      - name: Take the stores' screenshot rules
-        id: rules
-        if: ${{ inputs.store-screenshots }}
-        uses: daybrite/actions/.github/actions/store-rules@main
-      - name: Check the listing's screenshots
+      - name: Index this run's screenshots
         id: shots
         if: ${{ inputs.store-screenshots }}
         env:
-          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
           TARGET: ios-uikit
           PROJECT_PATH: ${{ inputs.project-path }}
-          OWN_FASTFILE: ${{ hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) != '' || hashFiles(format('{0}/platform/ios/fastlane/Fastfile', inputs.project-path)) != '' }}
         run: |
           set -euo pipefail
-          if [ "$OWN_FASTFILE" = true ]; then
-            echo "::error::store-screenshots places screenshots in the lanes 'day store stage' writes, and this app has its own Fastfile, which the workflow does not edit. Have that Fastfile upload the screenshots, or drop it and let the store/ listing generate the lanes"
-            exit 1
-          fi
           if [ -z "$(find shots-in -name '*.png' -print -quit 2>/dev/null)" ]; then
             echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript with 'screenshot:' steps run on $TARGET, and does store/storefront.toml [storefront] name them?"
             exit 1
@@ -2918,54 +2882,27 @@ jobs:
             cp -R "$d." shots/
           done
           "$DAY_BIN" --project "${PROJECT_PATH:-.}" screenshot index --screenshot-paths "${roots[@]}" --out shots/gallery.json
-          "$DAY_BIN" --project "${PROJECT_PATH:-.}" store screenshots "$PWD/shots/gallery.json" -p "$TARGET"
           echo "index=$PWD/shots/gallery.json" | tee -a "$GITHUB_OUTPUT"
-      - name: Stage the store listing
-        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/ios/fastlane/Fastfile', inputs.project-path)) == ''
-        working-directory: ${{ inputs.project-path }}
-        env:
-          SHOTS_INDEX: ${{ steps.shots.outputs.index }}
-          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
-        run: |
-          set -euo pipefail
-          if [ -n "${SHOTS_INDEX:-}" ]; then
-            "$DAY_BIN" store stage -p ios-uikit --screenshots "$SHOTS_INDEX"
-          else
-            "$DAY_BIN" store stage -p ios-uikit
-          fi
-      - name: Run the app's fastlane lane
-        working-directory: ${{ inputs.project-path }}
-        env:
-          LANE: ${{ inputs.ios-upload-lane }}
-          DAY_ASC_KEY_ID: ${{ secrets.DAY_ASC_KEY_ID }}
-          DAY_ASC_ISSUER: ${{ secrets.DAY_ASC_ISSUER }}
-          ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
-        run: |
-          set -euo pipefail
-          if [ -n "${ASC_KEY_B64:-}" ]; then
-            echo "$ASC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/asc.p8"
-            export DAY_ASC_KEY="$RUNNER_TEMP/asc.p8"
-          fi
-          # fastlane resolves its config upward from the working directory, so run from the one
-          # that holds fastlane/ — the project root, the platform/ios convention directory, or
-          # the tree `day store stage` just wrote.
-          if [ ! -f fastlane/Fastfile ] && [ -f platform/ios/fastlane/Fastfile ]; then
-            cd platform/ios
-          elif [ ! -f fastlane/Fastfile ] && [ -f build/day/store/ios-uikit/fastlane/Fastfile ]; then
-            cd build/day/store/ios-uikit
-          fi
-          read -ra lane <<< "$LANE" # "ios upload" is two fastlane arguments
-          if [ -f Gemfile ]; then
-            # Vendor the gems into RUNNER_TEMP: the runner's system gem dir is root-owned, and
-            # this tree is never packed, so a .bundle/config in it costs nothing.
-            bundle config set --local path "$RUNNER_TEMP/bundle"
-            bundle install
-            bundle exec fastlane "${lane[@]}"
-          else
-            # macOS runners ship fastlane; ubuntu does not.
-            command -v fastlane >/dev/null || sudo gem install fastlane --no-document
-            fastlane "${lane[@]}"
-          fi
+      # The limits each store enforces, as data in this repository (the CLI carries the same
+      # file as its default); the check and the staging read them through the action's input.
+      - name: Take the stores' rules
+        id: rules
+        uses: daybrite/actions/.github/actions/store-rules@main
+      # Stage the listing (or take the app's own Fastfile) and run the lane. The App Fair's
+      # queue uploads with the same action.
+      - name: Upload to the App Store
+        uses: daybrite/actions/.github/actions/store-upload@main
+        with:
+          target: ios-uikit
+          package: ${{ steps.package.outputs.path }}
+          lane: ${{ inputs.ios-upload-lane }}
+          project-path: ${{ inputs.project-path }}
+          flavor: ${{ inputs.store-flavor }}
+          screenshots: ${{ steps.shots.outputs.index }}
+          rules: ${{ steps.rules.outputs.path }}
+          asc-key-id: ${{ secrets.DAY_ASC_KEY_ID }}
+          asc-issuer: ${{ secrets.DAY_ASC_ISSUER }}
+          asc-key-b64: ${{ secrets.DAY_ASC_KEY_B64 }}
 
   # sign-macos re-uploads its notarized output under the same dist-macos-appkit name, so having
   # it in `needs` means this job downloads the signed .dmg when signing is configured and the
@@ -2988,7 +2925,8 @@ jobs:
       # A Mac App Store submission needs a .pkg signed with the MAS installer identity. Producing
       # or re-signing that .pkg is the lane's job, not this workflow's: DAY_PKG_OR_APP points at
       # whatever the build shipped — a .pkg if pack made one, else the .app or .dmg.
-      - name: Point DAY_PKG_OR_APP at the build product
+      - name: Find the build product
+        id: package
         run: |
           set -euo pipefail
           FOUND=""
@@ -2997,22 +2935,26 @@ jobs:
             [ -n "$FOUND" ] && break
           done
           [ -n "$FOUND" ] || { echo "::error::no .pkg/.app/.dmg in the downloaded dist artifact — is macos-appkit in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
-          echo "DAY_PKG_OR_APP=$PWD/$FOUND" | tee -a "$GITHUB_ENV"
-      - name: Run the app's fastlane lane
-        working-directory: ${{ inputs.project-path }}
-        env:
-          LANE: ${{ inputs.macos-upload-lane }}
-        run: |
-          set -euo pipefail
-          read -ra lane <<< "$LANE"
-          if [ -f Gemfile ]; then
-            bundle config set --local path "$RUNNER_TEMP/bundle"
-            bundle install
-            bundle exec fastlane "${lane[@]}"
-          else
-            command -v fastlane >/dev/null || sudo gem install fastlane --no-document
-            fastlane "${lane[@]}"
-          fi
+          echo "path=$PWD/$FOUND" | tee -a "$GITHUB_OUTPUT"
+      - name: Set up the day CLI
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      # The Mac App Store takes a .pkg signed with the MAS installer identity, and producing or
+      # re-signing it is the app's own lane's job: the CLI stages no macOS listing, so the app
+      # has to carry the Fastfile, and the action runs the lane there with DAY_PKG_OR_APP set.
+      # No store credentials are set here: forward yours with `secrets: inherit` and have the
+      # Fastfile read them.
+      - name: Upload to the Mac App Store
+        uses: daybrite/actions/.github/actions/store-upload@main
+        with:
+          target: macos-appkit
+          package: ${{ steps.package.outputs.path }}
+          lane: ${{ inputs.macos-upload-lane }}
+          project-path: ${{ inputs.project-path }}
+          flavor: ${{ inputs.store-flavor }}
 
   playstore-android:
     name: upload (google play)
@@ -3029,7 +2971,8 @@ jobs:
         with:
           name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-android-mdc', inputs.store-flavor) || 'dist-android-mdc' }}
           path: dist
-      - name: Point DAY_AAB at the .aab
+      - name: Find the .aab
+        id: package
         run: |
           set -euo pipefail
           AAB="$(find dist -type f -name '*.aab' | head -1)"
@@ -3040,22 +2983,21 @@ jobs:
             echo "::error::the packed .aab is signed with the debug keystore — Play refuses it. Set DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS so pack signs with the upload key"
             exit 1
           fi
-          echo "DAY_AAB=$PWD/$AAB" | tee -a "$GITHUB_ENV"
-      # An app with no fastlane directory of its own gets the lanes `day store stage` writes
-      # from its store/ listing (docs/store.md), so the day CLI is needed here too.
+          echo "path=$PWD/$AAB" | tee -a "$GITHUB_OUTPUT"
+      # The CLI indexes this run's screenshots and, for an app with no fastlane directory of
+      # its own, writes the lanes from its store/ listing (docs/store.md).
       - name: Set up the day CLI
-        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/android/fastlane/Fastfile', inputs.project-path)) == ''
         uses: daybrite/actions/.github/actions/setup-day-cli@main
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
       # With inputs.store-screenshots, the listing's screenshots are the captures this run's
-      # listing declares (store/storefront.toml [storefront]), from the screenshots-android-mdc artifacts the build legs
-      # uploaded (`<target>/<device>/<variant>/<shot>.png` plus the target's own gallery.json).
-      # `day screenshot index` merges that into the index `day store stage --screenshots` reads,
-      # and `day store screenshots` holds the set to the store's rules before anything is staged
-      # or signed. No site is involved: the artifact is the tagged version's own captures.
+      # listing declares (store/storefront.toml [storefront]), from the screenshots-android-mdc
+      # artifacts the build legs uploaded (`<target>/<device>/<variant>/<shot>.png` plus the
+      # target's own gallery.json). `day screenshot index` merges them into the index the
+      # store-upload action holds to the store's rules and stages the listing with. No site is
+      # involved: the artifact is the tagged version's own captures.
       # One artifact per device profile: the first profile's is `screenshots-android-mdc`, the
       # others' `screenshots-android-mdc-<slug>`, each holding `android-mdc/<slug>/<variant>/…` and
       # its own index. They are NOT merged by the download: `merge-multiple` extracts artifacts
@@ -3070,26 +3012,14 @@ jobs:
         with:
           pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-android-mdc*', inputs.store-flavor) || 'screenshots-android-mdc*' }}
           path: shots-in
-      # The limits each store enforces, as data in this repository (the CLI carries the same
-      # file as its default); the check and the staging below read them through the variable.
-      - name: Take the stores' screenshot rules
-        id: rules
-        if: ${{ inputs.store-screenshots }}
-        uses: daybrite/actions/.github/actions/store-rules@main
-      - name: Check the listing's screenshots
+      - name: Index this run's screenshots
         id: shots
         if: ${{ inputs.store-screenshots }}
         env:
-          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
           TARGET: android-mdc
           PROJECT_PATH: ${{ inputs.project-path }}
-          OWN_FASTFILE: ${{ hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) != '' || hashFiles(format('{0}/platform/android/fastlane/Fastfile', inputs.project-path)) != '' }}
         run: |
           set -euo pipefail
-          if [ "$OWN_FASTFILE" = true ]; then
-            echo "::error::store-screenshots places screenshots in the lanes 'day store stage' writes, and this app has its own Fastfile, which the workflow does not edit. Have that Fastfile upload the screenshots, or drop it and let the store/ listing generate the lanes"
-            exit 1
-          fi
           if [ -z "$(find shots-in -name '*.png' -print -quit 2>/dev/null)" ]; then
             echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript with 'screenshot:' steps run on $TARGET, and does store/storefront.toml [storefront] name them?"
             exit 1
@@ -3108,48 +3038,25 @@ jobs:
             cp -R "$d." shots/
           done
           "$DAY_BIN" --project "${PROJECT_PATH:-.}" screenshot index --screenshot-paths "${roots[@]}" --out shots/gallery.json
-          "$DAY_BIN" --project "${PROJECT_PATH:-.}" store screenshots "$PWD/shots/gallery.json" -p "$TARGET"
           echo "index=$PWD/shots/gallery.json" | tee -a "$GITHUB_OUTPUT"
-      - name: Stage the store listing
-        if: hashFiles(format('{0}/fastlane/Fastfile', inputs.project-path)) == '' && hashFiles(format('{0}/platform/android/fastlane/Fastfile', inputs.project-path)) == ''
-        working-directory: ${{ inputs.project-path }}
-        env:
-          SHOTS_INDEX: ${{ steps.shots.outputs.index }}
-          DAY_STORE_RULES: ${{ steps.rules.outputs.path }}
-        run: |
-          set -euo pipefail
-          if [ -n "${SHOTS_INDEX:-}" ]; then
-            "$DAY_BIN" store stage -p android-mdc --screenshots "$SHOTS_INDEX"
-          else
-            "$DAY_BIN" store stage -p android-mdc
-          fi
-      - name: Run the app's fastlane lane
-        working-directory: ${{ inputs.project-path }}
-        env:
-          LANE: ${{ inputs.play-upload-lane }}
-          PLAY_JSON_KEY: ${{ secrets.DAY_PLAY_JSON_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -n "${PLAY_JSON_KEY:-}" ]; then
-            printf '%s' "$PLAY_JSON_KEY" > "$RUNNER_TEMP/play-key.json"
-            export SUPPLY_JSON_KEY="$RUNNER_TEMP/play-key.json"
-          fi
-          # fastlane resolves its config upward from the working directory: the project root,
-          # the platform/android convention directory, or the tree `day store stage` wrote.
-          if [ ! -f fastlane/Fastfile ] && [ -f platform/android/fastlane/Fastfile ]; then
-            cd platform/android
-          elif [ ! -f fastlane/Fastfile ] && [ -f build/day/store/android-mdc/fastlane/Fastfile ]; then
-            cd build/day/store/android-mdc
-          fi
-          read -ra lane <<< "$LANE"
-          if [ -f Gemfile ]; then
-            bundle config set --local path "$RUNNER_TEMP/bundle"
-            bundle install
-            bundle exec fastlane "${lane[@]}"
-          else
-            command -v fastlane >/dev/null || sudo gem install fastlane --no-document
-            fastlane "${lane[@]}"
-          fi
+      # The limits each store enforces, as data in this repository (the CLI carries the same
+      # file as its default); the check and the staging read them through the action's input.
+      - name: Take the stores' rules
+        id: rules
+        uses: daybrite/actions/.github/actions/store-rules@main
+      # Stage the listing (or take the app's own Fastfile) and run the lane. The App Fair's
+      # queue uploads with the same action.
+      - name: Upload to Google Play
+        uses: daybrite/actions/.github/actions/store-upload@main
+        with:
+          target: android-mdc
+          package: ${{ steps.package.outputs.path }}
+          lane: ${{ inputs.play-upload-lane }}
+          project-path: ${{ inputs.project-path }}
+          flavor: ${{ inputs.store-flavor }}
+          screenshots: ${{ steps.shots.outputs.index }}
+          rules: ${{ steps.rules.outputs.path }}
+          play-json-key: ${{ secrets.DAY_PLAY_JSON_KEY }}
 
   # --- web-dom → GitHub Pages (opt-in: inputs.deploy-web) -----------------------------------
   # Publishes the web-dom build — already built in release profile and uploaded by the build job

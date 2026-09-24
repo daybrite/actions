@@ -1,0 +1,233 @@
+name: Upload to a store
+description: >-
+  Stage an app's store listing and run a fastlane lane over a packed package: `day store stage`
+  writes the fastlane project from `store/storefront.toml` (with the listing's screenshots from a
+  gallery index, held to the stores' rules first), and the lane uploads, submits, or validates.
+  An app with a Fastfile of its own keeps it: the lane then runs there and nothing is staged. The
+  credentials are named on the command line and reach the lane as the variables the generated
+  lanes read (DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY; SUPPLY_JSON_KEY); the package as DAY_IPA,
+  DAY_AAB or DAY_PKG_OR_APP. Both the shared `dayapp.yml` workflow and the App Fair's queue upload
+  with this action; a caller sets up the day CLI first (`setup-day-cli`).
+
+inputs:
+  target:
+    description: The Day target the package was packed for (ios-uikit, android-mdc, macos-appkit).
+    required: true
+  package:
+    description: The signed package to upload, an absolute path.
+    required: true
+  lane:
+    description: The fastlane lane to run, such as "ios upload" or "android release".
+    required: true
+  project-path:
+    description: The app's checkout, holding Day.toml and store/ (or the app's own fastlane/).
+    required: false
+    default: "."
+  flavor:
+    description: >-
+      The build flavor whose listing is published, when the app carries `Day-<flavor>.toml`
+      (docs/flavors.md). Empty reads the manifest and store/ as they stand.
+    required: false
+    default: ""
+  screenshots:
+    description: >-
+      A gallery index (`gallery.json`, as `day screenshot index` writes it) whose `listings` name
+      the captures the store shows. The set is held to the stores' rules (`day store
+      screenshots`) and placed in the staged tree. Empty stages the listing without screenshots,
+      and the store keeps what it shows today. Refused for an app with its own Fastfile, which
+      this action does not edit.
+    required: false
+    default: ""
+  rules:
+    description: "The stores' rules file to hold the listing to (default: the CLI's own)."
+    required: false
+    default: ""
+  allow-placeholders:
+    description: Stage listing text that still says TODO instead of refusing it.
+    required: false
+    default: "false"
+  # --- credentials --------------------------------------------------------------------------
+  asc-key-id:
+    description: App Store Connect API key id.
+    required: false
+    default: ""
+  asc-issuer:
+    description: App Store Connect issuer id.
+    required: false
+    default: ""
+  asc-key-b64:
+    description: Base64 App Store Connect API key (.p8).
+    required: false
+    default: ""
+  asc-key-path:
+    description: "The App Store Connect API key as a file already on the runner; wins over asc-key-b64."
+    required: false
+    default: ""
+  play-json-key:
+    description: The Google Play service-account JSON, plain or base64.
+    required: false
+    default: ""
+  play-json-key-path:
+    description: "The Play service-account JSON as a file already on the runner; wins over play-json-key."
+    required: false
+    default: ""
+
+outputs:
+  fastlane-dir:
+    description: The directory the lane ran in (the app's own fastlane project, or the staged tree).
+    value: ${{ steps.where.outputs.dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the caller set up the day CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        [ -n "${DAY_BIN:-}" ] && [ -x "$DAY_BIN" ] || { echo "::error::store-upload needs DAY_BIN — run daybrite/actions/.github/actions/setup-day-cli first"; exit 1; }
+        [ -e "${{ inputs.package }}" ] || { echo "::error::no package at ${{ inputs.package }}"; exit 1; }
+        [ -f "${{ inputs.project-path }}/Day.toml" ] || { echo "::error::${{ inputs.project-path }} holds no Day.toml; project-path names the app's checkout"; exit 1; }
+
+    # Where the lane runs: the app's own fastlane project (the project root or the
+    # platform/<os> convention directory), or, without one, the tree `day store stage` writes.
+    # fastlane resolves its config upward from the working directory, so the directory is the
+    # choice.
+    - name: Find the fastlane project
+      id: where
+      shell: bash
+      env:
+        PP: ${{ inputs.project-path }}
+        TARGET: ${{ inputs.target }}
+        FLAVOR: ${{ inputs.flavor }}
+      run: |
+        set -euo pipefail
+        case "$TARGET" in
+          ios-uikit) os=ios ;;
+          android-mdc) os=android ;;
+          macos-appkit) os=macos ;;
+          *) os="${TARGET%%-*}" ;;
+        esac
+        if [ -f "$PP/fastlane/Fastfile" ]; then
+          dir="$PP"; own=true
+        elif [ -f "$PP/platform/$os/fastlane/Fastfile" ]; then
+          dir="$PP/platform/$os"; own=true
+        else
+          dir="$PP/build/day/store/$TARGET"; own=false
+        fi
+        # Without `Day-<flavor>.toml` the manifest is read as it stands.
+        args=""
+        if [ -n "$FLAVOR" ] && [ -f "$PP/Day-$FLAVOR.toml" ]; then
+          args="--flavor $FLAVOR"
+        elif [ -n "$FLAVOR" ]; then
+          echo "reading the manifest as it stands (no Day-$FLAVOR.toml)"
+        fi
+        {
+          echo "dir=$dir"
+          echo "own=$own"
+          echo "flavor_args=$args"
+        } >> "$GITHUB_OUTPUT"
+        echo "fastlane project: $dir ($([ "$own" = true ] && echo "the app's own" || echo "staged by day store stage"))"
+
+    - name: Check the listing's screenshots
+      if: inputs.screenshots != ''
+      shell: bash
+      working-directory: ${{ inputs.project-path }}
+      env:
+        INDEX: ${{ inputs.screenshots }}
+        TARGET: ${{ inputs.target }}
+        OWN: ${{ steps.where.outputs.own }}
+        FLAVOR_ARGS: ${{ steps.where.outputs.flavor_args }}
+        DAY_STORE_RULES: ${{ inputs.rules }}
+      run: |
+        set -euo pipefail
+        if [ "$OWN" = true ]; then
+          echo "::error::screenshots are placed in the lanes 'day store stage' writes, and this app has its own Fastfile, which this action does not edit. Have that Fastfile upload the screenshots, or drop it and let the store/ listing generate the lanes"
+          exit 1
+        fi
+        [ -f "$INDEX" ] || { echo "::error::$INDEX is not a gallery index (day screenshot index writes one)"; exit 1; }
+        # The set the store would refuse is refused here, before anything is staged or sent.
+        "$DAY_BIN" $FLAVOR_ARGS store screenshots "$INDEX" -p "$TARGET"
+
+    - name: Stage the listing
+      if: steps.where.outputs.own != 'true'
+      shell: bash
+      working-directory: ${{ inputs.project-path }}
+      env:
+        INDEX: ${{ inputs.screenshots }}
+        TARGET: ${{ inputs.target }}
+        FLAVOR_ARGS: ${{ steps.where.outputs.flavor_args }}
+        ALLOW: ${{ inputs.allow-placeholders }}
+        DAY_STORE_RULES: ${{ inputs.rules }}
+      run: |
+        set -euo pipefail
+        case "$TARGET" in
+          ios-uikit|android-mdc) ;;
+          *) echo "::error::day store stage writes no lanes for $TARGET; give the app a fastlane/Fastfile with the lane"; exit 1 ;;
+        esac
+        # `day store stage` holds the listing to the store rules (lint's errors, and placeholder
+        # text unless allowed), writes the fastlane tree from store/storefront.toml, and places
+        # the listing's screenshots from the index.
+        args=(store stage -p "$TARGET")
+        [ -n "$INDEX" ] && args+=(--screenshots "$INDEX")
+        [ "$ALLOW" = true ] && args+=(--allow-placeholders)
+        "$DAY_BIN" $FLAVOR_ARGS "${args[@]}"
+        if [ -n "$INDEX" ]; then
+          echo "screenshots placed:"
+          find "build/day/store/$TARGET" -type f -name '*.png' | sed "s|build/day/store/$TARGET/||" | sort | head -40
+        fi
+
+    - name: Run the lane (${{ inputs.lane }})
+      shell: bash
+      working-directory: ${{ steps.where.outputs.dir }}
+      env:
+        # fastlane reports usage to its own servers unless told not to; the staged trees carry
+        # the same opt-out in their .env.default, and an app's own Fastfile is covered here.
+        FASTLANE_OPT_OUT_USAGE: "1"
+        LANE: ${{ inputs.lane }}
+        TARGET: ${{ inputs.target }}
+        PACKAGE: ${{ inputs.package }}
+        DAY_ASC_KEY_ID: ${{ inputs.asc-key-id }}
+        DAY_ASC_ISSUER: ${{ inputs.asc-issuer }}
+        ASC_KEY_B64: ${{ inputs.asc-key-b64 }}
+        ASC_KEY_PATH: ${{ inputs.asc-key-path }}
+        PLAY_JSON_KEY: ${{ inputs.play-json-key }}
+        PLAY_JSON_KEY_PATH: ${{ inputs.play-json-key-path }}
+      run: |
+        set -euo pipefail
+        umask 077
+        # The package, under the name the generated lanes (and a Fastfile written to their
+        # convention) read.
+        case "$TARGET" in
+          ios-uikit) export DAY_IPA="$PACKAGE" ;;
+          android-mdc) export DAY_AAB="$PACKAGE" ;;
+          macos-appkit) export DAY_PKG_OR_APP="$PACKAGE" ;;
+        esac
+        # The credentials, decoded where only this job can read them.
+        if [ -n "${ASC_KEY_PATH:-}" ]; then
+          export DAY_ASC_KEY="$ASC_KEY_PATH"
+        elif [ -n "${ASC_KEY_B64:-}" ]; then
+          printf '%s' "$ASC_KEY_B64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/asc.p8"
+          export DAY_ASC_KEY="$RUNNER_TEMP/asc.p8"
+        fi
+        if [ -n "${PLAY_JSON_KEY_PATH:-}" ]; then
+          export SUPPLY_JSON_KEY="$PLAY_JSON_KEY_PATH"
+        elif [ -n "${PLAY_JSON_KEY:-}" ]; then
+          case "$PLAY_JSON_KEY" in
+            \{*) printf '%s' "$PLAY_JSON_KEY" > "$RUNNER_TEMP/play-key.json" ;;
+            *) printf '%s' "$PLAY_JSON_KEY" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/play-key.json" ;;
+          esac
+          export SUPPLY_JSON_KEY="$RUNNER_TEMP/play-key.json"
+        fi
+        read -ra lane <<< "$LANE"   # "ios upload" is two fastlane arguments
+        if [ -f Gemfile ]; then
+          # Vendor the gems into RUNNER_TEMP: the runner's system gem dir is root-owned, and a
+          # .bundle/config in the app's tree is never packed.
+          bundle config set --local path "$RUNNER_TEMP/bundle"
+          bundle install
+          bundle exec fastlane "${lane[@]}"
+        else
+          # macOS runners ship fastlane; ubuntu does not.
+          command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+          fastlane "${lane[@]}"
+        fi
+        rm -f "$RUNNER_TEMP/asc.p8" "$RUNNER_TEMP/play-key.json"

@@ -1,8 +1,6 @@
-"""The store-upload jobs' screenshot steps, run against a stub day CLI: nothing is fetched.
-
-`store-screenshots` takes the listing's screenshots from this run's own screenshot artifact, so
-the step indexes the download, checks the set with the day CLI, and hands the staging step the
-index's path.
+"""The store-upload jobs: this run's screenshots are indexed in the job and the listing is
+checked, staged and uploaded by the `store-upload` action. Both run against a stub day CLI:
+nothing is fetched.
 """
 
 import os
@@ -14,18 +12,24 @@ import unittest
 import yaml
 
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/dayapp.yml"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github/workflows/dayapp.yml"
 DOC = yaml.safe_load(WORKFLOW.read_text())
 JOBS = DOC["jobs"]
 INPUTS = DOC.get("on", DOC.get(True))["workflow_call"]["inputs"]
+ACTION = yaml.safe_load((ROOT / ".github/actions/store-upload/action.yml").read_text())
+STORE_UPLOAD = "daybrite/actions/.github/actions/store-upload@main"
 DOWNLOAD = "Download this run's screenshots"
-CHECK = "Check the listing's screenshots"
-STAGE = "Stage the store listing"
-TARGETS = (("appstore-ios", "ios-uikit"), ("playstore-android", "android-mdc"))
+INDEX = "Index this run's screenshots"
+TARGETS = (("appstore-ios", "ios-uikit", "Upload to the App Store"), ("playstore-android", "android-mdc", "Upload to Google Play"))
 
 
 def steps(job):
     return {step.get("name"): step for step in JOBS[job]["steps"]}
+
+
+def action_step(name):
+    return next(s for s in ACTION["runs"]["steps"] if s.get("name") == name)
 
 
 class ShapeTests(unittest.TestCase):
@@ -36,7 +40,7 @@ class ShapeTests(unittest.TestCase):
     def test_the_set_is_this_run_s_own_artifact(self):
         """The walkthrough ran in this workflow, so its captures are the tagged version's; no
         site, no release and no other run is consulted."""
-        for job, target in TARGETS:
+        for job, target, upload in TARGETS:
             self.assertNotIn("website", JOBS[job]["needs"], job)
             download = steps(job)[DOWNLOAD]
             self.assertEqual(" ".join(str(download["if"]).split()), "${{ inputs.store-screenshots }}")
@@ -47,17 +51,41 @@ class ShapeTests(unittest.TestCase):
             self.assertIn("store-flavor", download["with"]["pattern"], "a flavor submission takes the flavor's captures")
             self.assertEqual(download["with"]["path"], "shots-in")
             self.assertNotIn("merge-multiple", download["with"])
-            check = steps(job)[CHECK]
-            self.assertEqual(" ".join(str(check["if"]).split()), "${{ inputs.store-screenshots }}")
-            self.assertEqual(check["env"]["TARGET"], target)
+            index = steps(job)[INDEX]
+            self.assertEqual(" ".join(str(index["if"]).split()), "${{ inputs.store-screenshots }}")
+            self.assertEqual(index["env"]["TARGET"], target)
             names = [s.get("name") for s in JOBS[job]["steps"]]
-            self.assertLess(names.index("Set up the day CLI"), names.index(CHECK))
-            self.assertLess(names.index(CHECK), names.index(STAGE))
-            self.assertIn("steps.shots.outputs.index", steps(job)[STAGE]["env"]["SHOTS_INDEX"])
+            self.assertLess(names.index("Set up the day CLI"), names.index(INDEX))
+            self.assertLess(names.index(INDEX), names.index(upload))
+
+    def test_every_upload_goes_through_the_shared_action(self):
+        """The App Fair's queue uploads with the same action, so the two pipelines stage,
+        check and run the lane the same way."""
+        for job, target, upload in TARGETS:
+            step = steps(job)[upload]
+            self.assertEqual(step["uses"], STORE_UPLOAD)
+            self.assertEqual(step["with"]["target"], target)
+            self.assertEqual(step["with"]["package"], "${{ steps.package.outputs.path }}")
+            self.assertIn("upload-lane", step["with"]["lane"])
+            self.assertEqual(step["with"]["screenshots"], "${{ steps.shots.outputs.index }}")
+            self.assertEqual(step["with"]["rules"], "${{ steps.rules.outputs.path }}")
+            self.assertEqual(step["with"]["flavor"], "${{ inputs.store-flavor }}")
+            # No `day store stage` or fastlane call of the job's own.
+            for s in JOBS[job]["steps"]:
+                self.assertNotIn("store stage", str(s.get("run", "")))
+                self.assertNotIn("fastlane", str(s.get("run", "")))
+        ios = steps("appstore-ios")["Upload to the App Store"]["with"]
+        self.assertIn("secrets.DAY_ASC_KEY_B64", ios["asc-key-b64"])
+        play = steps("playstore-android")["Upload to Google Play"]["with"]
+        self.assertIn("secrets.DAY_PLAY_JSON_KEY", play["play-json-key"])
+        mac = steps("appstore-macos")["Upload to the Mac App Store"]
+        self.assertEqual(mac["uses"], STORE_UPLOAD)
+        self.assertEqual(mac["with"]["target"], "macos-appkit")
+        self.assertNotIn("screenshots", mac["with"], "the CLI stages no macOS listing")
 
 
-class CheckStepTests(unittest.TestCase):
-    """The step's shell, with the day CLI a recorder over a downloaded capture tree."""
+class IndexStepTests(unittest.TestCase):
+    """The job's index step, with the day CLI a recorder over a downloaded capture tree."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -75,7 +103,6 @@ class CheckStepTests(unittest.TestCase):
             "DAY_BIN": str(day),
             "TARGET": "ios-uikit",
             "PROJECT_PATH": "",
-            "OWN_FASTFILE": "false",
         }
 
     def captures(self, *artifacts):
@@ -89,14 +116,11 @@ class CheckStepTests(unittest.TestCase):
             shot.write_bytes(b"png")
             (base / "ios-uikit/gallery.json").write_text("{}")
 
-    def run_step(self, name=CHECK, job="appstore-ios", **env):
+    def run_step(self, job="appstore-ios", **env):
         (self.root / "outputs").write_text("")
         result = subprocess.run(
-            ["bash", "-c", steps(job)[name]["run"]],
-            cwd=self.root,
-            env={**self.env, **env},
-            text=True,
-            capture_output=True,
+            ["bash", "-c", steps(job)[INDEX]["run"]],
+            cwd=self.root, env={**self.env, **env}, text=True, capture_output=True,
         )
         calls = self.root / "day-calls"
         return result, (calls.read_text().splitlines() if calls.exists() else [])
@@ -111,11 +135,10 @@ class CheckStepTests(unittest.TestCase):
         result, calls = self.run_step()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         index = f"{self.root}/shots/gallery.json"
-        self.assertEqual(len(calls), 2, calls)
+        self.assertEqual(len(calls), 1, calls)
         roots = calls[0].split("--screenshot-paths ")[1].split(" --out ")[0].split()
         self.assertEqual(sorted(roots), ["shots-in/screenshots-ios-uikit", "shots-in/screenshots-ios-uikit-ipad"])
         self.assertTrue(calls[0].startswith("--project . screenshot index ") and calls[0].endswith(" --out shots/gallery.json"), calls[0])
-        self.assertEqual(calls[1], f"--project . store screenshots {index} -p ios-uikit")
         self.assertEqual(self.outputs()["index"], index)
         self.assertTrue((self.root / "shots/ios-uikit/iphone/light/home.png").is_file())
         self.assertTrue((self.root / "shots/ios-uikit/ipad/light/home.png").is_file())
@@ -139,27 +162,88 @@ class CheckStepTests(unittest.TestCase):
         self.assertIn("holds no captures", result.stdout)
         self.assertEqual(calls, [])
 
-    def test_an_app_with_its_own_fastfile_is_refused(self):
-        self.captures()
-        result, calls = self.run_step(OWN_FASTFILE="true")
+
+class UploadActionTests(unittest.TestCase):
+    """The action's steps, with the day CLI a recorder and a project directory to read."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / "bin").mkdir()
+        day = self.root / "bin/day"
+        day.write_text('#!/bin/sh\necho "$@" >> "$RUNNER_TEMP/day-calls"\nexit "${DAY_EXIT:-0}"\n')
+        day.chmod(0o755)
+        self.project = self.root / "app"
+        self.project.mkdir()
+        (self.project / "Day.toml").write_text("[app]\nid = \"x\"\n")
+        (self.root / "index.json").write_text("{}")
+        self.env = {
+            **os.environ,
+            "RUNNER_TEMP": str(self.root),
+            "GITHUB_OUTPUT": str(self.root / "outputs"),
+            "DAY_BIN": str(day),
+            "PP": str(self.project),
+            "TARGET": "ios-uikit",
+            "FLAVOR": "",
+        }
+
+    def run_step(self, name, cwd=None, **env):
+        (self.root / "outputs").write_text("")
+        (self.root / "day-calls").unlink(missing_ok=True)
+        result = subprocess.run(
+            ["bash", "-c", action_step(name)["run"]],
+            cwd=cwd or self.root, env={**self.env, **env}, text=True, capture_output=True,
+        )
+        calls = self.root / "day-calls"
+        return result, (calls.read_text().splitlines() if calls.exists() else [])
+
+    def outputs(self):
+        return dict(line.split("=", 1) for line in (self.root / "outputs").read_text().splitlines() if "=" in line)
+
+    def test_the_lane_runs_in_the_app_s_own_fastlane_project_else_the_staged_tree(self):
+        result, _ = self.run_step("Find the fastlane project")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.outputs()["dir"], f"{self.project}/build/day/store/ios-uikit")
+        self.assertEqual(self.outputs()["own"], "false")
+        (self.project / "platform/ios/fastlane").mkdir(parents=True)
+        (self.project / "platform/ios/fastlane/Fastfile").write_text("")
+        self.run_step("Find the fastlane project")
+        self.assertEqual(self.outputs()["dir"], f"{self.project}/platform/ios")
+        self.assertEqual(self.outputs()["own"], "true")
+        (self.project / "fastlane").mkdir()
+        (self.project / "fastlane/Fastfile").write_text("")
+        self.run_step("Find the fastlane project")
+        self.assertEqual(self.outputs()["dir"], str(self.project))
+
+    def test_a_flavor_is_passed_only_when_the_app_carries_it(self):
+        self.run_step("Find the fastlane project", FLAVOR="appfair")
+        self.assertEqual(self.outputs()["flavor_args"], "")
+        (self.project / "Day-appfair.toml").write_text("")
+        self.run_step("Find the fastlane project", FLAVOR="appfair")
+        self.assertEqual(self.outputs()["flavor_args"], "--flavor appfair")
+
+    def test_the_screenshots_are_checked_and_refused_for_an_app_with_its_own_fastfile(self):
+        result, calls = self.run_step("Check the listing's screenshots", cwd=self.project, INDEX=str(self.root / "index.json"), OWN="false", FLAVOR_ARGS="--flavor appfair")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calls, [f"--flavor appfair store screenshots {self.root}/index.json -p ios-uikit"])
+        result, calls = self.run_step("Check the listing's screenshots", cwd=self.project, INDEX=str(self.root / "index.json"), OWN="true", FLAVOR_ARGS="")
         self.assertEqual(result.returncode, 1)
         self.assertIn("its own Fastfile", result.stdout)
         self.assertEqual(calls, [])
+        result, _ = self.run_step("Check the listing's screenshots", cwd=self.project, INDEX=str(self.root / "index.json"), OWN="false", FLAVOR_ARGS="", DAY_EXIT="1")
+        self.assertEqual(result.returncode, 1, "a refused set fails the upload")
 
-    def test_a_refused_set_fails_the_upload(self):
-        self.captures()
-        result, _ = self.run_step(DAY_EXIT="1")
-        self.assertEqual(result.returncode, 1)
-        self.assertNotIn("index=", (self.root / "outputs").read_text())
-
-    def test_staging_takes_the_index_only_when_the_check_produced_one(self):
-        for job, target in TARGETS:
-            (self.root / "day-calls").unlink(missing_ok=True)
-            _, calls = self.run_step(STAGE, job=job, SHOTS_INDEX="/w/shots/gallery.json")
+    def test_staging_takes_the_index_and_the_placeholder_switch(self):
+        for target in ("ios-uikit", "android-mdc"):
+            _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET=target, INDEX="/w/shots/gallery.json", FLAVOR_ARGS="", ALLOW="false")
             self.assertEqual(calls, [f"store stage -p {target} --screenshots /w/shots/gallery.json"])
-            (self.root / "day-calls").unlink()
-            _, calls = self.run_step(STAGE, job=job, SHOTS_INDEX="")
-            self.assertEqual(calls, [f"store stage -p {target}"])
+            _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET=target, INDEX="", FLAVOR_ARGS="--flavor x", ALLOW="true")
+            self.assertEqual(calls, [f"--flavor x store stage -p {target} --allow-placeholders"])
+        result, calls = self.run_step("Stage the listing", cwd=self.project, TARGET="macos-appkit", INDEX="", FLAVOR_ARGS="", ALLOW="false")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no lanes for macos-appkit", result.stdout)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
