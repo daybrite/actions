@@ -409,18 +409,19 @@ on:
           keep the emulator answering, so it captures at 1280x800 — which is also 1280x800 in
           POINTS, the tablet layout Day-Showcase's walkthrough is written against.
 
-          These are NOT sized for a store listing. Google Play's ten-inch tablet slot wants at
-          least 1080 px on a screenshot's short side (measured against the publishing API, not
-          the help page), and the phone slot takes up to about 2.25:1 — so the halved tablet
-          capture is refused there. An app that publishes from CI captures should name a pair of
-          its own; `Nexus 7 2013` at `density=240` is the profile that clears the ten-inch slot,
-          capturing 1920x1200 while laying out as 1280x800 points.
+          Google Play's tablet slots want at least 1080 px on a screenshot's short side
+          (measured against the publishing API, not the help page), and the phone slot takes up
+          to about 2.25:1. The halved 1280x800 tablet capture is under that floor, so `day store
+          stage` scales it up by the smallest whole factor that clears it (x2, to 2560x1600, the
+          panel's own size) before placing it, as the store rules' `upscale = true` for Play's
+          tablet kinds allows; the phone capture is placed as it is. A scaled capture is softer
+          than a native one. `Nexus 7 2013` at `density=240` captures 1920x1200 whole, but its
+          2.3 million pixels behind a desktop-width layout wedged the headless emulator on
+          Day-Showcase's Web view page (2026-09-24), so the default pair is the one to keep.
 
           `density` re-reads a panel at a density of your choosing, which moves the size in
-          POINTS without touching the capture's pixels. It is what lets one profile serve a store
-          screenshot and a layout at once: every stock tablet that clears Play's 1080 does it at
-          320 dpi, and `Nexus 7 2013` at 320 lays out as 960x600 points — short enough that
-          Day-Showcase's Query page collapses its list and three walkthrough steps fail.
+          POINTS without touching the capture's pixels: a way to hand a walkthrough the layout it
+          was written against on a profile whose native density would not give it.
 
           `slug` and `optional` work as they do for `ios-devices`: the API level joins the default
           slug (`device=medium_phone, os=24` → `medium-phone-24`), and `optional=true` lets a row
@@ -636,11 +637,10 @@ on:
           sizes per device; Play's 1080-7680 px range with the long side at most 2.3× the short,
           as its API enforces; the ceiling per locale; a capture in every locale on every
           required device) and fails on any refusal before it signs anything. The default
-          `medium_tablet` captures 1280x800 and is refused, so this needs `android-devices`
-          naming a tablet that clears 1080 px (`Nexus 7 2013` at `density=240`); preflight
-          refuses the run otherwise. Needs the lanes `day store stage` writes; an app with its
-          own Fastfile places its own screenshots. Off by default, which leaves what each store
-          already shows.
+          `medium_tablet` captures 1280x800, under Play's 1080 px floor, and `day store stage`
+          scales that capture up x2 before placing it, as the store rules allow for Play's tablet
+          kinds. Needs the lanes `day store stage` writes; an app with its own Fastfile places
+          its own screenshots. Off by default, which leaves what each store already shows.
         type: boolean
         required: false
         default: false
@@ -905,16 +905,13 @@ jobs:
             echo "::error::set either android-profiles or android-devices, not both (android-devices supersedes it)"
             exit 1
           fi
-          # A store upload of this run's captures needs profiles the stores accept, and the
-          # default Android tablet is not one: `medium_tablet` is captured halved (1280x800),
-          # under Google Play's 1080 px floor. Stopping here spares a full build that would only
-          # be refused at the upload.
+          # A store upload of this run's captures takes the default Android pair: the halved
+          # `medium_tablet` capture (1280x800) is under Google Play's 1080 px floor, and `day
+          # store stage` scales it up to clear it, as the store rules allow for Play's tablet
+          # kinds. Said here so a run that turns the input on knows what it will send.
           if [ "${STORE_SCREENSHOTS_IN:-false}" = true ] && [ -z "$(echo "$ANDROID_D$ANDROID_P" | tr -d '[:space:]')" ] \
              && printf '%s' "${TARGETS_IN:-}" | tr ', ' '\n\n' | grep -qx android-mdc; then
-            echo "::error::store-screenshots is on and android-devices is not set: the default medium_tablet captures 1280x800, which Google Play refuses (it takes 1080 px on the short side at least). Name the profiles, for example: android-devices: |
-              device=medium_phone,  os=36, orientation=portrait,  slug=phone
-              device=Nexus 7 2013,  os=36, orientation=landscape, density=240, slug=tablet"
-            exit 1
+            echo "::notice::store-screenshots is on with the default Android profiles: the tablet capture (1280x800) is scaled up x2 for Google Play's tablet slots; name android-devices for a profile captured at a store size"
           fi
           # Per-target additions (inputs.target-packages / target-setup), one `<targets>: <value>`
           # entry per line. jq folds them into each row below; this only refuses a line it cannot

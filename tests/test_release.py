@@ -159,19 +159,20 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(values["promotion"], "true")
         self.assertIn("::warning::a release event arrived", result.stdout)
 
-    def test_store_screenshots_needs_named_android_profiles(self):
-        """The default tablet is captured halved and Google Play refuses it, so a run that would
-        upload this run's captures stops here instead of after a full build."""
+    def test_store_screenshots_takes_the_default_android_profiles(self):
+        """The default tablet is captured halved and `day store stage` scales it up for Google
+        Play, so a run that uploads this run's captures goes through with a notice saying so."""
         result, _ = self.plan(TARGETS_IN="ios-uikit, android-mdc", STORE_SCREENSHOTS_IN="true")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("store-screenshots is on and android-devices is not set", result.stdout)
-        self.assertIn("Nexus 7 2013", result.stdout)
-        # Named profiles, or no Android target, and it goes through.
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("::notice::store-screenshots is on with the default Android profiles", result.stdout)
+        self.assertIn("scaled up x2", result.stdout)
+        # Named profiles say nothing; no Android target says nothing.
         result, _ = self.plan(TARGETS_IN="ios-uikit, android-mdc", STORE_SCREENSHOTS_IN="true",
-                              ANDROID_DEVICES_IN="device=pixel, os=36, slug=phone\ndevice=Nexus 7 2013, os=36, density=240, slug=tablet")
+                              ANDROID_DEVICES_IN="device=pixel, os=36, slug=phone\ndevice=medium_tablet, os=36, slug=tablet")
         self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("::notice::store-screenshots", result.stdout)
         result, _ = self.plan(TARGETS_IN="ios-uikit", STORE_SCREENSHOTS_IN="true")
-        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("::notice::store-screenshots", result.stdout)
 
     def test_a_promotion_deploys_the_website_of_a_project_that_has_one(self):
         (self.root / "website").mkdir()

@@ -262,14 +262,14 @@ the workflow's emulator settings also apply when using an older pinned CLI.
 
 #### Store-sized Android profiles
 
-The defaults above are picked for durability in the runner catalog, not for a store listing, and
-the halved tablet capture is below what Google Play takes. An app publishing from its CI captures
-should name this pair instead, which goes in as captured:
+The defaults above are picked for durability in the runner catalog, and the halved tablet
+capture is below what Google Play takes; `day store stage` scales it up, so the default pair
+serves a store listing as it is:
 
 | profile | capture | points | Play |
 |---|---|---|---|
-| `medium_phone` | 1080x2400 portrait | 411x914 | phone slot |
-| `Nexus 7 2013`, `density=240` | 1920x1200 landscape | 1280x800 | both tablet slots |
+| `medium_phone` | 1080x2400 portrait | 411x914 | phone slot, as captured |
+| `medium_tablet` | 1280x800 landscape (halved) | 1280x800 | both tablet slots, scaled x2 to 2560x1600 at staging |
 
 Play's help page says a screenshot's long side may be at most twice its short side, which would
 rule out every phone made since about 2018. The publishing API is looser, and these are the
@@ -292,18 +292,21 @@ So a tall modern phone is fine: the cutoff sits between 2.24:1 and 2.32:1, and `
 2.22:1. The ten-inch tablet slot holds a floor of 1,080 px on the short side, while the
 seven-inch slot took 1280x800 and 800x1280 without complaint.
 
-`Nexus 7 2013` is the only tablet in the runner catalog that clears the ten-inch floor. That is
-because `day devices boot` halves a headless panel past three million pixels (both axes and the
-density, so the size in points holds) to keep the emulator answering, so `pixel_tablet` and
-`medium_tablet` at 2560x1600 come back at 1280x800, which the ten-inch slot refuses. At 2.30 Mpx
-`Nexus 7 2013` sits below that line and is captured whole.
+No tablet in the runner catalog clears that floor as captured: `day devices boot` halves a
+headless panel past three million pixels (both axes and the density, so the size in points
+holds) to keep the emulator answering, so `pixel_tablet` and `medium_tablet` at 2560x1600 come
+back at 1280x800. `Nexus 7 2013` (1920x1200, 2.3 Mpx) is captured whole, but at `density=240`,
+the 1280x800-point layout a tablet walkthrough is written against, its pixels behind a
+desktop-width web page wedged the headless emulator (Day-Showcase, 2026-09-24), the same freeze
+that made the halving necessary. So the tablet capture is scaled instead: the store rules mark
+Play's tablet kinds `upscale = true`, and `day store stage` scales a capture under the floor up
+by the smallest whole factor that clears it (x2, to 2560x1600, the panel's own size), bicubic,
+before placing it. A scaled capture is softer than a native one; the layout and the content are
+the device's own.
 
-That leaves one problem, which `density` solves. A tablet profile clearing Play's 1,080 does it at
-320 dpi, so `Nexus 7 2013` lays out as 960x600 points: short enough that Day-Showcase's Query page
-collapses its list, failing three walkthrough steps that pass on a taller screen.
-`density=240` reads the same 1920x1200 panel as a 1280x800-point tablet — the layout the CI tablet
-had before — while the capture stays 1920x1200. Pixels are what the emulator rasterizes, so this
-costs nothing at boot.
+`density` re-reads a panel at a density of your choosing, which moves the size in points and
+leaves the capture's pixels alone: a way to hand a walkthrough the layout it was written
+against on a profile whose native density would not give it.
 
 The emulator itself is stood up by the `day` CLI rather than a third-party action: `day devices
 setup` creates the AVD from the profile (installing the system image if the cache missed), and
@@ -577,19 +580,20 @@ What the check requires, and fails the upload on before anything is signed:
 
 Every locale the walkthrough captured needs a capture on each required device. The workflow's
 default `medium_tablet` is captured halved (1280×800, see [Device profiles](#device-profiles))
-and Play refuses it, so an app that uploads screenshots names its Android profiles, and
-preflight stops a run that has `store-screenshots` on without them:
+and Play refuses it as captured, so `day store stage` scales it up x2 before placing it (the
+store rules mark Play's tablet kinds `upscale = true`), and preflight says so in a notice. The
+default pair therefore serves the listing:
 
 ```yaml
       android-devices: |
         device=medium_phone,  os=36, orientation=portrait,  slug=phone
-        device=Nexus 7 2013,  os=36, orientation=landscape, density=240, slug=tablet
+        device=medium_tablet, os=36, orientation=landscape, slug=tablet
       store-screenshots: true
 ```
 
-`Nexus 7 2013` at `density=240` captures 1920×1200 and lays out as the same 1280×800 points
-the default tablet has; any 1080-wide phone (`medium_phone`, `pixel_7`, `pixel`) clears the
-phone slot.
+Any 1080-wide phone (`medium_phone`, `pixel_7`, `pixel`) clears the phone slot as captured. A
+profile captured at a store size (`Nexus 7 2013` at `density=240`, 1920x1200) is placed as it
+is, at the cost of a heavier panel for the emulator to rasterize.
 
 The limits themselves are data in this repository,
 [`.github/actions/store-rules/store-rules.toml`](.github/actions/store-rules/store-rules.toml),
