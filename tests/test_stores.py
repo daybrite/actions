@@ -40,11 +40,13 @@ class ShapeTests(unittest.TestCase):
             self.assertNotIn("website", JOBS[job]["needs"], job)
             download = steps(job)[DOWNLOAD]
             self.assertEqual(" ".join(str(download["if"]).split()), "${{ inputs.store-screenshots }}")
-            # One artifact per device profile (`screenshots-<target>`, `screenshots-<target>-<slug>`).
+            # One artifact per device profile (`screenshots-<target>`, `screenshots-<target>-<slug>`),
+            # each in its own directory: a merged download garbled the two profiles' colliding
+            # `<target>/gallery.json` and the listing lost its marks.
             self.assertIn(f"screenshots-{target}*", download["with"]["pattern"])
             self.assertIn("store-flavor", download["with"]["pattern"], "a flavor submission takes the flavor's captures")
-            self.assertEqual(download["with"]["path"], "shots")
-            self.assertIs(download["with"]["merge-multiple"], True)
+            self.assertEqual(download["with"]["path"], "shots-in")
+            self.assertNotIn("merge-multiple", download["with"])
             check = steps(job)[CHECK]
             self.assertEqual(" ".join(str(check["if"]).split()), "${{ inputs.store-screenshots }}")
             self.assertEqual(check["env"]["TARGET"], target)
@@ -76,10 +78,16 @@ class CheckStepTests(unittest.TestCase):
             "OWN_FASTFILE": "false",
         }
 
-    def captures(self):
-        shot = self.root / "shots/ios-uikit/iphone/light/home.png"
-        shot.parent.mkdir(parents=True)
-        shot.write_bytes(b"png")
+    def captures(self, *artifacts):
+        """A downloaded artifact per name, each holding its own `<target>/…` tree, or a single
+        artifact extracted flat when no name is given (which is how one match lands)."""
+        for name in artifacts or ("",):
+            base = self.root / "shots-in" / name if name else self.root / "shots-in"
+            device = "ipad" if name.endswith("-ipad") else "iphone"
+            shot = base / f"ios-uikit/{device}/light/home.png"
+            shot.parent.mkdir(parents=True)
+            shot.write_bytes(b"png")
+            (base / "ios-uikit/gallery.json").write_text("{}")
 
     def run_step(self, name=CHECK, job="appstore-ios", **env):
         (self.root / "outputs").write_text("")
@@ -96,16 +104,28 @@ class CheckStepTests(unittest.TestCase):
     def outputs(self):
         return dict(line.split("=", 1) for line in (self.root / "outputs").read_text().splitlines() if "=" in line)
 
-    def test_the_download_is_indexed_checked_and_handed_on(self):
-        self.captures()
+    def test_each_artifact_is_its_own_root_and_the_captures_one_tree(self):
+        """Two profiles' artifacts both carry `ios-uikit/gallery.json`; the index reads each
+        root's own, and the copied tree holds both devices' captures."""
+        self.captures("screenshots-ios-uikit", "screenshots-ios-uikit-ipad")
         result, calls = self.run_step()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         index = f"{self.root}/shots/gallery.json"
-        self.assertEqual(calls, [
-            f"--project . screenshot index --screenshot-paths shots --out shots/gallery.json",
-            f"--project . store screenshots {index} -p ios-uikit",
-        ])
+        self.assertEqual(len(calls), 2, calls)
+        roots = calls[0].split("--screenshot-paths ")[1].split(" --out ")[0].split()
+        self.assertEqual(sorted(roots), ["shots-in/screenshots-ios-uikit", "shots-in/screenshots-ios-uikit-ipad"])
+        self.assertTrue(calls[0].startswith("--project . screenshot index ") and calls[0].endswith(" --out shots/gallery.json"), calls[0])
+        self.assertEqual(calls[1], f"--project . store screenshots {index} -p ios-uikit")
         self.assertEqual(self.outputs()["index"], index)
+        self.assertTrue((self.root / "shots/ios-uikit/iphone/light/home.png").is_file())
+        self.assertTrue((self.root / "shots/ios-uikit/ipad/light/home.png").is_file())
+
+    def test_a_single_flat_artifact_gets_a_root_of_its_own(self):
+        self.captures()
+        result, calls = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calls[0], "--project . screenshot index --screenshot-paths shots-in/screenshots-ios-uikit --out shots/gallery.json")
+        self.assertTrue((self.root / "shots/ios-uikit/iphone/light/home.png").is_file())
 
     def test_the_project_path_reaches_the_cli(self):
         self.captures()
@@ -113,7 +133,7 @@ class CheckStepTests(unittest.TestCase):
         self.assertTrue(all(c.startswith("--project apps/demo ") for c in calls), calls)
 
     def test_an_empty_artifact_fails_before_the_cli_runs(self):
-        (self.root / "shots").mkdir()
+        (self.root / "shots-in").mkdir()
         result, calls = self.run_step()
         self.assertEqual(result.returncode, 1)
         self.assertIn("holds no captures", result.stdout)

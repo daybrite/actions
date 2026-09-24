@@ -2470,8 +2470,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ steps.daycli.outcome }}" = success ]; then
+            # Indexed from the per-artifact directories, not the merged tree: two device
+            # profiles' artifacts can both carry `<target>/gallery.json`, and only one survives
+            # a merge. Each root's index is read whole; the merged tree supplies the files.
+            roots=()
+            for d in shots-in/screenshots-*/; do [ -d "$d" ] && roots+=("${d%/}"); done
             "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
-              --screenshot-paths shots-merged --out shots-merged/gallery.json
+              --screenshot-paths "${roots[@]}" --out shots-merged/gallery.json
             cp shots-merged/gallery.json assets/gallery.json
           fi
           (cd shots-merged && zip -qr "$GITHUB_WORKSPACE/assets/screenshots.zip" .)
@@ -2726,15 +2731,19 @@ jobs:
       # and `day store screenshots` holds the set to the store's rules before anything is staged
       # or signed. No site is involved: the artifact is the tagged version's own captures.
       # One artifact per device profile: the first profile's is `screenshots-ios-uikit`, the
-      # others' `screenshots-ios-uikit-<slug>`, each holding `ios-uikit/<slug>/<variant>/…`,
-      # so merging them rebuilds the one capture tree.
+      # others' `screenshots-ios-uikit-<slug>`, each holding `ios-uikit/<slug>/<variant>/…` and
+      # its own index. They are NOT merged by the download: `merge-multiple` extracts artifacts
+      # concurrently, and two indexes at one path (`ios-uikit/gallery.json`, from a CLI
+      # that wrote one per target) collided into a garbled file, after which every capture lost
+      # its metadata and the listing came out unmarked (Day-Showcase, 2026-09-24). Each artifact
+      # lands in its own directory, the index reads them as separate roots, and only the
+      # captures are copied into one tree.
       - name: Download this run's screenshots
         if: ${{ inputs.store-screenshots }}
         uses: actions/download-artifact@v8
         with:
           pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-ios-uikit*', inputs.store-flavor) || 'screenshots-ios-uikit*' }}
-          path: shots
-          merge-multiple: true
+          path: shots-in
       - name: Check the listing's screenshots
         id: shots
         if: ${{ inputs.store-screenshots }}
@@ -2748,11 +2757,24 @@ jobs:
             echo "::error::store-screenshots places screenshots in the lanes 'day store stage' writes, and this app has its own Fastfile, which the workflow does not edit. Have that Fastfile upload the screenshots, or drop it and let the store/ listing generate the lanes"
             exit 1
           fi
-          if [ -z "$(find shots -name '*.png' -print -quit 2>/dev/null)" ]; then
+          if [ -z "$(find shots-in -name '*.png' -print -quit 2>/dev/null)" ]; then
             echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript run on $TARGET with 'screenshot:' steps marked 'store: N'?"
             exit 1
           fi
-          "$DAY_BIN" --project "${PROJECT_PATH:-.}" screenshot index --screenshot-paths shots --out shots/gallery.json
+          # A single matching artifact is extracted flat into shots-in/; give it the
+          # per-artifact directory the loop below expects.
+          if [ -d "shots-in/$TARGET" ]; then
+            mkdir "shots-in/screenshots-$TARGET" && mv "shots-in/$TARGET" "shots-in/screenshots-$TARGET/"
+          fi
+          roots=()
+          mkdir -p shots
+          for d in shots-in/*/; do
+            roots+=("${d%/}")
+            # The captures into one tree, sequentially; an index colliding here is harmless,
+            # since the merged index below is read from the roots.
+            cp -R "$d." shots/
+          done
+          "$DAY_BIN" --project "${PROJECT_PATH:-.}" screenshot index --screenshot-paths "${roots[@]}" --out shots/gallery.json
           "$DAY_BIN" --project "${PROJECT_PATH:-.}" store screenshots "$PWD/shots/gallery.json" -p "$TARGET"
           echo "index=$PWD/shots/gallery.json" | tee -a "$GITHUB_OUTPUT"
       - name: Stage the store listing
@@ -2891,15 +2913,19 @@ jobs:
       # and `day store screenshots` holds the set to the store's rules before anything is staged
       # or signed. No site is involved: the artifact is the tagged version's own captures.
       # One artifact per device profile: the first profile's is `screenshots-android-mdc`, the
-      # others' `screenshots-android-mdc-<slug>`, each holding `android-mdc/<slug>/<variant>/…`,
-      # so merging them rebuilds the one capture tree.
+      # others' `screenshots-android-mdc-<slug>`, each holding `android-mdc/<slug>/<variant>/…` and
+      # its own index. They are NOT merged by the download: `merge-multiple` extracts artifacts
+      # concurrently, and two indexes at one path (`android-mdc/gallery.json`, from a CLI
+      # that wrote one per target) collided into a garbled file, after which every capture lost
+      # its metadata and the listing came out unmarked (Day-Showcase, 2026-09-24). Each artifact
+      # lands in its own directory, the index reads them as separate roots, and only the
+      # captures are copied into one tree.
       - name: Download this run's screenshots
         if: ${{ inputs.store-screenshots }}
         uses: actions/download-artifact@v8
         with:
           pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-android-mdc*', inputs.store-flavor) || 'screenshots-android-mdc*' }}
-          path: shots
-          merge-multiple: true
+          path: shots-in
       - name: Check the listing's screenshots
         id: shots
         if: ${{ inputs.store-screenshots }}
@@ -2913,11 +2939,24 @@ jobs:
             echo "::error::store-screenshots places screenshots in the lanes 'day store stage' writes, and this app has its own Fastfile, which the workflow does not edit. Have that Fastfile upload the screenshots, or drop it and let the store/ listing generate the lanes"
             exit 1
           fi
-          if [ -z "$(find shots -name '*.png' -print -quit 2>/dev/null)" ]; then
+          if [ -z "$(find shots-in -name '*.png' -print -quit 2>/dev/null)" ]; then
             echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript run on $TARGET with 'screenshot:' steps marked 'store: N'?"
             exit 1
           fi
-          "$DAY_BIN" --project "${PROJECT_PATH:-.}" screenshot index --screenshot-paths shots --out shots/gallery.json
+          # A single matching artifact is extracted flat into shots-in/; give it the
+          # per-artifact directory the loop below expects.
+          if [ -d "shots-in/$TARGET" ]; then
+            mkdir "shots-in/screenshots-$TARGET" && mv "shots-in/$TARGET" "shots-in/screenshots-$TARGET/"
+          fi
+          roots=()
+          mkdir -p shots
+          for d in shots-in/*/; do
+            roots+=("${d%/}")
+            # The captures into one tree, sequentially; an index colliding here is harmless,
+            # since the merged index below is read from the roots.
+            cp -R "$d." shots/
+          done
+          "$DAY_BIN" --project "${PROJECT_PATH:-.}" screenshot index --screenshot-paths "${roots[@]}" --out shots/gallery.json
           "$DAY_BIN" --project "${PROJECT_PATH:-.}" store screenshots "$PWD/shots/gallery.json" -p "$TARGET"
           echo "index=$PWD/shots/gallery.json" | tee -a "$GITHUB_OUTPUT"
       - name: Stage the store listing
@@ -3148,19 +3187,21 @@ jobs:
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
       # --- the development channel's inputs: what this run built -------------------------------
-      # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png — plus each
-      # target's own gallery.json, written by the dayscript runner with every `screenshot:`
-      # step's localized title/caption metadata — so merging them into one directory
-      # reassembles exactly the capture tree `day screenshot index` merges and the gallery
-      # assembler reads. Tolerated-absent: a run whose dayscripts captured nothing still
-      # publishes a site — the gallery page is simply not generated.
+      # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png — plus its
+      # own gallery.json, written by the dayscript runner with every `screenshot:` step's
+      # localized title/caption metadata. Each lands in its own directory: two device
+      # profiles' artifacts can carry an index at the same path, and a merged download
+      # extracts artifacts concurrently, so the colliding file came out garbled and the
+      # captures lost their metadata (Day-Showcase, 2026-09-24). The step below copies the
+      # captures into the one tree the gallery assembler reads and indexes from the roots.
+      # Tolerated-absent: a run whose dayscripts captured nothing still publishes a site — the
+      # gallery page is simply not generated.
       - name: Download this run's screenshots
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
           pattern: screenshots-*
-          path: shots
-          merge-multiple: true
+          path: shots-in
       # `day screenshot index` merges the per-target indexes into shots/gallery.json — the
       # machine-readable index of every screenshot (URL, localized title/caption, theme,
       # locale, platform, dimensions, byte size, sha-256). The assembler republishes it at
@@ -3174,9 +3215,20 @@ jobs:
           PROJECT_PATH: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
-          if [ -d shots ]; then
+          if [ -d shots-in ] && [ -n "$(find shots-in -name '*.png' -print -quit)" ]; then
+            # A single matching artifact is extracted flat; give it a directory of its own.
+            if ! compgen -G "shots-in/screenshots-*/" >/dev/null; then
+              mkdir shots-in/screenshots-all
+              find shots-in -mindepth 1 -maxdepth 1 ! -name screenshots-all -exec mv {} shots-in/screenshots-all/ \;
+            fi
+            roots=()
+            mkdir -p shots
+            for d in shots-in/screenshots-*/; do
+              roots+=("${d%/}")
+              cp -R "$d." shots/
+            done
             "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
-              --screenshot-paths shots --out shots/gallery.json
+              --screenshot-paths "${roots[@]}" --out shots/gallery.json
           fi
       # The packages the matrix just packed. The development channel serves them from the site
       # itself — a GitHub Actions artifact needs a signed-in account and expires with the run's
@@ -3233,12 +3285,22 @@ jobs:
           else
             gh release download "$TAG" --dir rel-zips --clobber --pattern 'screenshots-*.zip'
           fi
-          for z in rel-zips/*.zip; do [ -e "$z" ] || continue; unzip -qo "$z" -d rel-shots; done
+          # Each zip unpacks into its own directory first: two device profiles' zips can both
+          # carry `<target>/gallery.json`, and the index is read from those roots before the
+          # captures are folded into one tree.
+          roots=()
+          for z in rel-zips/*.zip; do
+            [ -e "$z" ] || continue
+            dir="rel-in/$(basename "$z" .zip)"
+            mkdir -p "$dir" && unzip -qo "$z" -d "$dir"
+            roots+=("$dir")
+            cp -R "$dir/." rel-shots/
+          done
           # A merged bundle carries the index at its root; per-target zips carry only their own,
           # so the CLI merges them the way it just did for the development channel.
-          if [ ! -f rel-shots/gallery.json ] && [ "${{ steps.daycli.outcome }}" = success ]; then
+          if [ ! -f rel-shots/gallery.json ] && [ "${{ steps.daycli.outcome }}" = success ] && [ "${#roots[@]}" -gt 0 ]; then
             "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
-              --screenshot-paths rel-shots --out rel-shots/gallery.json
+              --screenshot-paths "${roots[@]}" --out rel-shots/gallery.json
           fi
           echo "$(find rel-shots -name '*.png' | wc -l) capture(s) from $TAG"
       # --- shared inputs -----------------------------------------------------------------------

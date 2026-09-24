@@ -32,11 +32,13 @@ Beside the packages, a release carries every capture the run took:
 
 | asset | what it is |
 | --- | --- |
-| `screenshots.zip` | the merged capture tree — `<target>/[<device>/]<variant>/<shot>.png` for every target — with `gallery.json` at its root |
+| `screenshots.zip` | the merged capture tree — `<target>/[<device>/]<variant>/<shot>.png` for every target, each target's (and each device profile's) own index beside its captures — with the merged `gallery.json` at its root |
 | `gallery.json` | that same index on its own, so a tool can read what a release contains without downloading the images |
 | `screenshots-<target>.zip` | one target's captures, for someone who wants just those |
 
-`gallery.json` is `day screenshot index`'s merge of the per-target indexes: file name, shot id,
+`gallery.json` is `day screenshot index`'s merge of the per-target and per-device indexes, read
+from each artifact as its own root (two device profiles' artifacts can carry an index at the same
+path, and a merged download garbles the collision): file name, shot id,
 localized title and caption, platform-toolkit, device, theme, locale, pixel dimensions, byte size,
 and sha-256 per capture. This is what makes a release's project-site pages buildable from the
 release alone — see [Project website](#project-website-daysite).
