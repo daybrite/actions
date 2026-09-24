@@ -276,6 +276,26 @@ on:
         type: string
         required: false
         default: install
+      day-cache:
+        description: >-
+          Cache a day CLI built from git (a branch, tag or commit in `day-version`), keyed on the
+          exact commit that ref resolves to, so a leg whose commit is already built restores the
+          CLI instead of compiling it. A crates.io release is not cached. Set false to build the
+          CLI on every leg.
+        type: boolean
+        required: false
+        default: true
+      tolerate-failures:
+        description: >-
+          Let the best-effort work fail without failing the run: the pack and dayscripts of the
+          portable-toolkit targets (macos-gtk, macos-qt, windows-qt, windows-gtk), the HarmonyOS
+          emulator's boot and walkthrough, and the web-dom browser install. Off by default, so any
+          of those failing fails its leg, and a failed leg holds back the release and the website
+          deploys until a re-run of the failed jobs succeeds. `optional=true` device rows are
+          tolerated either way.
+        type: boolean
+        required: false
+        default: false
       artifact-prefix:
         description: >-
           Prefix for the package artifact names, so a repository that already publishes
@@ -1371,31 +1391,11 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
 
       - name: Setup command
         if: inputs.setup-command != ''
         run: ${{ inputs.setup-command }}
-
-      # An iOS Simulator's cold boot is a minute and a half of the job's clock (iOS 27 on a
-      # hosted runner, 2026-09-24). Started here, the moment the CLI is on the runner, it runs
-      # under the dependency setup and the build, and the device is up by the time the
-      # walkthrough wants it; the boot step below then finds it booted (or still booting, which
-      # it waits out) and turns it. In the background, so nothing here waits on it, and
-      # best-effort: a boot that fails here fails there, with the report.
-      - name: Start booting the iOS Simulator (${{ matrix.profile }})
-        if: matrix.target == 'ios-uikit' && (matrix.scripts != '' && matrix.scripts || inputs.scripts) != 'none'
-        env:
-          PROFILE: ${{ matrix.profile }}
-          DEVICE_OS: ${{ matrix.device_os }}
-        run: |
-          set -euo pipefail
-          # `day launch` drives every booted simulator, so this job owns exactly one. Each profile
-          # is its own job, so there is no sibling run whose captures could be mixed in.
-          xcrun simctl shutdown all || true
-          args=(devices boot -p ios-uikit --device "$PROFILE" --headless)
-          [ -n "${DEVICE_OS:-}" ] && args+=(--os "$DEVICE_OS")
-          nohup "$DAY_BIN" "${args[@]}" > "$RUNNER_TEMP/simulator-boot.log" 2>&1 &
-          echo "booting $PROFILE in the background; the boot step below waits for it"
 
       # --- everything this target needs, in one step ---------------------------------------
       # The toolkit's dev libraries, the Rust std for its cross-compile and the SDK a mobile target
@@ -1525,8 +1525,8 @@ jobs:
         # another device; letting it pack too would upload a second copy of every package under
         # the same artifact name and, on a tag, race the first for the release asset.
         if: matrix.target != 'web-dom' && matrix.primary
-        # Best-effort on the non-primary combos — they exist for coverage, not distribution.
-        continue-on-error: ${{ matrix.tier == 'extra' }}
+        # Best-effort on the non-primary combos only when the caller asks (tolerate-failures).
+        continue-on-error: ${{ inputs.tolerate-failures && matrix.tier == 'extra' }}
         working-directory: ${{ inputs.project-path }}
         env:
           ANDROID_ABIS_IN: ${{ inputs.android-abis }}
@@ -1573,6 +1573,7 @@ jobs:
           name: ${{ inputs.artifact-prefix }}app-macos-appkit
           path: ${{ runner.temp }}/appout/
           if-no-files-found: error
+          overwrite: true
 
       - name: Upload packages
         # `always()` so a later script flake still ships the packages, but not when there is
@@ -1587,6 +1588,9 @@ jobs:
           name: ${{ inputs.artifact-prefix }}${{ matrix.dist_artifact }}
           path: ${{ inputs.project-path }}/build/day/dist/
           if-no-files-found: ${{ matrix.tier == 'primary' && 'error' || 'warn' }}
+          # A failed leg may already have uploaded this before failing later; its re-run replaces
+          # that attempt's copy, which upload-artifact otherwise refuses as a duplicate name.
+          overwrite: true
 
       # --- dayscripts + screenshots ----------------------------------------------------------
       # Every target runs the scripts: desktop and iOS through the generated runner below,
@@ -1794,9 +1798,15 @@ jobs:
           DEVICE_ORIENTATION: ${{ matrix.device_orientation }}
         run: |
           set -euo pipefail
-          # The boot started under the build (the step after the CLI setup); what it printed
-          # belongs to this step's log, since this is where a failed boot is reported.
-          cat "$RUNNER_TEMP/simulator-boot.log" 2>/dev/null || true
+          # `day launch` drives every booted simulator, so this job owns exactly one. Each profile
+          # is its own job, so there is no sibling run whose captures could be mixed in.
+          xcrun simctl shutdown all || true
+          # After the build, not overlapped with it: a hosted macOS runner has three cores, and a
+          # cold boot is CPU- and I/O-bound for its whole length, not a wait. Started in the
+          # background under the lint, doctor and build (tried 2026-09-24), it starved all
+          # three (lint 2 s → 9 min, build 79 s → 5 min) and was itself slowed by the build, so the
+          # job took seven minutes longer, not five fewer. Nothing before this step is idle
+          # enough to hide a boot behind.
           # --headless: a runner has no display to put a simulator window on, so skip opening one
           # (Simulator.app up to Xcode 26, Device Hub from 27) and the extra wait that getting one
           # would need. Without it, an Xcode 27 runner used to print "Unable to find application
@@ -1823,7 +1833,7 @@ jobs:
 
       - name: Run dayscripts (${{ matrix.target }})
         if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
-        continue-on-error: ${{ matrix.tier == 'extra' }}
+        continue-on-error: ${{ inputs.tolerate-failures && matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       - name: Enable KVM group perms (android / harmony emulator)
@@ -1932,9 +1942,10 @@ jobs:
         run: bash ${{ runner.temp }}/run-dayscripts.sh
 
       # --- HarmonyOS: the Oniro emulator, the same recipe daybrite/day's own CI runs.
-      # Best-effort from boot to walkthrough: the QEMU guest is slow and occasionally flaky,
-      # so a wedged emulator costs this run's OHOS screenshots, never the packages. QEMU
-      # itself comes from setup-day-deps (extras).
+      # Best-effort from boot to walkthrough only under tolerate-failures: the QEMU guest is slow
+      # and occasionally flaky, and a caller may prefer losing a run's OHOS screenshots to
+      # re-running the leg. By default a wedged emulator fails the leg; the packages are already
+      # uploaded either way. QEMU itself comes from setup-day-deps (extras).
       - name: Cache the Oniro emulator image
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
         uses: actions/cache@v6
@@ -1944,7 +1955,7 @@ jobs:
       - name: Boot the Oniro emulator (day devices boot -p harmony-arkui --headless)
         id: ohosemu
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
-        continue-on-error: true
+        continue-on-error: ${{ inputs.tolerate-failures }}
         run: |
           set -euo pipefail
           if ! "$DAY_BIN" devices boot --help | grep -Fq "starts Oniro without a window"; then
@@ -1964,7 +1975,7 @@ jobs:
           DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" devices boot -p harmony-arkui --headless
       - name: Run dayscripts (harmony emulator)
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.ohosemu.outcome == 'success'
-        continue-on-error: true
+        continue-on-error: ${{ inputs.tolerate-failures }}
         env:
           # Per-screenshot compositor settle before capture (script.rs): matches the measured
           # 2-3 s emulator compositor lag; the byte-identical stale-frame retry still catches
@@ -1979,12 +1990,15 @@ jobs:
       - name: Install the walkthrough browser (web)
         id: webdriver
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'web-dom'
-        continue-on-error: true
+        continue-on-error: ${{ inputs.tolerate-failures }}
         run: |
           set -euo pipefail
+          # An older CLI without the subcommand skips the scripts rather than failing the leg: the
+          # scripts need the driver, and the web-dom build itself is fine. A failed browser
+          # install below is a real failure, and fails the leg unless tolerate-failures is on.
           if ! DRIVER="$("$DAY_BIN" web driver 2>/dev/null)"; then
             echo "::notice::this day CLI has no 'web driver' subcommand — skipping the web-dom dayscripts"
-            exit 1
+            exit 0
           fi
           mkdir -p "$RUNNER_TEMP/webdriver" && cd "$RUNNER_TEMP/webdriver"
           npm init -y >/dev/null
@@ -1997,8 +2011,9 @@ jobs:
             # which day-part-fs needs (docs/fs.md).
             echo "DAY_WEB_DRIVER_BROWSER=chromium"
           } >> "$GITHUB_ENV"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
       - name: Run dayscripts (web-dom)
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'web-dom' && steps.webdriver.outcome == 'success'
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'web-dom' && steps.webdriver.outputs.ready == 'true'
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       # A package that builds but will not install is worth catching here rather than on a user's
@@ -2060,6 +2075,9 @@ jobs:
           name: ${{ matrix.shots_artifact }}
           path: ${{ inputs.project-path }}/build/day${{ matrix.flavor != '' && format('/flavors/{0}', matrix.flavor) || '' }}/screenshots/
           if-no-files-found: ignore
+          # Uploaded even when the leg fails, so a re-run of the failed leg must replace it: the
+          # website then assembles the re-run's screenshots with the other legs' first ones.
+          overwrite: true
       # The emulator's own output, kept by `day devices boot` on the host. A walkthrough that ends
       # in "the device stopped answering" leaves no crash to find — the guest froze, and every adb
       # call after that returns nothing — so what the emulator wrote is the one record of why.
@@ -2071,6 +2089,7 @@ jobs:
           name: emulator-log-${{ matrix.target }}-${{ matrix.profile }}${{ matrix.flavor != '' && format('-{0}', matrix.flavor) || '' }}
           path: /tmp/day-emulator-*.log
           if-no-files-found: ignore
+          overwrite: true
 
   # --- release assets (semantic-version tags only) ------------------------------------------
   # Attaches every package and a per-target screenshot zip to the GitHub release for the tag,
@@ -2125,6 +2144,7 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
       - name: Rebuild from the artifact's own provenance
         # web-dom ships a zip of static files, not a packaged app: nothing to rebuild-and-compare.
         if: matrix.target != 'web-dom'
@@ -2393,6 +2413,7 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
       # The certificate goes into an ephemeral keychain the action destroys when it is done,
       # `day sign apply` re-signs the package as an archive (the profile is embedded, every
       # binary inside is signed with the identity, and no app code runs), and the provenance
@@ -2557,6 +2578,7 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
       # The listing as the CLI resolves it (docs/store.md "Exporting"): the text per target,
       # store and locale, the submission info, the screenshot declarations, the live store
       # records and the permissions, one JSON document a store queue or a catalog reads
@@ -2833,6 +2855,7 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
       # With inputs.store-screenshots, the listing's screenshots are the captures this run's
       # listing declares (store/storefront.toml [storefront]), from the screenshots-ios-uikit
       # artifacts the build legs uploaded (`<target>/<device>/<variant>/<shot>.png` plus the
@@ -2939,6 +2962,7 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
       # The Mac App Store takes a .pkg signed with the MAS installer identity, and producing or
       # re-signing it is the app's own lane's job: the CLI stages no macOS listing, so the app
       # has to carry the Fastfile, and the action runs the lane there with DAY_PKG_OR_APP set.
@@ -2989,6 +3013,7 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
       # With inputs.store-screenshots, the listing's screenshots are the captures this run's
       # listing declares (store/storefront.toml [storefront]), from the screenshots-android-mdc
       # artifacts the build legs uploaded (`<target>/<device>/<variant>/<shot>.png` plus the
@@ -3189,7 +3214,9 @@ jobs:
     # The whole build is a prerequisite too: the site hosts the web-dom build, the screenshots and
     # the packages this run produced, so it deploys only after every matrix leg succeeded. A run
     # whose build was skipped or failed leaves the live site as it was instead of publishing one
-    # without its web app.
+    # without its web app. "Re-run failed jobs" re-runs the failed legs AND every job that needs
+    # them, this one included; once those legs pass, needs.build.result counts the first
+    # attempt's passing legs with them and this deploys, from the artifacts of both attempts.
     needs: [preflight, build, release]
     if: >-
       ${{ needs.preflight.outputs.website == 'true' && !cancelled()
@@ -3242,6 +3269,7 @@ jobs:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
+          cache: ${{ inputs.day-cache }}
       # --- the development channel's inputs: what this run built -------------------------------
       # Every screenshots-<target> artifact holds <target>/<variant>/<shot>.png — plus its
       # own gallery.json, written by the dayscript runner with every `screenshot:` step's

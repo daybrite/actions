@@ -22,6 +22,15 @@ inputs:
       the CLI once per matrix leg.
     required: false
     default: install
+  cache:
+    description: >-
+      Cache a CLI built from git, keyed on the exact commit the branch, tag or commit in `version`
+      resolves to: `day-cli-<runner image>-<arch>-<commit>`. A leg whose commit already has a
+      cached build restores it instead of compiling; a new commit builds and saves it. Releases
+      from crates.io (`latest`, a semver) and `source: artifact` are not cached. `false` builds
+      every time.
+    required: false
+    default: 'true'
 
 runs:
   using: composite
@@ -55,8 +64,99 @@ runs:
     # recompilation, "Finished in 3.33s" — installing a stale binary labeled with the new
     # commit. For a tool whose generated files are pristine-checked in every app repo, a
     # binary that silently lags its own source is worse than the minutes a cold build costs.
+    #
+    # The `cache` input caches the INSTALLED binary instead, under a key naming the one commit
+    # it was built from: the ref is resolved to a commit here and the build installs that
+    # commit with --rev, so a key can never hold another commit's binary, even if the branch
+    # moves while the run is in flight. The key names the runner image rather than just the OS
+    # because a Linux binary links the glibc of the image that built it, and a new image rolls
+    # out gradually.
+    - name: Resolve the day commit (for the CLI cache)
+      id: rev
+      if: inputs.source != 'artifact' && inputs.cache == 'true'
+      shell: bash
+      env:
+        VERSION_IN: ${{ inputs.version }}
+        GIT_URL: ${{ inputs.git }}
+      run: |
+        set -euo pipefail
+        V="${VERSION_IN:-latest}"
+        REV=""
+        if [ "$V" = latest ] || [[ "$V" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          echo "A crates.io release ($V) is not cached."
+          exit 0
+        elif [[ "$V" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          REV="$(printf '%s' "$V" | tr 'A-F' 'a-f')"
+        else
+          # A branch wins over a tag of the same name, as `cargo install --branch` would pick;
+          # an annotated tag's peeled `^{}` line names its commit rather than the tag object.
+          REFS="$(git ls-remote "$GIT_URL" "refs/heads/$V" "refs/tags/$V" "refs/tags/$V^{}")"
+          for REF in "refs/heads/$V" "refs/tags/$V^{}" "refs/tags/$V"; do
+            REV="$(printf '%s\n' "$REFS" | awk -v r="$REF" '$2 == r { print $1; exit }')"
+            [ -z "$REV" ] || break
+          done
+          if [ -z "$REV" ]; then
+            echo "::warning::'$V' is neither a branch nor a tag of $GIT_URL, so the day CLI is not cached"
+            exit 0
+          fi
+        fi
+        # The image name implies the OS but not the architecture (macos15 names both the Intel
+        # and the Apple silicon image). A self-hosted runner sets no ImageOS, so the OS stands
+        # in for it there.
+        IMAGE="${ImageOS:-$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')}"
+        ARCH=x86_64
+        [ "$RUNNER_ARCH" != ARM64 ] || ARCH=aarch64
+        echo "rev=$REV" >> "$GITHUB_OUTPUT"
+        echo "key=day-cli-$IMAGE-$ARCH-$REV" >> "$GITHUB_OUTPUT"
+        echo "$V resolves to $REV"
+
+    # Its own directory under the runner temp dir, outside both the workspace (see the artifact
+    # step above) and ~/.cargo, so the cache holds the CLI and nothing else cargo installed.
+    - name: Restore the cached day CLI
+      id: cache
+      if: steps.rev.outputs.rev != ''
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/day-cli-cache
+        key: ${{ steps.rev.outputs.key }}
+
+    - name: Install the day CLI (${{ inputs.version }}, cached per commit)
+      if: steps.rev.outputs.rev != ''
+      shell: bash
+      env:
+        GIT_URL: ${{ inputs.git }}
+        REV: ${{ steps.rev.outputs.rev }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        ROOT="$RUNNER_TEMP/day-cli-cache"
+        BIN="$(cygpath -u "$ROOT" 2>/dev/null || printf '%s' "$ROOT")/bin/day"
+        [ "$RUNNER_OS" != Windows ] || BIN="$BIN.exe"
+        if [ "$CACHE_HIT" = true ] && [ -x "$BIN" ]; then
+          echo "Using the day CLI cached for $REV."
+        else
+          cargo install day-cli --locked --git "$GIT_URL" --rev "$REV" --root "$ROOT"
+        fi
+        if [ "$RUNNER_OS" = Windows ]; then
+          printf '%s\n' "$RUNNER_TEMP\\day-cli-cache\\bin" >> "$GITHUB_PATH"
+        else
+          echo "$ROOT/bin" >> "$GITHUB_PATH"
+        fi
+        echo "DAY_BIN=$BIN" >> "$GITHUB_ENV"
+        "$BIN" version
+
+    # Saved right after the build rather than in a post step, so a leg whose app build fails
+    # later still leaves the CLI for the next run. Legs that miss together each try to save the
+    # same key; the first wins, and the rest log a warning.
+    - name: Cache the day CLI
+      if: steps.rev.outputs.rev != '' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/day-cli-cache
+        key: ${{ steps.rev.outputs.key }}
+
     - name: Install the day CLI (${{ inputs.version }})
-      if: inputs.source != 'artifact'
+      if: inputs.source != 'artifact' && steps.rev.outputs.rev == ''
       shell: bash
       env:
         VERSION_IN: ${{ inputs.version }}

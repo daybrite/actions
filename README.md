@@ -120,6 +120,8 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `locales` | string | — | Locales to run each dayscript under, comma- or space-separated (`en fr ar zh-CN`), or `all` for every locale the app ships — its `resource/locales/<tag>/` catalogs, default locale first, so adding a language to the app adds it to the walkthrough. Each locale captures its own screenshot variant. |
 | `android-abis` | string | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK and AAB, comma- or space-separated; each adds its own `lib/<abi>/`. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 | `day-source` | string | `install` | Where the day CLI comes from: `install` builds it with cargo per `day-version`; `artifact` downloads the `day-<os>-<arch>` artifact an earlier job in the same run uploaded. |
+| `day-cache` | boolean | `True` | Cache a day CLI built from git (a branch, tag or commit in `day-version`), keyed on the commit that ref resolves to, so a leg whose commit is already built restores the CLI instead of compiling it. A crates.io release is not cached. `false` builds the CLI on every leg. |
+| `tolerate-failures` | boolean | `False` | Let the best-effort work fail without failing the run: pack and dayscripts on `macos-gtk`, `macos-qt`, `windows-qt` and `windows-gtk`, the HarmonyOS emulator's boot and walkthrough, and the web-dom browser install. Off, any of them failing fails its leg, which holds back the release and the website deploys until [a re-run of the failed jobs](#re-running-failed-legs) passes. `optional=true` device rows are tolerated either way. |
 | `artifact-prefix` | string | — | Prefix for the package artifact names (`<prefix>dist-<target>`), so a repository that already publishes `dist-<target>` from another workflow can keep both. |
 | `themes` | string | — | Themes to run each dayscript under (`light dark`), expanded against `locales` into one run per combination. Each theme captures its own screenshot variant. |
 | `ios-profiles` | string | — | The older device-only form of `ios-devices`, comma-separated name prefixes with optional `=<slug>`. Setting both is an error. |
@@ -168,11 +170,11 @@ newest installed rather than pinning a major that the next image drops.
 | `macos-appkit` | xcode-27 | packs a `.dmg` |
 | `ios-uikit` | xcode-27 | Simulator scripts; packs an unsigned device `.ipa` for sideloading/self-signing (a signed `.ipa` with signing secrets) |
 | `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` **and** a `.appimage`, and the release check installs the one and runs the other |
-| `android-mdc` | ubuntu-latest | scripts on a KVM emulator (best-effort); packs `.apk` + `.aab` |
-| `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort); packs `.hap` |
+| `android-mdc` | ubuntu-latest | scripts on a KVM emulator; packs `.apk` + `.aab` |
+| `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort under `tolerate-failures`); packs `.hap` |
 | `windows-xaml` | windows-latest | packs `.msix` + NSIS installer |
 | `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`), all of them in one launch — web storage lasts only as long as the launch; ships the built dist as a zip |
-| `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds; pack and scripts are best-effort |
+| `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds; pack and scripts are best-effort under `tolerate-failures` |
 
 ### Device profiles
 
@@ -637,6 +639,15 @@ independent, so one caller can attach packages on tags *and* deploy the web buil
 main. The deploy waits for every build leg to succeed, so a run whose build failed or never ran
 leaves the published web app as it was.
 
+#### Re-running failed legs
+
+A leg that fails, a dayscript included, fails the run, and neither the release, the web deploy nor
+the website publishes. Re-run it from the run's page with **Re-run failed jobs**: GitHub re-runs
+the failed legs and every job waiting on them, and once the legs pass, the release and deploys run
+with the first attempt's passing legs counted. The website assembles every leg's screenshots, the
+re-run's replacing the failed attempt's. Set `tolerate-failures: true` to let the best-effort work
+fail without holding anything back instead.
+
 **Re-running a job is safe.** Artifacts belong to the run, not to the attempt, so a re-run used to
 leave a second artifact named `github-pages` beside the first and `actions/deploy-pages` refused to
 deploy at all — one flaky build leg would take the whole workflow down on its way out
@@ -688,8 +699,11 @@ commands themselves.
 
 Installs the `day` CLI and exports `DAY_BIN` — from crates.io, a git ref, or an artifact this run
 built (`day-source: artifact`, how daybrite/day tests the CLI it just compiled). Source installs
-build cold on purpose: a cached build directory once handed `--branch main` installs a stale
-binary labeled with the new commit, and correctness beats the minutes saved.
+never reuse a build directory: a cached one once handed `--branch main` a stale binary labeled
+with the new commit. With `cache` on (the default), a git install instead caches the finished
+binary under a key naming the commit it was built from, `day-cli-<runner image>-<arch>-<commit>`.
+The action resolves the branch or tag to that commit and builds exactly it, so a leg restores the
+CLI only when the commit is unchanged, and a new commit always builds.
 
 ### `sign-package`
 
