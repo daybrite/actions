@@ -469,13 +469,21 @@ absent — it never fails for that reason. On semantic-version tags, the same `D
 exist and the caller forwards them with `secrets: inherit`. Branch and PR builds always pack
 dev-signed, even when the secrets exist.
 
-An App Store `.ipa` takes `DAY_APPLE_TEAM`, the API key trio `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
-`DAY_ASC_KEY_B64`, the distribution certificate as `DAY_APPLE_CERT_P12` with
-`DAY_APPLE_CERT_PASSWORD`, and the App Store provisioning profile as `DAY_IOS_PROFILE_B64`. The
-profile is installed where Xcode looks and `day pack` exports over it with the imported
-certificate; an API key cannot use Xcode's cloud-managed signing, so without the profile the
-export has nothing to sign with and the pack degrades to an unsigned `.ipa`, which the upload
-job then refuses.
+An App Store `.ipa` is packed unsigned by the build leg (`day pack --no-sign`, which produces
+`<stem>-ios-uikit-unsigned.ipa`) and signed afterwards by `sign-ios`, a job that checks out no
+code, the way `sign-macos` signs the `.app`: it imports the distribution certificate
+(`DAY_APPLE_CERT_P12` with `DAY_APPLE_CERT_PASSWORD`) into an ephemeral keychain, decodes the App
+Store provisioning profile (`DAY_IOS_PROFILE_B64`), runs `day sign apply` over the package, and
+republishes `dist-ios-uikit` with the signed `.ipa` in place of the unsigned one. The job that
+builds and runs the app's code never holds Apple material. Without both secrets the unsigned
+`.ipa` ships as it is and the App Store upload refuses it. The upload itself takes
+`DAY_APPLE_TEAM` and the API key trio `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64`.
+
+Signing after the build is not only a trust boundary. An archive signed automatically on a CI
+runner, whose keychain starts empty, had Xcode's cloud provisioning mint a new development
+certificate on every run, and the account filled up one tag build at a time until Apple refused
+to issue another; `day sign apply` signs with the certificate it is given and provisions
+nothing.
 
 ### Store uploads
 

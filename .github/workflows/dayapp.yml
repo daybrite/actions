@@ -1335,7 +1335,6 @@ jobs:
       DAY_OHOS_KEY_ALIAS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KEY_ALIAS || '' }}
       DAY_OHOS_KS_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KS_PASS || '' }}
       DAY_OHOS_KEY_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KEY_PASS || '' }}
-      HAS_APPLE_CERT: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_APPLE_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -1412,20 +1411,15 @@ jobs:
         run: $DAY_BIN build -p ${{ matrix.target }}
 
       # --- distribution packaging (before scripts, so packages survive a script flake) ------
-      - name: Import the Apple signing certificate
-        # ios-uikit only: its signing happens inside `xcodebuild -exportArchive` during pack and is
-        # not separable from the build the way the macOS .dmg is. The macOS desktop combos get no
-        # certificate here — `sign-macos` signs their .app after the fact.
-        if: env.HAS_APPLE_CERT == 'true' && matrix.target == 'ios-uikit' && matrix.primary
-        uses: apple-actions/import-codesign-certs@v7
-        with:
-          p12-file-base64: ${{ secrets.DAY_APPLE_CERT_P12 }}
-          p12-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
+      # No Apple material reaches this job: the iOS .ipa is packed unsigned here and signed in
+      # `sign-ios` after the build, the way `sign-macos` signs the .app, so the job that runs the
+      # app's code and its dayscripts never holds a certificate. (It used to import the
+      # distribution certificate and archive with automatic signing, which minted a development
+      # certificate on every run's fresh keychain until the account was full; Day-Showcase
+      # v0.4.13, 2026-09-24.)
       - name: Materialize signing material
         if: needs.preflight.outputs.release == 'true' && matrix.primary
         env:
-          ASC_KEY_B64: ${{ secrets.DAY_ASC_KEY_B64 }}
-          IOS_PROFILE_B64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
           ANDROID_KEYSTORE_B64: ${{ secrets.DAY_ANDROID_KEYSTORE_B64 }}
           OHOS_KEYSTORE_B64: ${{ secrets.DAY_OHOS_KEYSTORE_B64 }}
           OHOS_CERT_B64: ${{ secrets.DAY_OHOS_CERT_B64 }}
@@ -1439,19 +1433,8 @@ jobs:
             fi
           }
           case "${{ matrix.target }}" in
-            # macos-*: nothing — the Developer ID and notary key live in `sign-macos`.
-            ios-uikit)
-              put "${ASC_KEY_B64:-}" asc.p8 DAY_ASC_KEY
-              # The App Store profile goes where Xcode looks, under its own UUID, so `day pack`
-              # finds it and exports manually with the imported certificate.
-              if [ -n "${IOS_PROFILE_B64:-}" ]; then
-                PROFILES="$HOME/Library/MobileDevice/Provisioning Profiles"
-                mkdir -p "$PROFILES"
-                echo "$IOS_PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/appstore.mobileprovision"
-                UUID="$(security cms -D -i "$RUNNER_TEMP/appstore.mobileprovision" | plutil -extract UUID raw -o - -)"
-                cp "$RUNNER_TEMP/appstore.mobileprovision" "$PROFILES/$UUID.mobileprovision"
-                echo "installed App Store profile $UUID"
-              fi ;;
+            # macos-*, ios-uikit: nothing — the Developer ID and notary key live in `sign-macos`,
+            # the distribution certificate and App Store profile in `sign-ios`.
             android-mdc) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
             harmony-arkui)
               put "${OHOS_KEYSTORE_B64:-}" ohos.p12 DAY_OHOS_KEYSTORE
@@ -1524,7 +1507,10 @@ jobs:
           esac
           # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
           # so each release asset is reachable at a stable .../releases/latest/download/<name> URL.
-          $DAY_BIN pack -p ${{ matrix.target }} --no-version-in-name --format json
+          # The iOS package is always packed unsigned here (`-unsigned.ipa`); `sign-ios` signs it.
+          NO_SIGN=""
+          [ "${{ matrix.target }}" = ios-uikit ] && NO_SIGN="--no-sign"
+          $DAY_BIN pack -p ${{ matrix.target }} --no-version-in-name --format json $NO_SIGN
 
       # The handoff to `sign-macos`: the built .app, its entitlements, and the provenance sidecars,
       # so the signing job can produce a notarized .dmg without ever seeing this build tree.
@@ -2322,9 +2308,128 @@ jobs:
 
   # --- iOS Simulator: uikit -------------------------------------------------
 
+  # The iOS counterpart of sign-macos: the build leg packs `<stem>-ios-uikit-unsigned.ipa` with
+  # no Apple material in reach, and this job, which checks out no code, signs it with the
+  # distribution certificate and the App Store profile (`day sign apply`, the same signing the
+  # App Fair's queue performs on an unsigned .ipa) and republishes `dist-ios-uikit` under the
+  # signed name. It runs on a release tag when both secrets exist; without them the unsigned
+  # .ipa ships as it is, and the App Store upload refuses it with the list of what to set.
+  sign-ios:
+    name: sign (ios-uikit)
+    needs: [preflight, build]
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+          && needs.preflight.outputs.release == 'true'
+          && needs.preflight.outputs.promotion != 'true'
+          && contains(inputs.targets, 'ios-uikit') }}
+    runs-on: ${{ needs.preflight.outputs.macos_runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check the signing material is present
+        id: material
+        env:
+          CERT_P12: ${{ secrets.DAY_APPLE_CERT_P12 }}
+          PROFILE_B64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CERT_P12" ] || [ -z "$PROFILE_B64" ]; then
+            echo "::notice::sign-ios: DAY_APPLE_CERT_P12 and DAY_IOS_PROFILE_B64 are not both set, so the .ipa ships unsigned"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download the unsigned .ipa
+        if: steps.material.outputs.present == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}dist-ios-uikit
+          path: ${{ runner.temp }}/dist
+      - name: Find it
+        if: steps.material.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          IPA="$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name '*-unsigned.ipa' | head -1)"
+          [ -n "$IPA" ] || { echo "::error::no *-unsigned.ipa in dist-ios-uikit; the build leg packs the iOS app unsigned for this job to sign"; exit 1; }
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+          echo "SIGNED=${IPA%-unsigned.ipa}.ipa" >> "$GITHUB_ENV"
+      - name: Create an ephemeral signing keychain
+        if: steps.material.outputs.present == 'true'
+        env:
+          CERT_P12: ${{ secrets.DAY_APPLE_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
+          PROFILE_B64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASS="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          umask 077
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          MAGIC="$(head -c 2 "$RUNNER_TEMP/cert.p12" | xxd -p)"
+          if [ "$MAGIC" != 3082 ]; then
+            echo "::error::DAY_APPLE_CERT_P12 decoded to $(wc -c < "$RUNNER_TEMP/cert.p12" | tr -d ' ') byte(s) that are not a PKCS#12 certificate (expected DER 30 82, got '${MAGIC:-nothing}'). The secret must hold the output of \`base64 -i Certificates.p12\`, not the certificate itself."
+            rm -f "$RUNNER_TEMP/cert.p12"
+            exit 1
+          fi
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -f pkcs12
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+          security find-identity -v -p codesigning "$KEYCHAIN"
+          COUNT="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -c '^[[:space:]]*[0-9][0-9]*)')"
+          [ "$COUNT" = 1 ] || { echo "::error::expected exactly 1 identity in the keychain, found $COUNT"; exit 1; }
+          SIGN_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/^[[:space:]]*1\)/ {print $2; exit}')"
+          printf '%s' "$PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/appstore.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/appstore.mobileprovision" | plutil -extract UUID raw -o - - >/dev/null \
+            || { echo "::error::DAY_IOS_PROFILE_B64 is not a base64 .mobileprovision"; exit 1; }
+          {
+            echo "KEYCHAIN=$KEYCHAIN"
+            echo "SIGN_ID=$SIGN_ID"
+          } >> "$GITHUB_ENV"
+      - name: Set up the day CLI
+        if: steps.material.outputs.present == 'true'
+        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        with:
+          version: ${{ inputs.day-version }}
+          git: ${{ inputs.day-git }}
+          source: ${{ inputs.day-source }}
+      # `day sign apply` re-signs the package as an archive: the profile is embedded, every
+      # binary inside is signed with the identity, and no app code runs. The provenance sidecars
+      # beside the unsigned .ipa are renamed after the signed one, the way the release job names
+      # its assets, so `day rebuild` still finds them beside the artifact.
+      - name: Sign the .ipa
+        if: steps.material.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          "$DAY_BIN" sign apply "$IPA" --out "$SIGNED" \
+            --profile "$RUNNER_TEMP/appstore.mobileprovision" --identity "$SIGN_ID"
+          [ -f "$SIGNED" ] || { echo "::error::day sign apply wrote no $SIGNED"; exit 1; }
+          rm -f "$IPA"
+          for side in "$IPA".*; do
+            [ -e "$side" ] || continue
+            mv "$side" "$SIGNED${side#"$IPA"}"
+          done
+          ls -1 "$RUNNER_TEMP/dist"
+      - name: Upload the signed package
+        if: steps.material.outputs.present == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}dist-ios-uikit
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+      - name: Destroy the signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/appstore.mobileprovision" "$RUNNER_TEMP/cert.p12"
+
   release:
     name: release assets
-    needs: [preflight, build, sign-macos]
+    needs: [preflight, build, sign-macos, sign-ios]
     # `!cancelled()` + explicit results, for the same reason sign-macos documents: without it,
     # GitHub's implicit success() gate reads sign-macos's SKIP (no signing-environment
     # configured — the common case) as "a need did not succeed" and silently skips the release.
@@ -2338,7 +2443,8 @@ jobs:
           && needs.preflight.outputs.release == 'true'
           && needs.preflight.outputs.promotion != 'true'
           && needs.build.result == 'success'
-          && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
+          && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped')
+          && (needs.sign-ios.result == 'success' || needs.sign-ios.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       # The checkout is for `day screenshot index` further down, which reads the project for
@@ -2691,9 +2797,12 @@ jobs:
             "$(lanes 'platform :android' true "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile")" \
             "$HAS_PLAY" "DAY_PLAY_JSON_KEY"
 
+  # sign-ios republishes the signed .ipa under the same dist-ios-uikit name, so having it in
+  # `needs` means this job downloads the signed package when the material exists and the
+  # unsigned one otherwise, which it refuses below.
   appstore-ios:
     name: upload (ios app store)
-    needs: [preflight, build, stores]
+    needs: [preflight, build, sign-ios, stores]
     if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_ios == 'true' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
     env:
@@ -2712,7 +2821,7 @@ jobs:
           IPA="$(find dist -type f -name '*.ipa' | head -1)"
           [ -n "$IPA" ] || { echo "::error::no .ipa in the downloaded dist artifact — is ios-uikit in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
           case "$IPA" in
-            *-unsigned.ipa) echo "::error::the packed .ipa is unsigned — the store refuses it. Set DAY_APPLE_TEAM, DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64, DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 so pack signs"; exit 1 ;;
+            *-unsigned.ipa) echo "::error::the packed .ipa is unsigned — the store refuses it. Set DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 so the sign-ios job signs it (and DAY_APPLE_TEAM, DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64 for the upload)"; exit 1 ;;
           esac
           echo "DAY_IPA=$PWD/$IPA" | tee -a "$GITHUB_ENV"
       # An app with no fastlane directory of its own gets the lanes `day store stage` writes
