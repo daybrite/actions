@@ -174,6 +174,36 @@ class PlanTests(unittest.TestCase):
         result, _ = self.plan(TARGETS_IN="ios-uikit", STORE_SCREENSHOTS_IN="true")
         self.assertNotIn("::notice::store-screenshots", result.stdout)
 
+    def rows(self, values, target):
+        """The build rows the plan produced for one target, in matrix order."""
+        return [r for r in json.loads(values["matrix"])["include"] if r["target"] == target]
+
+    def test_harmony_runs_on_a_phone_panel_and_a_landscape_tablet_panel_by_default(self):
+        """One Oniro image, two panels: the pair every mobile target gets, so an app that names
+        nothing captures HarmonyOS on both and publishes a phone and a tablet column."""
+        result, values = self.plan(TARGETS_IN="harmony-arkui")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        rows = self.rows(values, "harmony-arkui")
+        self.assertEqual([(r["profile"], r["device_orientation"], r["device_slug"]) for r in rows],
+                         [("phone", "portrait", "phone"), ("tablet", "landscape", "tablet")])
+        self.assertEqual([r["label"] for r in rows], ["harmony-arkui · phone", "harmony-arkui · tablet"])
+        self.assertEqual([r["shots_artifact"] for r in rows],
+                         ["screenshots-harmony-arkui", "screenshots-harmony-arkui-tablet"])
+        self.assertEqual([r["primary"] for r in rows], [True, False])
+        # No OS on this target: the image is one release.
+        self.assertEqual([r["device_os"] for r in rows], ["", ""])
+
+    def test_harmony_devices_replaces_the_default_pair(self):
+        result, values = self.plan(TARGETS_IN="harmony-arkui",
+                                   HARMONY_DEVICES_IN="device=1200x1920, orientation=portrait, slug=big-phone")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        rows = self.rows(values, "harmony-arkui")
+        self.assertEqual([(r["profile"], r["device_orientation"]) for r in rows], [("1200x1920", "portrait")])
+        # A named device rides the job name, as it does on iOS; one row keeps the device-less
+        # capture tree, as one device always has.
+        self.assertEqual(rows[0]["label"], "harmony-arkui · 1200x1920")
+        self.assertEqual(rows[0]["device_slug"], "")
+
     def test_a_promotion_deploys_the_website_of_a_project_that_has_one(self):
         (self.root / "website").mkdir()
         (self.root / "website/site.toml").write_text('host = "games-fair.github.io"\n')

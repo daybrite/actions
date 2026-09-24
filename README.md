@@ -128,6 +128,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `ios-devices` | string | phone + tablet | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…`. Each becomes its own parallel job, screenshot artifact and gallery column; the first one packs. `device` is a name prefix in which `*` matches anything, so `iPhone * Pro Max` is the largest iPhone the runner image has. Unset runs `iPhone * Pro Max` portrait and `iPad Pro 13-inch` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
 | `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `medium_phone` or `Nexus 7 2013`, comma-separated. |
 | `android-devices` | string | phone + tablet | Device profiles for `android-mdc`, one per line in the same shape as `ios-devices`, plus a `density` field; `os` is the API level. Unset runs `medium_phone` portrait and `medium_tablet` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
+| `harmony-devices` | string | phone + tablet | Device profiles for `harmony-arkui`, one per line as `device=…, orientation=…, slug=…`, where `device` is a PANEL of the one Oniro image: `phone` (360x720), `tablet` (1280x800) or `WxH`. Unset runs the phone in portrait and the tablet in landscape. |
 | `app-id` | string | — | The app's bundle id. When set, the Linux legs verify that the packed flatpak installs and reports that id, and the macOS legs that the `.app` carries it. |
 | `lint` | boolean | `True` | Run `day lint` before building: fluent coverage, ids, routes, and the store listing. |
 | `assert-pristine` | boolean | `True` | Fail if the checkout has uncommitted changes before packing. An artifact packed from a dirty tree records a commit that cannot reproduce it. |
@@ -178,18 +179,22 @@ newest installed rather than pinning a major that the next image drops.
 
 ### Device profiles
 
-**Both mobile targets run on a phone and a tablet by default**, with no configuration in the
+**Every mobile target runs on a phone and a tablet by default**, with no configuration in the
 calling workflow. `ios-uikit` runs `iPhone * Pro Max` in portrait and `iPad Pro 13-inch` in
-landscape; `android-mdc` runs `medium_phone` in portrait and `medium_tablet` in landscape. Each is its own
-parallel job, its own screenshot artifact and its own gallery column, and captures land under
-`<target>/<slug>/<variant>/` — `ios-uikit/iphone/`, `ios-uikit/ipad/`, `android-mdc/phone/`,
-`android-mdc/tablet/`. Those are the two device classes a store listing asks for and the two an
+landscape; `android-mdc` runs `medium_phone` in portrait and `medium_tablet` in landscape;
+`harmony-arkui` runs its one Oniro image on a `phone` panel (360x720) in portrait and a `tablet`
+panel (1280x800) in landscape. Each is its own parallel job, its own screenshot artifact and its
+own gallery column, and captures land under `<target>/<slug>/<variant>/` — `ios-uikit/iphone/`,
+`ios-uikit/ipad/`, `android-mdc/phone/`, `android-mdc/tablet/`, `harmony-arkui/phone/`,
+`harmony-arkui/tablet/`. Those are the two device classes a store listing asks for and the two an
 adaptive UI has to be looked at on. The iOS panels are ones the App Store accepts as screenshots;
 the Android tablet capture is not one Play takes — see [Store-sized Android
-profiles](#store-sized-android-profiles) for the pair that is.
+profiles](#store-sized-android-profiles) for the pair that is. The HarmonyOS tablet is a panel
+size, not a tablet image: the Oniro guest identifies itself as a phone whatever its screen, so
+that row shows the app's wide layout rather than the system's tablet behaviors.
 
-Naming `ios-devices` or `android-devices` replaces that target's whole list, which is how an app
-runs on one device:
+Naming `ios-devices`, `android-devices` or `harmony-devices` replaces that target's whole list,
+which is how an app runs on one device:
 
 ```yaml
 with:

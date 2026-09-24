@@ -453,6 +453,29 @@ on:
         type: string
         required: false
         default: ""
+      harmony-devices:
+        description: >-
+          Device profiles for `harmony-arkui`, one per LINE, in the same shape as `ios-devices`:
+          `device=…, orientation=…, slug=…, optional=…`. Each line becomes its own parallel job
+          with its own emulator, screenshot artifact and gallery column.
+
+              harmony-devices: |
+                device=phone,  orientation=portrait,  slug=phone
+                device=tablet, orientation=landscape, slug=tablet
+
+          There is one Oniro emulator image, and its screen is whatever size QEMU is told, so a
+          `device` here is a PANEL rather than a catalog entry: `phone` (360x720, what every run
+          captured on before profiles existed), `tablet` (1280x800, the size the Android tablet
+          row captures at, so a walkthrough written against that layout sees the same points), or
+          a literal `WxH`. `orientation` turns the panel (`tablet, orientation=portrait` is
+          800x1280); the guest has no sensor to turn it any other way. The image identifies
+          itself as a phone whatever the panel, so a tablet row tests the app's wide layout, not
+          the system's tablet behaviors. `os` is not a field: the image is one OpenHarmony
+          release. `slug` and `optional` work as they do for `ios-devices`; the two default rows
+          keep their literal `phone` and `tablet` slugs.
+        type: string
+        required: false
+        default: ""
       app-id:
         description: >-
           The app's bundle id. When set, the linux legs verify the packed flatpak actually installs
@@ -840,6 +863,7 @@ jobs:
           IOS_DEVICES_IN: ${{ inputs.ios-devices }}
           ANDROID_PROFILES_IN: ${{ inputs.android-profiles }}
           ANDROID_DEVICES_IN: ${{ inputs.android-devices }}
+          HARMONY_DEVICES_IN: ${{ inputs.harmony-devices }}
           TARGET_PACKAGES_IN: ${{ inputs.target-packages }}
           TARGET_SETUP_IN: ${{ inputs.target-setup }}
           FLAVORS_IN: ${{ inputs.flavors }}
@@ -912,7 +936,8 @@ jobs:
           ANDROID_P="${ANDROID_PROFILES_IN:-}"
           IOS_D="${IOS_DEVICES_IN:-}"
           ANDROID_D="${ANDROID_DEVICES_IN:-}"
-          case "$IOS_P$ANDROID_P$IOS_D$ANDROID_D" in
+          HARMONY_D="${HARMONY_DEVICES_IN:-}"
+          case "$IOS_P$ANDROID_P$IOS_D$ANDROID_D$HARMONY_D" in
             *'"'*) echo "::error::a device profile may not contain a double quote"; exit 1 ;;
           esac
           # The `-devices` inputs supersede the `-profiles` ones; naming both is a mistake worth
@@ -966,7 +991,8 @@ jobs:
           check_per_target target-setup "${TARGET_SETUP_IN:-}"
           matrix=$(printf '%s' "$matrix" | jq -c \
             --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" \
-            --arg androiddev "$ANDROID_D" --arg packages "${TARGET_PACKAGES_IN:-}" \
+            --arg androiddev "$ANDROID_D" --arg harmonydev "$HARMONY_D" \
+            --arg packages "${TARGET_PACKAGES_IN:-}" \
             --arg setup "${TARGET_SETUP_IN:-}" --arg tscripts "${TARGET_SCRIPTS_IN:-}" '
             def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-")
                          | sub("^-+"; "") | sub("-+$"; "");
@@ -1043,6 +1069,13 @@ jobs:
                   slug: "phone", optional: false},
                  {device: "medium_tablet", os: "36", orientation: "landscape", density: "",
                   slug: "tablet", optional: false}]
+              elif $t == "harmony-arkui" then
+                # One Oniro image on two panels (`harmony-devices` above): the phone every run
+                # captured on before, and a landscape tablet the size of the Android one.
+                [{device: "phone",  os: "", orientation: "portrait",  density: "",
+                  slug: "phone", optional: false},
+                 {device: "tablet", os: "", orientation: "landscape", density: "",
+                  slug: "tablet", optional: false}]
               else [] end;
             { include: [
                 .include[] as $r
@@ -1056,6 +1089,9 @@ jobs:
                      (if ($androiddev | ascii_downcase | test("[a-z]")) then
                         (devices($androiddev) | map(.os |= gsub("[^0-9]"; "")))
                       else profiles($android) end)
+                   elif $r.target == "harmony-arkui" then
+                     (if ($harmonydev | ascii_downcase | test("[a-z]")) then devices($harmonydev)
+                      else [] end)
                    else [] end) as $named
                 | (if ($named | length) > 0 then $named
                    elif (fallback($r.target) | length) > 0 then fallback($r.target)
@@ -1952,14 +1988,30 @@ jobs:
         with:
           path: ~/.cache/oniro-emulator/v6.1
           key: oniro-emulator-v6.1-oniro_emulator.zip
-      - name: Boot the Oniro emulator (day devices boot -p harmony-arkui --headless)
+      - name: Boot the Oniro emulator (${{ matrix.profile }})
         id: ohosemu
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
         continue-on-error: ${{ inputs.tolerate-failures }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+          DEVICE_ORIENTATION: ${{ matrix.device_orientation }}
         run: |
           set -euo pipefail
-          if ! "$DAY_BIN" devices boot --help | grep -Fq "starts Oniro without a window"; then
+          HELP="$("$DAY_BIN" devices boot --help)"
+          if ! grep -Fq "starts Oniro without a window" <<< "$HELP"; then
             echo "::error::This workflow requires a current day CLI with HarmonyOS headless device boot. Update day-version."
+            exit 1
+          fi
+          # The panel (`harmony-devices`): `--device phone|tablet|WxH` and `--orientation`, which
+          # a CLI from before panels were selectable refuses. That CLI boots the phone and only
+          # the phone, so the row that asked for anything else fails here rather than publishing
+          # phone captures under a tablet's name.
+          args=(devices boot -p harmony-arkui --headless)
+          if grep -Fq "names the panel" <<< "$HELP"; then
+            [ -n "${PROFILE:-}" ] && args+=(--device "$PROFILE")
+            [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
+          elif [ -n "${PROFILE:-}" ] && [ "$PROFILE" != phone ]; then
+            echo "::error::this day CLI boots the Oniro emulator on its phone panel only; the $PROFILE row needs a CLI with 'day devices boot --device' for harmony-arkui. Update day-version."
             exit 1
           fi
           ZIP="$HOME/.cache/oniro-emulator/v6.1/oniro_emulator.zip"
@@ -1972,8 +2024,8 @@ jobs:
           unzip -q "$ZIP" -d "$RUNNER_TEMP/oniro-emulator"
           IMAGES="$(dirname "$(find "$RUNNER_TEMP/oniro-emulator" -name bzImage -print -quit)")"
           echo "DAY_OHOS_EMULATOR=$IMAGES" >> "$GITHUB_ENV"
-          DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" devices boot -p harmony-arkui --headless
-      - name: Run dayscripts (harmony emulator)
+          DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" "${args[@]}"
+      - name: Run dayscripts (harmony emulator · ${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.ohosemu.outcome == 'success'
         continue-on-error: ${{ inputs.tolerate-failures }}
         env:
