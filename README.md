@@ -710,6 +710,12 @@ binary under a key naming the commit it was built from, `day-cli-<runner image>-
 The action resolves the branch or tag to that commit and builds exactly it, so a leg restores the
 CLI only when the commit is unchanged, and a new commit always builds.
 
+Two outputs say what was installed. `cargo-root` is the directory cargo installed into, so
+`cargo install --list --root <it>` shows the build's record: `?branch=main#<short>` for an uncached
+git install, `?rev=<commit>#<short>` for a cached one. `commit` is the full commit a cached
+install was built from. A check that the CLI is a build of `main` reads the record from
+`cargo-root`, since the cache does not install into `~/.cargo`.
+
 ### `sign-package`
 
 Signs a packed app with key material named on the command line, through `day sign apply`, which
