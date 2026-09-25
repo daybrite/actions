@@ -248,3 +248,30 @@ class UploadActionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompositeOutputTests(unittest.TestCase):
+    """A composite action's `outputs.<x>.value` is evaluated outside its steps, where
+    `github.action_path` is empty: `store-rules` once declared its path that way and every
+    store upload received `/store-rules.toml` (Day-Showcase, 2026-09-25). Paths computed from the
+    action's own location go through a step's output."""
+
+    ACTIONS = sorted((ROOT / ".github/actions").glob("*/action.yml"))
+
+    def test_composite_outputs_come_from_steps(self):
+        self.assertTrue(self.ACTIONS)
+        for path in self.ACTIONS:
+            doc = yaml.safe_load(path.read_text())
+            if (doc.get("runs") or {}).get("using") != "composite":
+                continue
+            for name, out in (doc.get("outputs") or {}).items():
+                value = str(out.get("value", ""))
+                self.assertNotIn("github.action_path", value, f"{path.name}: output {name!r}")
+                self.assertIn("steps.", value, f"{path.name}: output {name!r} must come from a step")
+
+    def test_store_rules_names_its_file_from_a_step(self):
+        doc = yaml.safe_load((ROOT / ".github/actions/store-rules/action.yml").read_text())
+        self.assertEqual(doc["outputs"]["path"]["value"], "${{ steps.locate.outputs.path }}")
+        locate = [s for s in doc["runs"]["steps"] if s.get("id") == "locate"][0]
+        self.assertIn("GITHUB_OUTPUT", locate["run"])
+        self.assertIn("store-rules.toml", locate["run"])

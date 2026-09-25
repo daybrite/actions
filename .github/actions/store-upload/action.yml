@@ -145,6 +145,10 @@ runs:
           exit 1
         fi
         [ -f "$INDEX" ] || { echo "::error::$INDEX is not a gallery index (day screenshot index writes one)"; exit 1; }
+        # A rules path that names nothing is the caller's mistake, said as such rather than as
+        # the CLI's "No such file" (a composite output that evaluated empty once handed this
+        # `/store-rules.toml`, 2026-09-25).
+        [ -z "${DAY_STORE_RULES:-}" ] || [ -f "$DAY_STORE_RULES" ] || { echo "::error::rules: $DAY_STORE_RULES is not a file — the store-rules action's path output, or a file in the checkout"; exit 1; }
         # The set the store would refuse is refused here, before anything is staged or sent.
         "$DAY_BIN" $FLAVOR_ARGS store screenshots "$INDEX" -p "$TARGET"
 
@@ -164,6 +168,7 @@ runs:
           ios-uikit|android-mdc) ;;
           *) echo "::error::day store stage writes no lanes for $TARGET; give the app a fastlane/Fastfile with the lane"; exit 1 ;;
         esac
+        [ -z "${DAY_STORE_RULES:-}" ] || [ -f "$DAY_STORE_RULES" ] || { echo "::error::rules: $DAY_STORE_RULES is not a file — the store-rules action's path output, or a file in the checkout"; exit 1; }
         # `day store stage` holds the listing to the store rules (lint's errors, and placeholder
         # text unless allowed), writes the fastlane tree from store/storefront.toml, and places
         # the listing's screenshots from the index.

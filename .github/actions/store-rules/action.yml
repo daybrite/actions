@@ -9,9 +9,18 @@ description: >-
 outputs:
   path:
     description: The rules file, for DAY_STORE_RULES or `--rules`.
-    value: ${{ github.action_path }}/store-rules.toml
+    # From the step, not `github.action_path` here: that context is set only while the
+    # action's steps run, and in a composite action's `outputs` it evaluates to nothing, which
+    # handed every caller `/store-rules.toml` (Day-Showcase's store uploads, 2026-09-25).
+    value: ${{ steps.locate.outputs.path }}
 runs:
   using: composite
   steps:
-    - shell: bash
-      run: echo "store rules from ${{ github.action_path }}/store-rules.toml"
+    - id: locate
+      shell: bash
+      run: |
+        set -euo pipefail
+        rules="${{ github.action_path }}/store-rules.toml"
+        [ -f "$rules" ] || { echo "::error::store-rules.toml is not beside this action ($rules)"; exit 1; }
+        echo "path=$rules" >> "$GITHUB_OUTPUT"
+        echo "store rules from $rules"
