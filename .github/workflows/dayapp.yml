@@ -2659,6 +2659,31 @@ jobs:
           fi
           (cd shots-merged && zip -qr "$GITHUB_WORKSPACE/assets/screenshots.zip" .)
           ls -l assets/screenshots.zip
+      # The listing's screenshots against the stores' rules, before the release publishes them:
+      # the same check `day store stage` and the App Fair's queue run later, here on the merged
+      # index, so a listing a store would refuse fails the app's own release with the reason in
+      # its log rather than a queue three repositories away (Games-Fair v2.1.9, 2026-09-25: the
+      # index's store lists were empty). Only a target whose listing declares screenshots is
+      # held to it; a target that declares none has nothing to send.
+      - name: Check the listings' screenshots against the stores
+        if: ${{ steps.daycli.outcome == 'success' && steps.shots.outputs.merged == 'true' }}
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          [ -f assets/storefront.json ] && [ -f assets/gallery.json ] || { echo "no storefront export or index to check"; exit 0; }
+          failed=0
+          for t in $(jq -r '.storefront.targets // {} | to_entries[]
+                              | select(((.value.screenshots // {}) | length) > 0
+                                       or ([(.value.stores // {})[] | (.screenshots // {}) | length] | add // 0) > 0)
+                              | .key' assets/storefront.json); do
+            case "$t" in ios-uikit|android-mdc) ;; *) continue ;; esac
+            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" store screenshots assets/gallery.json -p "$t" || failed=1
+          done
+          if [ "$failed" != 0 ]; then
+            echo "::error::a store would refuse this release's listing screenshots (the reasons are above): fix store/storefront.toml or the device profiles, then re-tag"
+            exit 1
+          fi
       # A curl-able `launch.sh` beside the packages, so the app has a one-line try-it path:
       #   curl -fsSL https://github.com/<repo>/releases/latest/download/launch.sh | bash
       # Generated per release and pinned to its own tag, so the URL a user fetches is what picks

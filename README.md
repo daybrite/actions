@@ -36,6 +36,11 @@ Beside the packages, a release carries every capture the run took:
 | `gallery.json` | that same index on its own, so a tool can read what a release contains without downloading the images |
 | `screenshots-<target>.zip` | one target's captures, for someone who wants just those |
 
+Before the release publishes them, the job holds the listing's screenshots to the stores' rules
+(`day store screenshots`, for every store target whose listing declares screenshots) and fails
+with the store's reason when one would refuse the set: the same check the upload jobs and the
+App Fair's queue run, moved to where the app's author sees it first.
+
 `gallery.json` is `day screenshot index`'s merge of the per-target and per-device indexes, read
 from each artifact as its own root (two device profiles' artifacts can carry an index at the same
 path, and a merged download garbles the collision): file name, shot id,
