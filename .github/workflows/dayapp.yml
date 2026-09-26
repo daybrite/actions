@@ -579,6 +579,29 @@ on:
         type: string
         required: false
         default: "main"
+      tab-release:
+        description: >-
+          Give the website a version tab for the latest release, built from that release's own
+          assets. It owns the site's root while it is shown.
+        type: boolean
+        required: false
+        default: true
+      tab-pre-release:
+        description: >-
+          Give the website a version tab for a pending pre-release (the newest published
+          pre-release newer than the latest release), built from that pre-release's own assets
+          and placed between the release and main. Its pages say it may be unstable and link the
+          release. No tab when there is no such pre-release.
+        type: boolean
+        required: false
+        default: true
+      tab-main:
+        description: >-
+          Give the website a version tab for this run's build of the default branch, from the
+          artifacts the run produced. Its pages carry the development-build notice.
+        type: boolean
+        required: false
+        default: true
       deploy-website:
         description: >-
           Whether this call deploys the project website (daysite) to the caller's GitHub Pages.
@@ -3417,20 +3440,47 @@ jobs:
       # generator reads as "no release channel", the same as a local preview.
       - name: Look up the latest release
         id: release
+        if: ${{ inputs.tab-release }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/release.json" 2>/dev/null; then
-            jq '[.assets[] | {name, size}]' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/release-assets.json"
-            echo "tag=$(jq -r .tag_name "$RUNNER_TEMP/release.json")" | tee -a "$GITHUB_OUTPUT"
+            TAG="$(jq -r .tag_name "$RUNNER_TEMP/release.json")"
+            jq '[.assets[] | {name, size}]' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/assets-$TAG.json"
+            echo "tag=$TAG" | tee -a "$GITHUB_OUTPUT"
           else
-            echo '[]' > "$RUNNER_TEMP/release-assets.json"
-            echo "::notice::no published release — the site carries the development channel alone"
+            echo "::notice::no published release, so the site has no release tab"
           fi
-      - name: Download the release's screenshots
-        if: ${{ steps.release.outputs.tag != '' }}
+      # A pre-release is pending when it was published after the latest release: a beta of the
+      # next version, waiting to be marked Latest. An older pre-release (a beta of a version since
+      # released) is history, and gets no tab. Compared against the latest release even when its
+      # own tab is off, so turning that tab off does not promote an old beta.
+      - name: Look up a pending pre-release
+        id: prerelease
+        if: ${{ inputs.tab-pre-release }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          LATEST_AT="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .published_at 2>/dev/null || true)"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" > "$RUNNER_TEMP/releases.json"
+          jq --arg after "${LATEST_AT:-}" \
+            '[.[] | select(.prerelease and (.draft | not) and .published_at != null
+                           and .published_at > $after)]
+             | sort_by(.published_at) | last // empty' \
+            "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/prerelease.json"
+          if [ -s "$RUNNER_TEMP/prerelease.json" ]; then
+            TAG="$(jq -r .tag_name "$RUNNER_TEMP/prerelease.json")"
+            jq '[.assets[] | {name, size}]' "$RUNNER_TEMP/prerelease.json" > "$RUNNER_TEMP/assets-$TAG.json"
+            echo "tag=$TAG" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "no pre-release newer than the latest release, so the site has no pre-release tab"
+          fi
+      - name: Download each release's screenshots
+        if: ${{ steps.release.outputs.tag != '' || steps.prerelease.outputs.tag != '' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -3441,37 +3491,44 @@ jobs:
           # (`gh api` above is unaffected: it spells the repository in its path.)
           GH_REPO: ${{ github.repository }}
           PROJECT_PATH: ${{ inputs.project-path }}
-          TAG: ${{ steps.release.outputs.tag }}
+          REL_TAG: ${{ steps.release.outputs.tag }}
+          PRE_TAG: ${{ steps.prerelease.outputs.tag }}
         run: |
           set -euo pipefail
-          mkdir -p rel-zips rel-shots
-          # The merged `screenshots.zip` when the release has one, and the per-target zips
-          # otherwise — every Day release carried those before the bundle existed, and they
-          # unzip to the same capture tree, so a release made before this change still gets a
-          # full gallery.
-          if jq -e 'any(.name == "screenshots.zip")' "$RUNNER_TEMP/release-assets.json" >/dev/null; then
-            gh release download "$TAG" --dir rel-zips --clobber --pattern 'screenshots.zip'
-          else
-            gh release download "$TAG" --dir rel-zips --clobber --pattern 'screenshots-*.zip'
-          fi
-          # Each zip unpacks into its own directory first: two device profiles' zips can both
-          # carry `<target>/gallery.json`, and the index is read from those roots before the
-          # captures are folded into one tree.
-          roots=()
-          for z in rel-zips/*.zip; do
-            [ -e "$z" ] || continue
-            dir="rel-in/$(basename "$z" .zip)"
-            mkdir -p "$dir" && unzip -qo "$z" -d "$dir"
-            roots+=("$dir")
-            cp -R "$dir/." rel-shots/
-          done
-          # A merged bundle carries the index at its root; per-target zips carry only their own,
-          # so the CLI merges them the way it just did for the development channel.
-          if [ ! -f rel-shots/gallery.json ] && [ "${{ steps.daycli.outcome }}" = success ] && [ "${#roots[@]}" -gt 0 ]; then
-            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
-              --screenshot-paths "${roots[@]}" --out rel-shots/gallery.json
-          fi
-          echo "$(find rel-shots -name '*.png' | wc -l) capture(s) from $TAG"
+          fetch() { # $1 = tag, $2 = capture tree to fill (rel-shots / pre-shots)
+            local tag="$1" out="$2" assets="$RUNNER_TEMP/assets-$1.json"
+            mkdir -p "zips-$out" "$out"
+            # The merged `screenshots.zip` when the release has one, and the per-target zips
+            # otherwise — every Day release carried those before the bundle existed, and they
+            # unzip to the same capture tree, so a release made before this change still gets a
+            # full gallery.
+            if jq -e 'any(.name == "screenshots.zip")' "$assets" >/dev/null; then
+              gh release download "$tag" --dir "zips-$out" --clobber --pattern 'screenshots.zip'
+            else
+              gh release download "$tag" --dir "zips-$out" --clobber --pattern 'screenshots-*.zip'
+            fi
+            # Each zip unpacks into its own directory first: two device profiles' zips can both
+            # carry `<target>/gallery.json`, and the index is read from those roots before the
+            # captures are folded into one tree.
+            local roots=()
+            for z in "zips-$out"/*.zip; do
+              [ -e "$z" ] || continue
+              local dir
+              dir="in-$out/$(basename "$z" .zip)"
+              mkdir -p "$dir" && unzip -qo "$z" -d "$dir"
+              roots+=("$dir")
+              cp -R "$dir/." "$out/"
+            done
+            # A merged bundle carries the index at its root; per-target zips carry only their
+            # own, so the CLI merges them the way it just did for the development channel.
+            if [ ! -f "$out/gallery.json" ] && [ "${{ steps.daycli.outcome }}" = success ] && [ "${#roots[@]}" -gt 0 ]; then
+              "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
+                --screenshot-paths "${roots[@]}" --out "$out/gallery.json"
+            fi
+            echo "$(find "$out" -name '*.png' | wc -l) capture(s) from $tag"
+          }
+          if [ -n "${REL_TAG:-}" ]; then fetch "$REL_TAG" rel-shots; fi
+          if [ -n "${PRE_TAG:-}" ]; then fetch "$PRE_TAG" pre-shots; fi
       # --- shared inputs -----------------------------------------------------------------------
       # The raster favicon set (apple-touch, PWA tile, legacy favicon) comes from the renderer
       # every platform's icon does: `day icon build -p web-dom` writes the size-exact png/ family
@@ -3510,6 +3567,8 @@ jobs:
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
           TAG: ${{ steps.release.outputs.tag }}
+          PRE_TAG: ${{ steps.prerelease.outputs.tag }}
+          TAB_MAIN: ${{ inputs.tab-main }}
           BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -3522,10 +3581,18 @@ jobs:
           # failing that, the largest PNG under resource/icons/. Nothing else supplies the site
           # an icon, so a project without any gets the template's defaults and a line in this
           # log saying why.
+          # The tabs, in picker order: the release, a pending pre-release, then main. The
+          # tab-* inputs decide which are wanted; a release or pre-release tab also needs one to
+          # exist (the lookups above leave their tag empty otherwise).
+          TAG="${TAG:-}" PRE_TAG="${PRE_TAG:-}"
           jq -n \
-            --arg tag "${TAG:-}" --arg version "${TAG#v}" \
+            --arg tag "$TAG" --arg version "${TAG#v}" \
             --arg relshots "$GITHUB_WORKSPACE/rel-shots" \
-            --arg relassets "$RUNNER_TEMP/release-assets.json" \
+            --arg relassets "$RUNNER_TEMP/assets-$TAG.json" \
+            --arg pretag "$PRE_TAG" --arg preversion "${PRE_TAG#v}" \
+            --arg preshots "$GITHUB_WORKSPACE/pre-shots" \
+            --arg preassets "$RUNNER_TEMP/assets-$PRE_TAG.json" \
+            --argjson main "$TAB_MAIN" \
             --arg branch "$BRANCH" --arg sha "$GITHUB_SHA" \
             --arg shots "$GITHUB_WORKSPACE/shots" \
             --arg dist "$GITHUB_WORKSPACE/dist-in" \
@@ -3533,9 +3600,17 @@ jobs:
             '[ (if $tag == "" then empty else
                  { id: "release", label: $version, tag: $tag,
                    screenshots: $relshots, releaseAssets: $relassets } end),
-               { id: "main", label: $branch, ref: $branch, commit: $sha, development: true,
-                 screenshots: $shots, downloads: $dist, runURL: $run } ]' \
+               (if $pretag == "" then empty else
+                 { id: "prerelease", label: $preversion, tag: $pretag, prerelease: true,
+                   screenshots: $preshots, releaseAssets: $preassets } end),
+               (if $main then
+                 { id: "main", label: $branch, ref: $branch, commit: $sha, development: true,
+                   screenshots: $shots, downloads: $dist, runURL: $run } else empty end) ]' \
             > "$RUNNER_TEMP/channels.json"
+          if [ "$(jq length "$RUNNER_TEMP/channels.json")" = 0 ]; then
+            echo "::error::the website has no version tab to publish: tab-main is off, and there is no release or pending pre-release for tab-release or tab-pre-release to show"
+            exit 1
+          fi
           node daysite/scripts/generate-site.mjs "app/${PROJECT_PATH:-.}" "$SITE_DIR" \
             --channels "$RUNNER_TEMP/channels.json" \
             --repo "$GITHUB_REPOSITORY" --storefront "$RUNNER_TEMP/day-storefront.json"
@@ -3557,7 +3632,6 @@ jobs:
           # No checkout here for `gh release download` to read a remote from; see the release
           # screenshots step above.
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ steps.release.outputs.tag }}
           REQUIRE_WEB: ${{ inputs.deploy-web }}
         run: |
           set -euo pipefail
@@ -3580,34 +3654,36 @@ jobs:
             test -f "daysite/public/$2/index.html"
             echo "staged $(basename "$1") under /$2/"
           }
-          REL_DIR="$(jq -r '[.channels[] | select(.development | not) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
           MAIN_DIR="$(jq -r '[.channels[] | select(.development) | .webapp][0] // ""' "$SITE_DIR/channels.json")"
           # Remove template leftovers even when a channel has no artifact to replace them.
           # An old Day-Skies build in public/webapp otherwise posed as a release's web app.
-          for dir in "$REL_DIR" "$MAIN_DIR"; do
-            if [ -n "$dir" ]; then rm -rf "daysite/public/$dir"; fi
+          for dir in $(jq -r '.channels[].webapp' "$SITE_DIR/channels.json"); do
+            rm -rf "daysite/public/$dir"
           done
-          # This run's dist-web-dom artifact holds the one <stem>-web-dom.zip the build job staged.
+          # This run's dist-web-dom artifact holds the one <stem>-web-dom.zip the build job staged,
+          # and only the main tab publishes it.
           ZIP="$(find web-in -maxdepth 1 -name '*.zip' | head -1)"
-          if [ "$REQUIRE_WEB" = true ] && { [ -z "$ZIP" ] || [ -z "$MAIN_DIR" ]; }; then
-            echo "::error::deploy-web requires this run's web-dom dist and a development channel destination"
+          if [ "$REQUIRE_WEB" = true ] && [ -n "$MAIN_DIR" ] && [ -z "$ZIP" ]; then
+            echo "::error::deploy-web requires this run's web-dom dist for the main tab"
             exit 1
           fi
           if [ -n "$ZIP" ] && [ -n "$MAIN_DIR" ]; then stage "$ZIP" "$MAIN_DIR"; fi
-          if [ -n "$REL_DIR" ] && [ -n "${TAG:-}" ]; then
-            # The release's dist is chosen by name from its asset list. A `*-web-dom.zip` glob
+          # The release and the pre-release each host their own release's dist.
+          jq -r '.channels[] | select(.tag) | "\(.tag) \(.webapp)"' "$SITE_DIR/channels.json" |
+          while read -r TAG DIR; do
+            # The dist is chosen by name from the release's asset list. A `*-web-dom.zip` glob
             # also matches the web-dom target's screenshots-web-dom.zip, whose index.html is the
             # capture index, and that zip was published as the web app whenever `find` listed it
             # first (Day-Games v0.1.2).
-            REL_ZIP="$(jq -r '[.[].name | select(endswith("-web-dom.zip") and (startswith("screenshots-") | not))][0] // ""' "$RUNNER_TEMP/release-assets.json")"
+            REL_ZIP="$(jq -r '[.[].name | select(endswith("-web-dom.zip") and (startswith("screenshots-") | not))][0] // ""' "$RUNNER_TEMP/assets-$TAG.json")"
             if [ -z "$REL_ZIP" ]; then
-              echo "::notice::$TAG ships no web-dom dist, so the release channel has no hosted web app"
-            elif gh release download "$TAG" --dir rel-web --clobber --pattern "$REL_ZIP"; then
-              stage "rel-web/$REL_ZIP" "$REL_DIR"
+              echo "::notice::$TAG ships no web-dom dist, so its tab has no hosted web app"
+            elif gh release download "$TAG" --dir "rel-web/$TAG" --clobber --pattern "$REL_ZIP"; then
+              stage "rel-web/$TAG/$REL_ZIP" "$DIR"
             else
-              echo "::warning::could not download $REL_ZIP from $TAG, so the release channel has no hosted web app in this deploy"
+              echo "::warning::could not download $REL_ZIP from $TAG, so its tab has no hosted web app in this deploy"
             fi
-          fi
+          done
           du -sh daysite/public/* 2>/dev/null || true
       - name: Build the site
         working-directory: daysite
