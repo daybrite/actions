@@ -725,6 +725,14 @@ git install, `?rev=<commit>#<short>` for a cached one. `commit` is the full comm
 install was built from. A check that the CLI is a build of `main` reads the record from
 `cargo-root`, since the cache does not install into `~/.cargo`.
 
+### `deploy-pages`
+
+Deploys an uploaded Pages artifact (`artifact-id`, from `actions/upload-pages-artifact`) under a
+Pages build version of its own: the commit, the run and the attempt, unless `build-version` names
+one. `actions/deploy-pages` always sends the commit, and Pages keeps serving the first deployment
+of a commit, so the release event's rebuild of a commit `main` already deployed was reported a
+success and never served. The job needs `pages: write` and `id-token: write`. Outputs `page_url`.
+
 ### `sign-package`
 
 Signs a packed app with key material named on the command line, through `day sign apply`, which

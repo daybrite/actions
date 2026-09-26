@@ -1,0 +1,84 @@
+name: Deploy to GitHub Pages
+description: >-
+  Deploy an uploaded Pages artifact under a build version of this action's choosing, which
+  actions/deploy-pages cannot do: it always sends the commit, and Pages keeps serving the first
+  deployment of a commit, so a second run of the same commit (a push to main, then the release
+  event when that commit's tag is marked Latest) is reported a success and never served.
+
+inputs:
+  artifact-id:
+    description: The artifact to deploy, as actions/upload-pages-artifact's `artifact_id` output names it.
+    required: true
+  build-version:
+    description: >-
+      Pages' build version for this deployment. Empty means the commit, the run and the attempt,
+      which differs for every run, so every run's deploy is served.
+    required: false
+    default: ""
+  token:
+    description: "A token with `pages: write`."
+    required: false
+    default: ${{ github.token }}
+  timeout-seconds:
+    description: How long to wait for Pages to report the deployment finished.
+    required: false
+    default: "600"
+
+outputs:
+  page_url:
+    description: The URL the site is served at.
+    value: ${{ steps.deploy.outputs.page_url }}
+
+runs:
+  using: composite
+  steps:
+    # The same three calls actions/deploy-pages@v5 makes (src/internal/api-client.js): an OIDC
+    # token from the runner, `POST /pages/deployments` with the artifact, the build version and the
+    # token, then `GET /pages/deployments/{id}` until it settles. Only the build version is ours.
+    - name: Deploy
+      id: deploy
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        ARTIFACT_ID: ${{ inputs.artifact-id }}
+        BUILD_VERSION_IN: ${{ inputs.build-version }}
+        TIMEOUT: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        BUILD="${BUILD_VERSION_IN:-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT}"
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::error::deploying to Pages needs an OIDC token: grant the job \`id-token: write\`"
+          exit 1
+        fi
+        OIDC="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)"
+        echo "::add-mask::$OIDC"
+
+        echo "Creating a Pages deployment of artifact $ARTIFACT_ID as build version $BUILD"
+        CREATED="$(gh api -X POST "repos/$GITHUB_REPOSITORY/pages/deployments" \
+          -F artifact_id="$ARTIFACT_ID" -f pages_build_version="$BUILD" -f oidc_token="$OIDC")"
+        ID="$(jq -r '.id // (.status_url // "" | split("/") | last) // empty' <<<"$CREATED")"
+        ID="${ID:-$BUILD}"
+        URL="$(jq -r '.page_url // empty' <<<"$CREATED")"
+        echo "page_url=$URL" >> "$GITHUB_OUTPUT"
+        echo "Created deployment $ID for $URL"
+
+        deadline=$(( $(date +%s) + TIMEOUT ))
+        while :; do
+          STATUS="$(gh api "repos/$GITHUB_REPOSITORY/pages/deployments/$ID" -q .status 2>/dev/null || echo unknown_status)"
+          case "$STATUS" in
+            succeed)
+              echo "Deployed: $URL"
+              exit 0 ;;
+            deployment_failed|deployment_content_failed|deployment_cancelled|deployment_lost)
+              echo "::error::Pages deployment $ID ended in $STATUS"
+              exit 1 ;;
+          esac
+          if [ "$(date +%s)" -ge "$deadline" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/pages/deployments/$ID/cancel" >/dev/null 2>&1 || true
+            echo "::error::Pages deployment $ID was still $STATUS after ${TIMEOUT}s, so it was cancelled"
+            exit 1
+          fi
+          echo "Current status: $STATUS"
+          sleep 5
+        done
