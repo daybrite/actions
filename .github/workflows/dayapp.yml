@@ -3254,9 +3254,16 @@ jobs:
               echo "::notice::a duplicate '${ART}' artifact (id $id) needs deleting but the token lacks 'actions: write'"
             fi
           done
+      # Pages keys a deployment by its build version, which deploy-pages takes from GITHUB_SHA and
+      # offers no input for. Two runs of ONE commit (a push to main, then the release event when
+      # that commit's tag is marked Latest) therefore ask for the same deployment: Pages reports
+      # the second a success and keeps serving the first. That is how Games-Fair v2.1.11's site
+      # went on showing v2.1.5 (2026-09-25). The run and attempt make each deploy its own.
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v5
+        env:
+          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         with:
           artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
 
@@ -3654,8 +3661,15 @@ jobs:
               echo "::notice::a duplicate '${ART}' artifact (id $id) needs deleting but the token lacks 'actions: write'"
             fi
           done
+      # Pages keys a deployment by its build version, which deploy-pages takes from GITHUB_SHA and
+      # offers no input for. Two runs of ONE commit (a push to main, then the release event when
+      # that commit's tag is marked Latest) therefore ask for the same deployment: Pages reports
+      # the second a success and keeps serving the first. That is how Games-Fair v2.1.11's site
+      # went on showing v2.1.5 (2026-09-25). The run and attempt make each deploy its own.
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v5
+        env:
+          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         with:
           artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}

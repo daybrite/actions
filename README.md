@@ -649,6 +649,10 @@ independent, so one caller can attach packages on tags *and* deploy the web buil
 main. The deploy waits for every build leg to succeed, so a run whose build failed or never ran
 leaves the published web app as it was.
 
+Each deploy is its own Pages build version (the commit, the run and the attempt), so marking a
+release Latest republishes the site even though the push to `main` already deployed that same
+commit; with the commit alone, Pages would keep serving the earlier deploy.
+
 #### Re-running failed legs
 
 A leg that fails, a dayscript included, fails the run, and neither the release, the web deploy nor
