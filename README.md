@@ -652,9 +652,9 @@ independent, so one caller can attach packages on tags *and* deploy the web buil
 main. The deploy waits for every build leg to succeed, so a run whose build failed or never ran
 leaves the published web app as it was.
 
-Each deploy is its own Pages build version (the commit, the run and the attempt), so marking a
-release Latest republishes the site even though the push to `main` already deployed that same
-commit; with the commit alone, Pages would keep serving the earlier deploy.
+Pages keys a deployment by its commit, so a second deploy of a commit it has already deployed is
+reported a success and not served. Marking a release Latest rebuilds the site from the commit the
+push to `main` already deployed, so that site catches up at the next deploy of a new commit.
 
 #### Re-running failed legs
 
@@ -727,14 +727,6 @@ Two outputs say what was installed. `cargo-root` is the directory cargo installe
 git install, `?rev=<commit>#<short>` for a cached one. `commit` is the full commit a cached
 install was built from. A check that the CLI is a build of `main` reads the record from
 `cargo-root`, since the cache does not install into `~/.cargo`.
-
-### `deploy-pages`
-
-Deploys an uploaded Pages artifact (`artifact-id`, from `actions/upload-pages-artifact`) under a
-Pages build version of its own: the commit, the run and the attempt, unless `build-version` names
-one. `actions/deploy-pages` always sends the commit, and Pages keeps serving the first deployment
-of a commit, so the release event's rebuild of a commit `main` already deployed was reported a
-success and never served. The job needs `pages: write` and `id-token: write`. Outputs `page_url`.
 
 ### `sign-package`
 

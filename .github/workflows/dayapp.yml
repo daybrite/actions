@@ -3243,7 +3243,6 @@ jobs:
       # second call of this workflow in one run names its packages `<prefix>dist-<target>`, and
       # its Pages artifact must not collide either, should both calls ever deploy.
       - name: Upload the Pages artifact
-        id: pages-artifact
         uses: actions/upload-pages-artifact@v5
         with:
           name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
@@ -3278,18 +3277,17 @@ jobs:
               echo "::notice::a duplicate '${ART}' artifact (id $id) needs deleting but the token lacks 'actions: write'"
             fi
           done
-      # Pages keys a deployment by its build version, and actions/deploy-pages always sends the
-      # commit (it reads GITHUB_SHA, which a step cannot override). Two runs of ONE commit (a push
-      # to main, then the release event when that commit's tag is marked Latest) then ask for the
-      # same deployment, and Pages reports the second a success while serving the first: that is
-      # how Games-Fair's site stayed on v2.1.5 after v2.1.11, then on v2.1.11 after v2.1.12. This
-      # action makes the same Pages API calls with the commit, the run and the attempt as the
-      # build version, so every run's deploy is the one served.
+      # Pages keys a deployment by its build version, which deploy-pages always sends as the
+      # commit. A second deploy of a commit Pages has already deployed (a push to main, then the
+      # release event when that commit's tag is marked Latest) is reported a success and not
+      # served, so such a site catches up at the next deploy of a new commit. A build version of
+      # our own (`<sha>-<run>-<attempt>`) is no way round it: Pages answers 404 to anything that
+      # is not a commit (Day-Trader, Day-Showcase, 2026-09-26).
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: daybrite/actions/.github/actions/deploy-pages@main
+        uses: actions/deploy-pages@v5
         with:
-          artifact-id: ${{ steps.pages-artifact.outputs.artifact_id }}
+          artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
 
   # --- Project website (daysite) -------------------------------------------------------------
   # When the repository has website/site.toml, this job replaces the bare root deploy above: it
@@ -3705,7 +3703,6 @@ jobs:
       # second call of this workflow in one run names its packages `<prefix>dist-<target>`, and
       # its Pages artifact must not collide either, should both calls ever deploy.
       - name: Upload the Pages artifact
-        id: pages-artifact
         uses: actions/upload-pages-artifact@v5
         with:
           name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
@@ -3739,15 +3736,14 @@ jobs:
               echo "::notice::a duplicate '${ART}' artifact (id $id) needs deleting but the token lacks 'actions: write'"
             fi
           done
-      # Pages keys a deployment by its build version, and actions/deploy-pages always sends the
-      # commit (it reads GITHUB_SHA, which a step cannot override). Two runs of ONE commit (a push
-      # to main, then the release event when that commit's tag is marked Latest) then ask for the
-      # same deployment, and Pages reports the second a success while serving the first: that is
-      # how Games-Fair's site stayed on v2.1.5 after v2.1.11, then on v2.1.11 after v2.1.12. This
-      # action makes the same Pages API calls with the commit, the run and the attempt as the
-      # build version, so every run's deploy is the one served.
+      # Pages keys a deployment by its build version, which deploy-pages always sends as the
+      # commit. A second deploy of a commit Pages has already deployed (a push to main, then the
+      # release event when that commit's tag is marked Latest) is reported a success and not
+      # served, so such a site catches up at the next deploy of a new commit. A build version of
+      # our own (`<sha>-<run>-<attempt>`) is no way round it: Pages answers 404 to anything that
+      # is not a commit (Day-Trader, Day-Showcase, 2026-09-26).
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: daybrite/actions/.github/actions/deploy-pages@main
+        uses: actions/deploy-pages@v5
         with:
-          artifact-id: ${{ steps.pages-artifact.outputs.artifact_id }}
+          artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
