@@ -79,6 +79,10 @@ build; `--target <combo>` overrides it and `--yes` skips the prompt (when piping
 `bash -s --`). `launch.ps1` takes `-Yes`, or `DAY_LAUNCH_YES=1` under `| iex`, which cannot pass
 arguments. Neither script is generated when a release ships nothing they can run.
 
+The release notes are GitHub's own, generated from the pull requests and contributors since the
+previous release; nothing is added to them. A project with a website shows these commands instead,
+pinned to the release it describes, at the bottom of each desktop platform's download card.
+
 Call it from your app repository:
 
 ```yaml
