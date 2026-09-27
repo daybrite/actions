@@ -154,10 +154,13 @@ class PlanTests(unittest.TestCase):
         # The tag still reads as a release ref, which is what keeps the website job's gate on.
         self.assertEqual(values["release"], "true")
 
-    def test_a_release_event_without_the_staging_mode_warns(self):
+    def test_a_release_event_in_any_release_mode_rebuilds_the_website(self):
+        # Every Day app listens for `release: released`, whatever its release-mode: a release a
+        # maintainer marks Latest by hand rebuilds the site the same way a staged one does.
         result, values = self.plan(GITHUB_EVENT_NAME="release")
         self.assertEqual(values["promotion"], "true")
-        self.assertIn("::warning::a release event arrived", result.stdout)
+        self.assertNotIn("::warning::", result.stdout)
+        self.assertIn("rebuilds the website", result.stdout)
 
     def test_store_screenshots_takes_the_default_android_profiles(self):
         """The default tablet is captured halved and `day store stage` scales it up for Google

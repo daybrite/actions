@@ -1235,7 +1235,7 @@ jobs:
           promotion=false
           if [ "$GITHUB_EVENT_NAME" = release ]; then
             promotion=true
-            [ "$mode" = pre-release ] || echo "::warning::a release event arrived while release-mode is '$mode'; the trigger belongs with release-mode: pre-release, and this run rebuilds the site for nothing else"
+            echo "a release was marked Latest, so this run rebuilds the website against it"
           fi
           echo "promotion=$promotion" | tee -a "$GITHUB_OUTPUT"
 
