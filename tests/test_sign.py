@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/dayapp.yml"
 JOBS = yaml.safe_load(WORKFLOW.read_text())["jobs"]
 ACTION = yaml.safe_load((ROOT / ".github/actions/sign-package/action.yml").read_text())
-SIGN_PACKAGE = "daybrite/actions/.github/actions/sign-package@main"
+SIGN_PACKAGE = "daybrite/actions/.github/actions/sign-package@v1"
 STORE_TARGETS = ("ios-uikit", "android-mdc", "harmony-arkui")
 
 

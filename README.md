@@ -97,7 +97,7 @@ permissions:
   contents: read    # the repository's own jobs, if any, run its code read-only
 jobs:
   app:
-    uses: daybrite/actions/.github/workflows/dayapp.yml@main
+    uses: daybrite/actions/.github/workflows/dayapp.yml@v1
     permissions:
       contents: write # release-asset upload on tag builds
     secrets: inherit
@@ -668,7 +668,7 @@ permissions:
   contents: read
 jobs:
   app:
-    uses: daybrite/actions/.github/workflows/dayapp.yml@main
+    uses: daybrite/actions/.github/workflows/dayapp.yml@v1
     permissions:
       contents: write # release-asset upload on tag builds
       pages: write    # web-dom → GitHub Pages
@@ -739,7 +739,7 @@ the Rust std for its cross-compile, the SDK a mobile target builds through, and 
 than spelled out again in every workflow.
 
 ```yaml
-- uses: daybrite/actions/.github/actions/setup-day-deps@main
+- uses: daybrite/actions/.github/actions/setup-day-deps@v1
   with:
     target: linux-gtk   # required; any of the 12 combos
     pack: true          # flatpak-builder + linuxdeploy (linux), NSIS (windows-xaml)
@@ -784,7 +784,7 @@ A package named `<stem>-unsigned.<ext>` is signed to `<stem>.<ext>` with its pro
 renamed along. The caller sets up the CLI first (`setup-day-cli`).
 
 ```yaml
-- uses: daybrite/actions/.github/actions/sign-package@main
+- uses: daybrite/actions/.github/actions/sign-package@v1
   id: sign
   with:
     target: ios-uikit
@@ -807,7 +807,7 @@ it, and the lane runs there instead. The package reaches the lane as `DAY_IPA`, 
 the CLI first.
 
 ```yaml
-- uses: daybrite/actions/.github/actions/store-upload@main
+- uses: daybrite/actions/.github/actions/store-upload@v1
   with:
     target: android-mdc
     package: ${{ steps.sign.outputs.package }}

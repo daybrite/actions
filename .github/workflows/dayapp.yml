@@ -23,7 +23,7 @@
 #     id-token: write         # deploy-pages OIDC token (only used when deploy-web is set)
 #   jobs:
 #     app:
-#       uses: daybrite/actions/.github/workflows/dayapp.yml@main
+#       uses: daybrite/actions/.github/workflows/dayapp.yml@v1
 #       secrets: inherit          # forwards optional DAY_* signing secrets
 #       with:
 #         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, web-dom
@@ -1502,7 +1502,7 @@ jobs:
 
       # --- the day CLI (cargo install, per the day-version input) -------------------------
       - name: Set up the day CLI
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
@@ -1523,7 +1523,7 @@ jobs:
       # display, screenshot tooling, CJK fonts); `pack` brings flatpak/linuxdeploy/NSIS, below,
       # closer to where they are used.
       - name: Set up ${{ matrix.target }} dependencies
-        uses: daybrite/actions/.github/actions/setup-day-deps@main
+        uses: daybrite/actions/.github/actions/setup-day-deps@v1
         with:
           target: ${{ matrix.target }}
           # Only the row that packs pays for the packaging tools: a second device-profile row
@@ -1597,7 +1597,7 @@ jobs:
       # that commit exactly — see the action.
       - name: Assert the checkout is pristine
         if: inputs.assert-pristine
-        uses: daybrite/actions/.github/actions/assert-pristine@main
+        uses: daybrite/actions/.github/actions/assert-pristine@v1
         with:
           # The project directory, so the action's default `Cargo.lock` ignore names THIS
           # project's lock — the one `Prepare Cargo.lock` and `update-day-deps` rewrite — even
@@ -2253,7 +2253,7 @@ jobs:
         run: cargo update -p day --precise "${{ needs.preflight.outputs.day-rev }}"
 
       - name: Set up the day CLI
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
@@ -2551,7 +2551,7 @@ jobs:
             echo "ALSO=$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name '*-unsigned.apk' | head -1)" >> "$GITHUB_ENV"
           fi
       - name: Set up the day CLI
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
@@ -2561,7 +2561,7 @@ jobs:
       # jarsigner and apksigner are on every runner image).
       - name: Set up the HarmonyOS SDK
         if: matrix.target == 'harmony-arkui'
-        uses: daybrite/actions/.github/actions/setup-day-deps@main
+        uses: daybrite/actions/.github/actions/setup-day-deps@v1
         with:
           target: harmony-arkui
           pack: false
@@ -2573,7 +2573,7 @@ jobs:
       # provenance sidecars beside the unsigned package are renamed after the signed one, so `day
       # rebuild` still finds them beside the release asset.
       - name: Sign the package
-        uses: daybrite/actions/.github/actions/sign-package@main
+        uses: daybrite/actions/.github/actions/sign-package@v1
         with:
           target: ${{ matrix.target }}
           package: ${{ env.PKG }}
@@ -2735,7 +2735,7 @@ jobs:
       - name: Set up the day CLI
         id: daycli
         continue-on-error: true
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
@@ -2800,7 +2800,7 @@ jobs:
       # the version — `latest/download/…` gets the newest, `download/v1.2.0/…` gets that one, and
       # two of them side by side really are two versions.
       - name: Generate the launch script
-        uses: daybrite/actions/.github/actions/launch-script@main
+        uses: daybrite/actions/.github/actions/launch-script@v1
         with:
           assets-dir: assets
           repo: ${{ github.repository }}
@@ -3027,7 +3027,7 @@ jobs:
       # The CLI indexes this run's screenshots and, for an app with no fastlane directory of
       # its own, writes the lanes from its store/ listing (docs/store.md).
       - name: Set up the day CLI
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
@@ -3084,11 +3084,11 @@ jobs:
       # file as its default); the check and the staging read them through the action's input.
       - name: Take the stores' rules
         id: rules
-        uses: daybrite/actions/.github/actions/store-rules@main
+        uses: daybrite/actions/.github/actions/store-rules@v1
       # Stage the listing (or take the app's own Fastfile) and run the lane. The App Fair's
       # queue uploads with the same action.
       - name: Upload to the App Store
-        uses: daybrite/actions/.github/actions/store-upload@main
+        uses: daybrite/actions/.github/actions/store-upload@v1
         with:
           target: ios-uikit
           package: ${{ steps.package.outputs.path }}
@@ -3139,7 +3139,7 @@ jobs:
           [ -n "$FOUND" ] || { echo "::error::no .pkg/.app/.dmg in the downloaded dist artifact — is macos-appkit in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
           echo "path=$PWD/$FOUND" | tee -a "$GITHUB_OUTPUT"
       - name: Set up the day CLI
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
@@ -3151,7 +3151,7 @@ jobs:
       # No store credentials are set here: forward yours with `secrets: inherit` and have the
       # Fastfile read them.
       - name: Upload to the Mac App Store
-        uses: daybrite/actions/.github/actions/store-upload@main
+        uses: daybrite/actions/.github/actions/store-upload@v1
         with:
           target: macos-appkit
           package: ${{ steps.package.outputs.path }}
@@ -3198,7 +3198,7 @@ jobs:
       # The CLI indexes this run's screenshots and, for an app with no fastlane directory of
       # its own, writes the lanes from its store/ listing (docs/store.md).
       - name: Set up the day CLI
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}
@@ -3255,11 +3255,11 @@ jobs:
       # file as its default); the check and the staging read them through the action's input.
       - name: Take the stores' rules
         id: rules
-        uses: daybrite/actions/.github/actions/store-rules@main
+        uses: daybrite/actions/.github/actions/store-rules@v1
       # Stage the listing (or take the app's own Fastfile) and run the lane. The App Fair's
       # queue uploads with the same action.
       - name: Upload to Google Play
-        uses: daybrite/actions/.github/actions/store-upload@main
+        uses: daybrite/actions/.github/actions/store-upload@v1
         with:
           target: android-mdc
           package: ${{ steps.package.outputs.path }}
@@ -3460,7 +3460,7 @@ jobs:
       - name: Set up the day CLI
         id: daycli
         continue-on-error: true
-        uses: daybrite/actions/.github/actions/setup-day-cli@main
+        uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
           version: ${{ inputs.day-version }}
           git: ${{ inputs.day-git }}

@@ -1,0 +1,43 @@
+# v1 — keep the `v1` tag on the newest commit of main.
+#
+# Callers pin this repository as `daybrite/actions/.github/workflows/dayapp.yml@v1`. Until
+# releases are tagged `v1.x.y`, `v1` simply follows main: every push to main moves it here, so a
+# caller on `@v1` runs exactly what a caller on `@main` would. Once releases are tagged, delete
+# this workflow and move `v1` by hand to the newest `v1.x.y`, and every caller follows without
+# editing its workflow.
+#
+# A lightweight tag, moved with the Git refs API: nothing is checked out and nothing is pushed
+# from a working tree. A tag moved with the workflow token starts no other workflow run.
+name: v1
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # moving the tag
+
+# Pushes that land close together queue rather than race, so the tag ends on the newest commit.
+concurrency:
+  group: move-v1
+  cancel-in-progress: false
+
+jobs:
+  move-v1:
+    name: move v1 to this commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Point v1 at ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Update the tag where it exists, create it where it does not.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/v1" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref=refs/tags/v1 -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          echo "v1 → $(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1" -q .object.sha)"
