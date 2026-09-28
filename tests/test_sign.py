@@ -1,5 +1,7 @@
-"""Signing after the build: the build leg packs every store package unsigned, and the `sign`
-job (one row per store target) signs each through the `sign-package` action.
+"""Signing after the build, on one rule for every signer: a release that is not a promotion,
+the whole build matrix green, and the platform's material there. The store rows (`sign`, one
+per platform whose material exists) sign through the `sign-package` action what the build leg
+packed unsigned for them; `sign-macos` signs the .app from its environment's material.
 The action's steps run against a stub `day`, so nothing is signed and no keychain is touched.
 """
 import base64
@@ -48,7 +50,72 @@ class ShapeTests(unittest.TestCase):
             self.assertNotIn(name, env, name)
         pack = build["Pack (${{ matrix.target }})"]["run"]
         self.assertIn("--no-sign", pack)
-        self.assertIn("android-mdc|harmony-arkui)", pack)
+        # Unsigned exactly where a sign row will sign, so a package without a signer keeps its
+        # dev tier (a dev-signed .apk installs; an unsigned one does not).
+        self.assertIn('case " ${{ needs.preflight.outputs.sign-targets }} " in', pack)
+        self.assertIn('*" ${{ matrix.target }} "*) NO_SIGN="--no-sign"', pack)
+
+    def test_preflight_plans_a_sign_row_only_where_the_material_exists(self):
+        """Presence crosses into preflight as booleans from the base64 blobs alone: a short
+        secret referenced there (an alias, a password) would be masked wherever its text
+        recurs, and an output that carries one is dropped with the matrix in it."""
+        plan = next(s for s in JOBS["preflight"]["steps"] if s.get("id") == "plan")
+        env = plan["env"]
+        self.assertEqual(env["HAS_IOS_MATERIAL"], "${{ secrets.DAY_APPLE_CERT_P12 != '' && secrets.DAY_IOS_PROFILE_B64 != '' }}")
+        self.assertEqual(env["HAS_ANDROID_MATERIAL"], "${{ secrets.DAY_ANDROID_KEYSTORE_B64 != '' }}")
+        self.assertIn("DAY_OHOS_KEYSTORE_B64", env["HAS_OHOS_MATERIAL"])
+        for value in env.values():
+            for short in ("ALIAS", "PASS", "JSON", "KEY_ID", "ISSUER", "TEAM"):
+                self.assertNotIn(short, str(value), value)
+        run = plan["run"]
+        self.assertIn('if [ "$rel" = true ] && [ "$promotion" != true ]; then', run)
+        self.assertIn('(.target == "ios-uikit" and $ios)', run)
+        self.assertIn('(.target == "android-mdc" and $android)', run)
+        self.assertIn('(.target == "harmony-arkui" and $ohos)', run)
+        self.assertLess(run.index('echo "promotion=$promotion"'), run.index("sign_matrix="))
+
+    def test_every_signer_shares_one_gate(self):
+        """sign-macos and the store rows run on the same terms: a release, not a promotion,
+        the whole build green, and their material there (the named environment, or the
+        planned rows). A red leg anywhere holds every signer, the release and every upload."""
+        for job in ("sign-macos", "sign"):
+            cond = condition(job)
+            for clause in ("!cancelled()", "needs.build.result == 'success'", "release == 'true'",
+                           "promotion != 'true'"):
+                self.assertIn(clause, cond, job)
+            self.assertEqual(sorted(JOBS[job]["needs"]), ["build", "preflight"], job)
+        self.assertIn("inputs.signing-environment != ''", condition("sign-macos"))
+        self.assertIn("sign-targets != ''", condition("sign"))
+        self.assertEqual(JOBS["sign-macos"]["environment"], "${{ inputs.signing-environment }}")
+
+    def test_a_sign_row_fails_on_incomplete_material_instead_of_degrading(self):
+        check = steps("sign")["Check the signing material is complete"]
+        self.assertIn("::error::", check["run"])
+        self.assertIn('[ "$complete" != true ]', check["run"])
+        self.assertIn("DAY_APPLE_CERT_PASSWORD != ''", check["env"]["HAS_APPLE"])
+        self.assertIn("DAY_KEY_PASS != ''", check["env"]["HAS_ANDROID"])
+        for step in JOBS["sign"]["steps"]:
+            self.assertNotIn("steps.material", str(step.get("if", "")), step.get("name"))
+
+    def test_every_job_that_runs_repository_code_holds_a_read_only_token(self):
+        """The token follows the keys: the build legs and every other job that runs the
+        repository's code narrow the caller's grant to `contents: read`, so a build script
+        cannot push, edit a release or mint an OIDC credential with it. The three jobs that
+        need the caller's write grants declare nothing (a called job may narrow a grant, never
+        widen it, and a read-only caller such as day's own CI must still run this workflow)."""
+        for job in ("preflight", "build", "validate", "stores", "sign", "sign-macos",
+                    "appstore-ios", "appstore-macos", "playstore-android"):
+            self.assertEqual(JOBS[job].get("permissions"), {"contents": "read"}, job)
+        for job in ("release", "pages", "website"):
+            self.assertNotIn("permissions", JOBS[job], job)
+
+    def test_an_upload_without_its_signer_is_refused_where_it_is_decided(self):
+        decide = steps("stores")["Decide the store uploads"]
+        self.assertEqual(decide["env"]["SIGN_TARGETS"], "${{ needs.preflight.outputs.sign-targets }}")
+        self.assertEqual(decide["env"]["SIGNING_ENVIRONMENT"], "${{ inputs.signing-environment }}")
+        for line in ('signer upload_ios "$ios_signed"', 'signer upload_play "$android_signed"',
+                     'signer upload_macos "$macos_signed"', "is on but its package will not be signed"):
+            self.assertIn(line, decide["run"])
 
     def test_preflight_plans_one_signing_row_per_store_target(self):
         outputs = JOBS["preflight"]["outputs"]
@@ -70,7 +137,7 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(sign["strategy"]["matrix"], "${{ fromJSON(needs.preflight.outputs.sign-matrix) }}")
         self.assertEqual(sign["runs-on"], "${{ matrix.os }}")
         names = [s.get("name") for s in sign["steps"]]
-        for name in ("Check the signing material is present", "Download the unsigned package",
+        for name in ("Check the signing material is complete", "Download the unsigned package",
                      "Set up the day CLI", "Sign the package", "Upload the signed package"):
             self.assertIn(name, names)
         self.assertLess(names.index("Set up the day CLI"), names.index("Sign the package"))

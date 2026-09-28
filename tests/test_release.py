@@ -207,6 +207,29 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(rows[0]["label"], "harmony-arkui · 1200x1920")
         self.assertEqual(rows[0]["device_slug"], "")
 
+    def test_sign_rows_are_planned_where_the_material_exists_on_a_release(self):
+        """One sign row per store target whose keystore or certificate is set, and none
+        otherwise: the build leg packs unsigned exactly what a row will sign, so an app without
+        Android material keeps its dev-signed, installable .apk."""
+        targets = "ios-uikit, android-mdc, harmony-arkui, web-dom"
+        _, values = self.plan(TARGETS_IN=targets,
+                              HAS_IOS_MATERIAL="true", HAS_ANDROID_MATERIAL="false", HAS_OHOS_MATERIAL="false")
+        self.assertEqual(values["sign_targets"], "ios-uikit")
+        self.assertEqual(json.loads(values["sign_matrix"]), {"include": [{"target": "ios-uikit", "os": "xcode-27"}]})
+        _, values = self.plan(TARGETS_IN=targets,
+                              HAS_IOS_MATERIAL="true", HAS_ANDROID_MATERIAL="true", HAS_OHOS_MATERIAL="true")
+        self.assertEqual(values["sign_targets"], "ios-uikit android-mdc harmony-arkui")
+        self.assertEqual([r["os"] for r in json.loads(values["sign_matrix"])["include"]],
+                         ["xcode-27", "ubuntu-latest", "ubuntu-latest"])
+        # No material, no rows — and the same on a branch or a promotion with every secret set.
+        _, values = self.plan(TARGETS_IN=targets)
+        self.assertEqual(values["sign_targets"], "")
+        for ref in ({"GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "main"}, {"GITHUB_EVENT_NAME": "release"}):
+            _, values = self.plan(TARGETS_IN=targets, HAS_IOS_MATERIAL="true",
+                                  HAS_ANDROID_MATERIAL="true", HAS_OHOS_MATERIAL="true", **ref)
+            self.assertEqual(values["sign_targets"], "", ref)
+            self.assertEqual(values["sign_matrix"], '{"include":[]}', ref)
+
     def test_a_promotion_deploys_the_website_of_a_project_that_has_one(self):
         (self.root / "website").mkdir()
         (self.root / "website/site.toml").write_text('host = "games-fair.github.io"\n')

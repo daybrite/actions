@@ -94,10 +94,12 @@ on:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   workflow_dispatch:
 permissions:
-  contents: write   # release-asset upload on tag builds
+  contents: read    # the repository's own jobs, if any, run its code read-only
 jobs:
   app:
     uses: daybrite/actions/.github/workflows/dayapp.yml@main
+    permissions:
+      contents: write # release-asset upload on tag builds
     secrets: inherit
     with:
       targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
@@ -141,7 +143,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `app-id` | string | — | The app's bundle id. When set, the Linux legs verify that the packed flatpak installs and reports that id, and the macOS legs that the `.app` carries it. |
 | `lint` | boolean | `True` | Run `day lint` before building: fluent coverage, ids, routes, and the store listing. |
 | `assert-pristine` | boolean | `True` | Fail if the checkout has uncommitted changes before packing. An artifact packed from a dirty tree records a commit that cannot reproduce it. |
-| `signing-environment` | string | — | GitHub environment holding the macOS release-signing secrets (`DAY_MACOS_CERT_P12`, `DAY_MACOS_CERT_PASSWORD`, `DAY_SIGN_MACOS_IDENTITY`, `DAY_NOTARY_KEY_ID`, `DAY_NOTARY_ISSUER`, `DAY_NOTARY_KEY_B64`). When set, a tag build signs and notarizes the `.dmg` in a separate job that checks out no code, and fails rather than shipping unsigned when the material is missing. |
+| `signing-environment` | string | — | GitHub environment holding the macOS release-signing secrets (`DAY_MACOS_CERT_P12`, `DAY_MACOS_CERT_PASSWORD`, `DAY_SIGN_MACOS_IDENTITY`, `DAY_NOTARY_KEY_ID`, `DAY_NOTARY_ISSUER`, `DAY_NOTARY_KEY_B64`). When set, a tag build signs and notarizes the `.dmg` in a separate job that checks out no code, and fails rather than shipping unsigned when the material is missing. The store packages follow the same rule from repository secrets (`DAY_APPLE_*`, `DAY_ANDROID_*`, `DAY_OHOS_*`): see [Signing](#signing). |
 | `validate-rebuild` | boolean | `False` | After packing, rebuild each artifact from its own recorded provenance and compare (`day rebuild --strict`). Off by default: the check needs a fixed day revision to be meaningful. |
 | `release-assets` | boolean | `True` | Whether this call assembles the GitHub release for a semantic-version tag. `false` leaves it to another call, which is what a second workflow in the same repository needs — one owns the release, the other builds and uploads a `store-flavor` submission. |
 | `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
@@ -491,10 +493,15 @@ absent — it never fails for that reason. On semantic-version tags, the same `D
 exist and the caller forwards them with `secrets: inherit`. Branch and PR builds always pack
 dev-signed, even when the secrets exist.
 
-On a release, every store package is packed unsigned by the build leg (`day pack --no-sign`,
+Every signer runs on one rule: a release that is not a promotion, the whole build matrix green,
+and the platform's material there. For the `.app` that material is the environment
+`signing-environment` names, and `sign-macos` signs and notarizes it. For the store packages it
+is the repository secrets: preflight plans one `sign` row per store target whose keystore or
+certificate is set, the build leg packs exactly those packages unsigned (`day pack --no-sign`,
 which produces `<stem>-<target>-unsigned.<ext>`: the iOS `.ipa`, the Android `.aab` and `.apk`,
-the HarmonyOS `.hap`) and signed afterwards by `sign`, one job row per store target, each of
-which checks out no code, the way `sign-macos` signs the `.app`. A row hands its package and its
+the HarmonyOS `.hap`), and each row, which checks out no code, signs its one package. A
+platform without material packs at the dev tier as on any other ref: a dev-signed `.apk` or
+`.hap` that installs, an `.ipa` that is unsigned on its own. A row hands its package and its
 platform's material alone to the [`sign-package`](#sign-package) action: the distribution
 certificate (`DAY_APPLE_CERT_P12` with `DAY_APPLE_CERT_PASSWORD`) and the App Store profile
 (`DAY_IOS_PROFILE_B64`) for iOS, into an ephemeral keychain; the upload keystore
@@ -505,14 +512,24 @@ HarmonyOS, whose hap-sign-tool comes from the OpenHarmony SDK the row installs. 
 `day sign apply` over the package and removes the material; the row republishes `dist-<target>`
 with the signed package in place of the unsigned one. The App Fair's queue signs with the same
 action. The job that builds and runs the app's code never holds a signing key for any platform,
-so nothing an app's own build script or dependency runs can read one. A row whose material is
-not set says so and ships the unsigned package as it is; the store upload for that target then
-stands down. The App Store upload itself takes `DAY_APPLE_TEAM` and the API key trio
-`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64`.
+so nothing an app's own build script or dependency runs can read one. A signer that runs and
+finds its set incomplete (the keystore without its alias or passwords, the certificate without
+its password) fails rather than degrading, as `sign-macos` does, since its package was packed
+unsigned for it and nothing else will sign it. The App Store upload itself takes
+`DAY_APPLE_TEAM` and the API key trio `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64`.
+
+The token follows the same boundary as the keys. The build legs, which run the repository's
+code, hold a `GITHUB_TOKEN` narrowed to `contents: read`; the write grants a caller makes for
+release assets and Pages reach only the `release`, `pages` and `website` jobs, which run no
+repository code (see [Web deploy](#web-deploy)).
 
 Every store upload runs on the same gate: the whole build matrix succeeded (a failed walkthrough
 on any device is a regression the release does not ship, as the release job already holds) and
-that platform's signer ran. A release with a red leg therefore holds every store, not one.
+that platform's signer ran. A release with a red leg therefore holds every signer and every
+store, not one. An upload that is on while its signer will not run (Play with no Android
+material, the App Store with no certificate, the Mac App Store with no signing environment) is
+refused when the uploads are decided, with the secrets to set, rather than by the lane after
+the build.
 
 Signing after the build is not only a trust boundary. An archive signed automatically on a CI
 runner, whose keychain starts empty, had Xcode's cloud provisioning mint a new development
@@ -648,12 +665,14 @@ it serves correctly from a project-Pages subpath (`https://<owner>.github.io/<re
 ```yaml
 # .github/workflows/ci.yml — build every target and deploy the web build on each push to main
 permissions:
-  contents: write # release-asset upload on tag builds
-  pages: write    # web-dom → GitHub Pages
-  id-token: write # deploy-pages OIDC token
+  contents: read
 jobs:
   app:
     uses: daybrite/actions/.github/workflows/dayapp.yml@main
+    permissions:
+      contents: write # release-asset upload on tag builds
+      pages: write    # web-dom → GitHub Pages
+      id-token: write # deploy-pages OIDC token
     secrets: inherit
     with:
       targets: macos-appkit, ios-uikit, android-mdc, web-dom
@@ -694,11 +713,18 @@ Nothing to configure.
   (`day = { git = "https://github.com/daybrite/day.git" }`, the `day new app --git` default), not
   a local path. For local-checkout development, put a `[patch]` in a gitignored
   `.cargo/config.toml`.
-- Attaching release assets needs `permissions: contents: write` in the caller.
-- **Web deploy** additionally needs, in the caller: `permissions: pages: write` **and**
+- Attaching release assets needs `permissions: contents: write` on the calling job.
+- **Web deploy** additionally needs, on the calling job: `permissions: pages: write` **and**
   `id-token: write` (the latter lets `actions/deploy-pages` mint the OIDC token it uploads with —
   omitting it fails with a 403), plus the one-time repo setting Settings → Pages → "Build and
   deployment" → **Source = "GitHub Actions"**. No repository secrets are involved.
+- Put those grants on the job that calls this workflow, not at the top of the caller, so the
+  caller's own jobs run with the read-only default. Inside this workflow only `release`,
+  `pages` and `website` keep the caller's grant; every job that runs the repository's code —
+  preflight, the build legs, validate, the store jobs — declares `contents: read` and so
+  holds a token that can neither push, nor edit a release, nor mint an OIDC credential. A
+  called job can narrow the caller's grant but never widen it, which is why those three jobs
+  declare nothing: a caller that grants `contents: read` alone (day's own CI) still runs.
 
 ## Composite actions
 
