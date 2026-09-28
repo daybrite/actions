@@ -207,6 +207,28 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(rows[0]["label"], "harmony-arkui · 1200x1920")
         self.assertEqual(rows[0]["device_slug"], "")
 
+    def test_targets_all_reads_the_manifest(self):
+        """`all` resolves to Day.toml's [app] targets, once, so every later check and the
+        release job see one concrete list; without a manifest to read it is an error."""
+        (self.root / "Day.toml").write_text('[app]\nid = "dev.example.app"\ntargets = ["android-mdc", "web-dom"]\n')
+        result, values = self.plan(TARGETS_IN="all")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(values["targets"], "android-mdc, web-dom")
+        self.assertEqual([r["target"] for r in json.loads(values["pack_matrix"])["include"]],
+                         ["android-mdc", "web-dom"])
+        result, values = self.plan(TARGETS_IN=" all ")
+        self.assertEqual(values["targets"], "android-mdc, web-dom")
+        # A named list passes through as the output too.
+        _, values = self.plan(TARGETS_IN="web-dom")
+        self.assertEqual(values["targets"], "web-dom")
+        (self.root / "Day.toml").unlink()
+        result, _ = self.plan(TARGETS_IN="all")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not exist to read [app] targets", result.stdout + result.stderr)
+        self.assertEqual(JOBS["preflight"]["outputs"]["targets"], "${{ steps.plan.outputs.targets }}")
+        assemble = next(s for s in JOBS["release"]["steps"] if s.get("name") == "Assemble release assets")
+        self.assertEqual(assemble["env"]["TARGETS_IN"], "${{ needs.preflight.outputs.targets }}")
+
     def test_sign_rows_are_planned_where_the_material_exists_on_a_release(self):
         """One sign row per store target whose keystore or certificate is set, and none
         otherwise: the build leg packs unsigned exactly what a row will sign, so an app without

@@ -114,7 +114,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 
 | input | type | default | meaning |
 |---|---|---|---|
-| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-xaml`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-mdc`, `harmony-arkui`, `web-dom`. |
+| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-xaml`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-mdc`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
 | `day-version` | string | `latest` | Day CLI to install: `latest` (newest crates.io release), `v1.2.3`/`1.2.3` (that release), a 40-hex commit, or a branch name of the day repository (built from git). |
 | `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
 | `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |

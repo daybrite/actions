@@ -75,6 +75,8 @@ on:
           Platform-toolkit pairs to build, comma- or space-separated. Supported:
           macos-appkit, macos-gtk, macos-qt, ios-uikit, linux-gtk, linux-qt,
           android-mdc, harmony-arkui, windows-xaml, windows-qt, windows-gtk, web-dom.
+          "all" builds every target the project's Day.toml declares (`[app] targets`), so a
+          `day project add-target` reaches CI without a second edit.
         type: string
         required: true
       day-version:
@@ -778,6 +780,8 @@ jobs:
       macos_runner: ${{ steps.plan.outputs.macos_runner }}
       # The BUILD matrix: one row per target, times each mobile target's device profiles.
       matrix: ${{ steps.plan.outputs.matrix }}
+      # The targets the run builds, resolved from Day.toml when the caller said "all".
+      targets: ${{ steps.plan.outputs.targets }}
       # The same rows before that expansion — one per target, the shape every job that consumes a
       # PACKAGE wants, since only the primary profile row of a target packs one.
       pack-matrix: ${{ steps.plan.outputs.pack_matrix }}
@@ -937,6 +941,23 @@ jobs:
             esac
             case ",$android_rust," in *",$rt,"*) ;; *) android_rust="$android_rust,$rt" ;; esac
           done
+          # "all" = every target Day.toml declares. Resolved here, once, so the checks below and
+          # the release job (through the `targets` output) see one concrete list.
+          if [ "$(echo "$TARGETS_IN" | xargs)" = all ]; then
+            TARGETS_IN=$(PROJECT_PATH="${PROJECT_PATH:-.}" python3 - <<'PYEOF'
+          import os, pathlib, sys, tomllib
+          manifest = pathlib.Path(os.environ["PROJECT_PATH"]) / "Day.toml"
+          if not manifest.is_file():
+              sys.exit(f"::error::targets is 'all' but {manifest} does not exist to read [app] targets from")
+          targets = tomllib.loads(manifest.read_text()).get("app", {}).get("targets")
+          if not isinstance(targets, list) or not targets:
+              sys.exit(f"::error::targets is 'all' but {manifest} declares no [app] targets")
+          print(", ".join(str(t) for t in targets))
+          PYEOF
+            ) || exit 1
+            echo "::notice::targets: all → ${TARGETS_IN} (from ${PROJECT_PATH:-.}/Day.toml)"
+          fi
+          echo "targets=${TARGETS_IN}" | tee -a "$GITHUB_OUTPUT"
           rows=()
           for t in ${TARGETS_IN//,/ }; do
             # tier=extra marks the portable non-primary combos (GTK/Qt off their home OS):
@@ -2624,7 +2645,7 @@ jobs:
           path: shots-in
       - name: Assemble release assets
         env:
-          TARGETS_IN: ${{ inputs.targets }}
+          TARGETS_IN: ${{ needs.preflight.outputs.targets }}
         run: |
           set -euo pipefail
           mkdir -p assets
