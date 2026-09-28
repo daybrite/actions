@@ -115,7 +115,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | input | type | default | meaning |
 |---|---|---|---|
 | `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-xaml`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-mdc`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
-| `day-version` | string | `latest` | Day CLI to install: `latest` (newest crates.io release), `v1.2.3`/`1.2.3` (that release), a 40-hex commit, or a branch name of the day repository (built from git). |
+| `day-version` | string | `main` | Day CLI to install: a branch name of the day repository, built from git (`main` by default), a 40-hex commit, `latest` (newest crates.io release), or `v1.2.3`/`1.2.3` (that release). |
 | `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
 | `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |
 | `project-path` | string | `.` | Directory of the Day project within the repository. |
@@ -825,7 +825,7 @@ queue runs in its signing stage, so the two pipelines sign and upload one way.
 
 `validate.yml` runs on every push and pull request: it scaffolds a fresh app with `day new app`
 and drives it through the reusable workflow for all 7 primary platform-toolkit pairs, with
-`day-version: main` so the CLI and the framework come from the same tree. (It exercises
+`day-version` at its default, `main`, so the CLI and the framework come from the same tree. (It exercises
 `dayapp`'s build/pack path; the web deploy publishes to a live Pages site and so isn't part
 of the validation run.)
 

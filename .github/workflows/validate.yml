@@ -9,9 +9,9 @@
 # skipped — this repo doesn't tag app releases, and deploy-web is off (it publishes to a live
 # Pages site, which a validation run must not do).
 #
-# day-version is "main" so the CLI and the scaffold's git framework dependency come from the same
-# tree. ("latest" would pair the released CLI's template with the framework's main branch, which
-# can skew between releases.)
+# day-version is left at its default, "main", so the CLI and the scaffold's git framework
+# dependency come from the same tree. ("latest" would pair the released CLI's template with the
+# framework's main branch, which can skew between releases.)
 name: validate
 
 on:
@@ -102,7 +102,6 @@ jobs:
     uses: ./.github/workflows/dayapp.yml
     with:
       targets: windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
-      day-version: main
       # Exercise the device-profile fan-out: android-mdc becomes two parallel jobs, the second
       # packing nothing and uploading `screenshots-android-mdc-tablet`. Android carries it rather
       # than iOS because the fan-out logic is shared and ubuntu minutes are the cheap ones — the

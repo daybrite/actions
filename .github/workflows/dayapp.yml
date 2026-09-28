@@ -81,11 +81,12 @@ on:
         required: true
       day-version:
         description: >-
-          Which day CLI to install: "latest" (newest crates.io release), a semantic version
-          ("v1.2.3" or "1.2.3", from crates.io), a 40-hex commit, or a branch name of the day
-          repository (built from git).
+          Which day CLI to install: a branch name of the day repository, built from git (the
+          default, "main", so an app builds with the CLI its git dependency on day tracks), a
+          40-hex commit, "latest" (newest crates.io release), or a semantic version ("v1.2.3" or
+          "1.2.3", from crates.io).
         type: string
-        default: latest
+        default: main
       day-git:
         description: Git URL of the day repository, for branch/commit installs.
         type: string
