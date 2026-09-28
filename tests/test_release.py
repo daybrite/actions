@@ -221,7 +221,7 @@ class PromotionGateTests(unittest.TestCase):
         return " ".join(str(JOBS[job]["if"]).split())
 
     def test_the_release_and_upload_jobs_stand_down_on_a_promotion(self):
-        for job in ("release", "stores", "sign-macos"):
+        for job in ("release", "stores", "sign-macos", "sign"):
             self.assertIn("promotion != 'true'", self.condition(job), job)
 
     def test_a_promotion_builds_only_when_there_is_a_site_to_rebuild(self):

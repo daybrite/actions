@@ -776,6 +776,10 @@ jobs:
       # The same rows before that expansion — one per target, the shape every job that consumes a
       # PACKAGE wants, since only the primary profile row of a target packs one.
       pack-matrix: ${{ steps.plan.outputs.pack_matrix }}
+      # The `sign` job's rows: the store targets among them, each on its signer's runner; empty
+      # (and `sign-targets` blank) when the run builds none.
+      sign-matrix: ${{ steps.plan.outputs.sign_matrix }}
+      sign-targets: ${{ steps.plan.outputs.sign_targets }}
       release: ${{ steps.plan.outputs.release }}
       # What the release job makes of the release: publish, pre-release or draft.
       release_mode: ${{ steps.plan.outputs.release_mode }}
@@ -1215,6 +1219,16 @@ jobs:
             [ "$n" -gt 0 ] || echo "::warning::flavor '$f' declares no target that inputs.targets builds, so it has no legs in this run"
           done
           echo "matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
+          # The rows the `sign` job runs: one per store target the base app builds, on the runner
+          # that platform's signer needs (Apple's tools on macOS; jarsigner, apksigner and
+          # hap-sign-tool on Linux).
+          sign_matrix=$(printf '%s' "$matrix" | jq -c --arg mac "$MACOS_RUNNER" '
+            { include: [ .include[]
+                         | select(.primary and .flavor == ""
+                                  and (.target == "ios-uikit" or .target == "android-mdc" or .target == "harmony-arkui"))
+                         | { target: .target, os: (if .target == "ios-uikit" then $mac else "ubuntu-latest" end) } ] }')
+          echo "sign_matrix=$sign_matrix" | tee -a "$GITHUB_OUTPUT"
+          echo "sign_targets=$(printf '%s' "$sign_matrix" | jq -r '[.include[].target] | join(" ")')" | tee -a "$GITHUB_OUTPUT"
           rel=false
           if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             rel=true
@@ -1411,22 +1425,12 @@ jobs:
       # and every scripted launch — including the ones the generated dayscript runner performs,
       # which no flag from this file could reach — forward their sub-commands' raw output.
       DAY_VERBOSE: ${{ inputs.day-verbose && '1' || '0' }}
-      # Release signing, active on semantic-version tags only — branch/PR packs stay dev-signed
-      # even when the repository secrets exist. Absent/empty secrets degrade to the dev tier.
-      # The names match daybrite/day's ci.yml; forward them with `secrets: inherit`.
-      # NO macOS signing material reaches this job on any ref. It builds arbitrary repository code
-      # — cargo, every dependency's build.rs, the app's own dayscripts — so it packs the .dmg at
-      # the DEV tier even on a tag. The Developer ID and the notary key live in `sign-macos`,
-      # which runs no repository code at all.
-      DAY_APPLE_TEAM: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_APPLE_TEAM || '' }}
-      DAY_ASC_KEY_ID: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_ASC_KEY_ID || '' }}
-      DAY_ASC_ISSUER: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_ASC_ISSUER || '' }}
-      DAY_ANDROID_KEY_ALIAS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
-      DAY_KS_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_KS_PASS || '' }}
-      DAY_KEY_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_KEY_PASS || '' }}
-      DAY_OHOS_KEY_ALIAS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KEY_ALIAS || '' }}
-      DAY_OHOS_KS_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KS_PASS || '' }}
-      DAY_OHOS_KEY_PASS: ${{ needs.preflight.outputs.release == 'true' && secrets.DAY_OHOS_KEY_PASS || '' }}
+      # NO signing material reaches this job on any ref, for any platform. It builds arbitrary
+      # repository code — cargo, every dependency's build.rs, the app's own dayscripts — so it
+      # packs the .dmg at the DEV tier even on a tag and every store package (.ipa always;
+      # .aab/.apk and .hap on a release) unsigned. The Developer ID and the notary key live in
+      # `sign-macos`, the store keys in `sign`; neither job runs repository code. The secret
+      # names match daybrite/day's ci.yml; forward them with `secrets: inherit`.
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -1504,36 +1508,11 @@ jobs:
         run: $DAY_BIN build -p ${{ matrix.target }}
 
       # --- distribution packaging (before scripts, so packages survive a script flake) ------
-      # No Apple material reaches this job: the iOS .ipa is packed unsigned here and signed in
-      # `sign-ios` after the build, the way `sign-macos` signs the .app, so the job that runs the
-      # app's code and its dayscripts never holds a certificate. (It used to import the
-      # distribution certificate and archive with automatic signing, which minted a development
-      # certificate on every run's fresh keychain until the account was full; Day-Showcase
-      # v0.4.13, 2026-09-24.)
-      - name: Materialize signing material
-        if: needs.preflight.outputs.release == 'true' && matrix.primary
-        env:
-          ANDROID_KEYSTORE_B64: ${{ secrets.DAY_ANDROID_KEYSTORE_B64 }}
-          OHOS_KEYSTORE_B64: ${{ secrets.DAY_OHOS_KEYSTORE_B64 }}
-          OHOS_CERT_B64: ${{ secrets.DAY_OHOS_CERT_B64 }}
-          OHOS_PROFILE_B64: ${{ secrets.DAY_OHOS_PROFILE_B64 }}
-        run: |
-          set -euo pipefail
-          put() { # $1=b64 secret value, $2=file name, $3=env var to export
-            if [ -n "$1" ]; then
-              echo "$1" | base64 --decode > "$RUNNER_TEMP/$2"
-              echo "$3=$RUNNER_TEMP/$2" >> "$GITHUB_ENV"
-            fi
-          }
-          case "${{ matrix.target }}" in
-            # macos-*, ios-uikit: nothing — the Developer ID and notary key live in `sign-macos`,
-            # the distribution certificate and App Store profile in `sign-ios`.
-            android-mdc) put "${ANDROID_KEYSTORE_B64:-}" upload.keystore DAY_ANDROID_KEYSTORE ;;
-            harmony-arkui)
-              put "${OHOS_KEYSTORE_B64:-}" ohos.p12 DAY_OHOS_KEYSTORE
-              put "${OHOS_CERT_B64:-}" ohos.cer DAY_OHOS_CERT
-              put "${OHOS_PROFILE_B64:-}" ohos.p7b DAY_OHOS_PROFILE ;;
-          esac
+      # No signing material reaches this job, for any platform: on a release every store
+      # package (iOS, Android, HarmonyOS) is packed unsigned here and signed in the `sign` job
+      # after the build, the way `sign-macos` signs the .app, so the job that runs the app's code
+      # and its dayscripts never holds a key. A branch build packs at the dev tier (ad-hoc, the
+      # CLI's dev keystore, dev-signed hap), which is installable and secret-free.
 
       # The linux legs pack BOTH formats (day pack, §16.5), so both toolchains are installed.
       - name: Stage the web dist (web-dom)
@@ -1600,9 +1579,14 @@ jobs:
           esac
           # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
           # so each release asset is reachable at a stable .../releases/latest/download/<name> URL.
-          # The iOS package is always packed unsigned here (`-unsigned.ipa`); `sign-ios` signs it.
+          # Every store package is packed unsigned on a release (`<stem>-<target>-unsigned.<ext>`),
+          # for the `sign` job; the iOS .ipa always, since an unsigned device .ipa is what a branch
+          # build can offer for sideloading and self-signing anyway.
           NO_SIGN=""
-          [ "${{ matrix.target }}" = ios-uikit ] && NO_SIGN="--no-sign"
+          case "${{ matrix.target }}" in
+            ios-uikit) NO_SIGN="--no-sign" ;;
+            android-mdc|harmony-arkui) [ "${{ needs.preflight.outputs.release }}" = true ] && NO_SIGN="--no-sign" ;;
+          esac
           $DAY_BIN pack -p ${{ matrix.target }} --no-version-in-name --format json $NO_SIGN
 
       # The handoff to `sign-macos`: the built .app, its entitlements, and the provenance sidecars,
@@ -2437,50 +2421,84 @@ jobs:
 
   # --- iOS Simulator: uikit -------------------------------------------------
 
-  # The iOS counterpart of sign-macos: the build leg packs `<stem>-ios-uikit-unsigned.ipa` with
-  # no Apple material in reach, and this job, which checks out no code, signs it with the
-  # distribution certificate and the App Store profile (`day sign apply`, the same signing the
-  # App Fair's queue performs on an unsigned .ipa) and republishes `dist-ios-uikit` under the
-  # signed name. It runs on a release tag when both secrets exist; without them the unsigned
-  # .ipa ships as it is, and the App Store upload refuses it with the list of what to set.
-  sign-ios:
-    name: sign (ios-uikit)
+  # After the build, never in it: every store package is packed unsigned by the build leg
+  # (`day pack --no-sign`, which names it `<stem>-<target>-unsigned.<ext>`), and this job,
+  # one row per signable target, checks out no code and signs it with that platform's material
+  # (`day sign apply` through the sign-package action, the same signing the App Fair's queue
+  # performs), then republishes `dist-<target>` under the signed name. The job that builds and
+  # runs the app's code and its dayscripts therefore holds no signing key for any platform: an
+  # app's build script or dependency cannot read one, and a certificate imported into a build
+  # leg's keychain cannot be provisioned against (which is how Xcode's cloud signing once minted
+  # a development certificate per run until the account was full; Day-Showcase v0.4.13). Rows
+  # come from preflight (`sign-matrix`): the iOS row on the macOS runner, Android and HarmonyOS
+  # on Linux. A row without its material says so and ships the unsigned package as it is; the
+  # store upload for that target then stands down rather than sending it.
+  sign:
+    name: sign (${{ matrix.target }})
     needs: [preflight, build]
     if: >-
       ${{ !cancelled() && needs.build.result == 'success'
           && needs.preflight.outputs.release == 'true'
           && needs.preflight.outputs.promotion != 'true'
-          && contains(inputs.targets, 'ios-uikit') }}
-    runs-on: ${{ needs.preflight.outputs.macos_runner }}
+          && needs.preflight.outputs.sign-targets != '' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.sign-matrix) }}
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
+      # Only this target's secrets reach this row: an Android row never sees an Apple
+      # certificate, and the other way round.
       - name: Check the signing material is present
         id: material
         env:
-          CERT_P12: ${{ secrets.DAY_APPLE_CERT_P12 }}
-          PROFILE_B64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
+          TARGET: ${{ matrix.target }}
+          APPLE_CERT: ${{ matrix.target == 'ios-uikit' && secrets.DAY_APPLE_CERT_P12 || '' }}
+          APPLE_PROFILE: ${{ matrix.target == 'ios-uikit' && secrets.DAY_IOS_PROFILE_B64 || '' }}
+          ANDROID_KEYSTORE: ${{ matrix.target == 'android-mdc' && secrets.DAY_ANDROID_KEYSTORE_B64 || '' }}
+          ANDROID_ALIAS: ${{ matrix.target == 'android-mdc' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
+          OHOS_KEYSTORE: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_KEYSTORE_B64 || '' }}
+          OHOS_CERT: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_CERT_B64 || '' }}
+          OHOS_PROFILE: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_PROFILE_B64 || '' }}
         run: |
           set -euo pipefail
-          if [ -z "$CERT_P12" ] || [ -z "$PROFILE_B64" ]; then
-            echo "::notice::sign-ios: DAY_APPLE_CERT_P12 and DAY_IOS_PROFILE_B64 are not both set, so the .ipa ships unsigned"
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=true" >> "$GITHUB_OUTPUT"
+          case "$TARGET" in
+            ios-uikit)     present=$([ -n "$APPLE_CERT" ] && [ -n "$APPLE_PROFILE" ] && echo true || echo false)
+                           need="DAY_APPLE_CERT_P12 and DAY_IOS_PROFILE_B64" ;;
+            android-mdc)   present=$([ -n "$ANDROID_KEYSTORE" ] && [ -n "$ANDROID_ALIAS" ] && echo true || echo false)
+                           need="DAY_ANDROID_KEYSTORE_B64 and DAY_ANDROID_KEY_ALIAS (with DAY_KS_PASS and DAY_KEY_PASS)" ;;
+            harmony-arkui) present=$([ -n "$OHOS_KEYSTORE" ] && [ -n "$OHOS_CERT" ] && [ -n "$OHOS_PROFILE" ] && echo true || echo false)
+                           need="DAY_OHOS_KEYSTORE_B64, DAY_OHOS_CERT_B64 and DAY_OHOS_PROFILE_B64 (with DAY_OHOS_KEY_ALIAS, DAY_OHOS_KS_PASS and DAY_OHOS_KEY_PASS)" ;;
+            *) echo "::error::sign: no signer for $TARGET"; exit 1 ;;
+          esac
+          if [ "$present" = false ]; then
+            echo "::notice::sign ($TARGET): $need are not all set, so the package ships unsigned"
           fi
-      - name: Download the unsigned .ipa
+          echo "present=$present" >> "$GITHUB_OUTPUT"
+      - name: Download the unsigned package
         if: steps.material.outputs.present == 'true'
         uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.artifact-prefix }}dist-ios-uikit
+          name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
           path: ${{ runner.temp }}/dist
+      # The package by its unsigned name, and for Android the .apk beside the .aab, signed with
+      # the same key best-effort (the store takes the .aab; the .apk is the sideload).
       - name: Find it
         if: steps.material.outputs.present == 'true'
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          IPA="$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name '*-unsigned.ipa' | head -1)"
-          [ -n "$IPA" ] || { echo "::error::no *-unsigned.ipa in dist-ios-uikit; the build leg packs the iOS app unsigned for this job to sign"; exit 1; }
-          echo "IPA=$IPA" >> "$GITHUB_ENV"
+          case "$TARGET" in
+            ios-uikit) ext=ipa ;; android-mdc) ext=aab ;; harmony-arkui) ext=hap ;;
+          esac
+          PKG="$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name "*-unsigned.$ext" | head -1)"
+          [ -n "$PKG" ] || { echo "::error::no *-unsigned.$ext in dist-$TARGET; the build leg packs every store package unsigned for this job to sign"; exit 1; }
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          if [ "$TARGET" = android-mdc ]; then
+            echo "ALSO=$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name '*-unsigned.apk' | head -1)" >> "$GITHUB_ENV"
+          fi
       - name: Set up the day CLI
         if: steps.material.outputs.present == 'true'
         uses: daybrite/actions/.github/actions/setup-day-cli@main
@@ -2489,32 +2507,53 @@ jobs:
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
-      # The certificate goes into an ephemeral keychain the action destroys when it is done,
-      # `day sign apply` re-signs the package as an archive (the profile is embedded, every
-      # binary inside is signed with the identity, and no app code runs), and the provenance
-      # sidecars beside the unsigned .ipa are renamed after the signed one, the way the release
-      # job names its assets, so `day rebuild` still finds them beside the artifact. The App
-      # Fair's queue signs with the same action.
-      - name: Sign the .ipa
+      # hap-sign-tool ships in the OpenHarmony SDK; the other signers come with the CLI (Android's
+      # jarsigner and apksigner are on every runner image).
+      - name: Set up the HarmonyOS SDK
+        if: steps.material.outputs.present == 'true' && matrix.target == 'harmony-arkui'
+        uses: daybrite/actions/.github/actions/setup-day-deps@main
+        with:
+          target: harmony-arkui
+          pack: false
+          extras: false
+          java: true
+          rust: false
+      # The material goes to the action alone, which keeps it in an ephemeral keychain or a file
+      # it removes; `day sign apply` re-signs the package as an archive and no app code runs; the
+      # provenance sidecars beside the unsigned package are renamed after the signed one, so `day
+      # rebuild` still finds them beside the release asset.
+      - name: Sign the package
         if: steps.material.outputs.present == 'true'
         uses: daybrite/actions/.github/actions/sign-package@main
         with:
-          target: ios-uikit
-          package: ${{ env.IPA }}
-          apple-cert-p12: ${{ secrets.DAY_APPLE_CERT_P12 }}
-          apple-cert-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
-          apple-profile-b64: ${{ secrets.DAY_IOS_PROFILE_B64 }}
+          target: ${{ matrix.target }}
+          package: ${{ env.PKG }}
+          also-sign: ${{ env.ALSO }}
+          apple-cert-p12: ${{ matrix.target == 'ios-uikit' && secrets.DAY_APPLE_CERT_P12 || '' }}
+          apple-cert-password: ${{ matrix.target == 'ios-uikit' && secrets.DAY_APPLE_CERT_PASSWORD || '' }}
+          apple-profile-b64: ${{ matrix.target == 'ios-uikit' && secrets.DAY_IOS_PROFILE_B64 || '' }}
+          keystore-b64: ${{ matrix.target == 'android-mdc' && secrets.DAY_ANDROID_KEYSTORE_B64 || '' }}
+          key-alias: ${{ matrix.target == 'android-mdc' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
+          keystore-password: ${{ matrix.target == 'android-mdc' && secrets.DAY_KS_PASS || '' }}
+          key-password: ${{ matrix.target == 'android-mdc' && secrets.DAY_KEY_PASS || '' }}
+          ohos-keystore-b64: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_KEYSTORE_B64 || '' }}
+          ohos-cert-b64: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_CERT_B64 || '' }}
+          ohos-profile-b64: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_PROFILE_B64 || '' }}
+          ohos-key-alias: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_KEY_ALIAS || '' }}
+          ohos-keystore-password: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_KS_PASS || '' }}
+          ohos-key-password: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_KEY_PASS || '' }}
       - name: Upload the signed package
         if: steps.material.outputs.present == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.artifact-prefix }}dist-ios-uikit
+          name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
           path: ${{ runner.temp }}/dist/
           if-no-files-found: error
+          overwrite: true
 
   release:
     name: release assets
-    needs: [preflight, build, sign-macos, sign-ios]
+    needs: [preflight, build, sign-macos, sign]
     # `!cancelled()` + explicit results, for the same reason sign-macos documents: without it,
     # GitHub's implicit success() gate reads sign-macos's SKIP (no signing-environment
     # configured — the common case) as "a need did not succeed" and silently skips the release.
@@ -2529,7 +2568,7 @@ jobs:
           && needs.preflight.outputs.promotion != 'true'
           && needs.build.result == 'success'
           && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped')
-          && (needs.sign-ios.result == 'success' || needs.sign-ios.result == 'skipped') }}
+          && (needs.sign.result == 'success' || needs.sign.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       # The checkout is for `day screenshot index` further down, which reads the project for
@@ -2879,13 +2918,20 @@ jobs:
             "$(lanes 'platform :android' true "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile")" \
             "$HAS_PLAY" "DAY_PLAY_JSON_KEY"
 
-  # sign-ios republishes the signed .ipa under the same dist-ios-uikit name, so having it in
+  # the sign job republishes the signed .ipa under the same dist-ios-uikit name, so having it in
   # `needs` means this job downloads the signed package when the material exists and the
   # unsigned one otherwise, which it refuses below.
   appstore-ios:
     name: upload (ios app store)
-    needs: [preflight, build, sign-ios, stores]
-    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_ios == 'true' }}
+    needs: [preflight, build, sign, stores]
+    # The same gate for every store: the whole build succeeded (a failed walkthrough on any
+    # device is a regression the release does not ship, as `release` already holds) and the
+    # signer ran. Otherwise this stands down as a skip, not a failure over a package it could
+    # never send.
+    if: >-
+      ${{ !cancelled() && needs.preflight.outputs.release == 'true'
+          && needs.stores.outputs.upload_ios == 'true'
+          && needs.build.result == 'success' && needs.sign.result == 'success' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
     env:
       # `day store stage` below reads the listing of the build being published: the base app's
@@ -2904,7 +2950,7 @@ jobs:
           IPA="$(find dist -type f -name '*.ipa' | head -1)"
           [ -n "$IPA" ] || { echo "::error::no .ipa in the downloaded dist artifact — is ios-uikit in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
           case "$IPA" in
-            *-unsigned.ipa) echo "::error::the packed .ipa is unsigned — the store refuses it. Set DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 so the sign-ios job signs it (and DAY_APPLE_TEAM, DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64 for the upload)"; exit 1 ;;
+            *-unsigned.ipa) echo "::error::the .ipa is unsigned: the sign job found no DAY_APPLE_CERT_P12 and DAY_IOS_PROFILE_B64 to sign it with. Set them (and DAY_APPLE_TEAM, DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64 for the upload), then re-run the tag"; exit 1 ;;
           esac
           echo "path=$PWD/$IPA" | tee -a "$GITHUB_OUTPUT"
       # The CLI indexes this run's screenshots and, for an app with no fastlane directory of
@@ -2990,7 +3036,10 @@ jobs:
   appstore-macos:
     name: upload (mac app store)
     needs: [preflight, build, sign-macos, stores]
-    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_macos == 'true' }}
+    if: >-
+      ${{ !cancelled() && needs.preflight.outputs.release == 'true'
+          && needs.stores.outputs.upload_macos == 'true'
+          && needs.build.result == 'success' && needs.sign-macos.result == 'success' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
     env:
       # `day store stage` below reads the listing of the build being published: the base app's
@@ -3039,8 +3088,11 @@ jobs:
 
   playstore-android:
     name: upload (google play)
-    needs: [preflight, build, stores]
-    if: ${{ !cancelled() && needs.preflight.outputs.release == 'true' && needs.stores.outputs.upload_play == 'true' }}
+    needs: [preflight, build, sign, stores]
+    if: >-
+      ${{ !cancelled() && needs.preflight.outputs.release == 'true'
+          && needs.stores.outputs.upload_play == 'true'
+          && needs.build.result == 'success' && needs.sign.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       # `day store stage` below reads the listing of the build being published: the base app's
@@ -3058,8 +3110,11 @@ jobs:
           set -euo pipefail
           AAB="$(find dist -type f -name '*.aab' | head -1)"
           [ -n "$AAB" ] || { echo "::error::no .aab in the downloaded dist artifact — is android-mdc in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
-          # A dev-tier pack signs with the debug keystore, which Play refuses; the signer's
-          # certificate says which key it was.
+          case "$AAB" in
+            *-unsigned.aab) echo "::error::the .aab is unsigned: the sign job found no DAY_ANDROID_KEYSTORE_B64 and DAY_ANDROID_KEY_ALIAS (with DAY_KS_PASS and DAY_KEY_PASS) to sign it with. Set them, then re-run the tag"; exit 1 ;;
+          esac
+          # And never the CLI's dev keystore, which Play refuses; the signer's certificate says
+          # which key it was.
           if keytool -printcert -jarfile "$AAB" 2>/dev/null | grep -q "CN=Android Debug"; then
             echo "::error::the packed .aab is signed with the debug keystore — Play refuses it. Set DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS so pack signs with the upload key"
             exit 1

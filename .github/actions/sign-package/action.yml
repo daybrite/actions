@@ -2,15 +2,16 @@ name: Sign a package
 description: >-
   Sign a packed app with key material named on the command line — an iOS .ipa with a
   distribution certificate and an App Store profile (stored, or issued now from an App Store
-  Connect key), an Android .aab or .apk with the upload keystore — through `day sign apply`, which
-  re-signs the package as an archive so no app code runs. The material lives in an ephemeral
-  keychain that is destroyed when the action ends, whatever happened in between. Both the shared
-  `dayapp.yml` workflow (its `sign-ios` job) and the App Fair's queue sign with this action; a
-  caller sets up the day CLI first (`setup-day-cli`, which exports DAY_BIN).
-
+  Connect key), an Android .aab or .apk with the upload keystore, a HarmonyOS .hap with its
+  keystore, certificate and profile — through `day sign apply`, which re-signs the package as an
+  archive so no app code runs. The material lives in an ephemeral keychain, or in files removed
+  before the action ends, whatever happened in between. Both the shared `dayapp.yml` workflow
+  (its `sign` job) and the App Fair's queue sign with this action; a caller sets up the day CLI
+  first (`setup-day-cli`, which exports DAY_BIN), and for a .hap the OpenHarmony SDK too
+  (`setup-day-deps`), whose hap-sign-tool does the signing.
 inputs:
   target:
-    description: The Day target the package was packed for, ios-uikit or android-mdc.
+    description: The Day target the package was packed for, ios-uikit, android-mdc or harmony-arkui.
     required: true
   package:
     description: The package to sign, an absolute path.
@@ -41,6 +42,25 @@ inputs:
     required: false
   key-password:
     description: The key password.
+    required: false
+  # --- HarmonyOS ----------------------------------------------------------------------------
+  ohos-keystore-b64:
+    description: Base64 release keystore (.p12) for a .hap.
+    required: false
+  ohos-cert-b64:
+    description: Base64 app certificate (.cer) for a .hap.
+    required: false
+  ohos-profile-b64:
+    description: Base64 provisioning profile (.p7b) for a .hap.
+    required: false
+  ohos-key-alias:
+    description: The key alias inside the HarmonyOS keystore.
+    required: false
+  ohos-keystore-password:
+    description: The HarmonyOS keystore password.
+    required: false
+  ohos-key-password:
+    description: The HarmonyOS key password.
     required: false
   # --- Apple --------------------------------------------------------------------------------
   apple-cert-p12:
@@ -103,8 +123,8 @@ runs:
         [ -n "${DAY_BIN:-}" ] && [ -x "$DAY_BIN" ] || { echo "::error::sign-package needs DAY_BIN — run daybrite/actions/.github/actions/setup-day-cli first"; exit 1; }
         [ -f "${{ inputs.package }}" ] || { echo "::error::no package at ${{ inputs.package }}"; exit 1; }
         case "${{ inputs.target }}" in
-          ios-uikit|android-mdc) ;;
-          *) echo "::error::sign-package signs ios-uikit and android-mdc packages, not ${{ inputs.target }}"; exit 1 ;;
+          ios-uikit|android-mdc|harmony-arkui) ;;
+          *) echo "::error::sign-package signs ios-uikit, android-mdc and harmony-arkui packages, not ${{ inputs.target }}"; exit 1 ;;
         esac
 
     # The signed file's name: `<stem>-unsigned.<ext>` becomes `<stem>.<ext>`, the way the release
@@ -171,6 +191,41 @@ runs:
         done <<< "$ALSO"
         rm -f "$RUNNER_TEMP/upload.keystore"
 
+    # --- HarmonyOS -------------------------------------------------------------------------
+    - name: Sign the HarmonyOS package
+      if: inputs.target == 'harmony-arkui'
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        SIGNED: ${{ steps.name.outputs.signed }}
+        KEYSTORE_B64: ${{ inputs.ohos-keystore-b64 }}
+        CERT_B64: ${{ inputs.ohos-cert-b64 }}
+        PROFILE_B64: ${{ inputs.ohos-profile-b64 }}
+        KEY_ALIAS: ${{ inputs.ohos-key-alias }}
+        DAY_SIGN_STORE_PASS: ${{ inputs.ohos-keystore-password }}
+        DAY_SIGN_KEY_PASS: ${{ inputs.ohos-key-password }}
+      run: |
+        set -euo pipefail
+        [ -n "${KEYSTORE_B64:-}" ] && [ -n "${CERT_B64:-}" ] && [ -n "${PROFILE_B64:-}" ] || { echo "::error::a .hap needs ohos-keystore-b64, ohos-cert-b64 and ohos-profile-b64"; exit 1; }
+        [ -n "${KEY_ALIAS:-}" ] || { echo "::error::no key alias (ohos-key-alias) for the keystore"; exit 1; }
+        umask 077
+        printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/ohos.p12"
+        printf '%s' "$CERT_B64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/ohos.cer"
+        printf '%s' "$PROFILE_B64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/ohos.p7b"
+        # All of it on the command line, as for Android: no [signing] table of the app is read.
+        # hap-sign-tool comes from the OpenHarmony SDK the caller set up (OHOS_BASE_SDK_HOME).
+        "$DAY_BIN" sign apply "$PACKAGE" ${SIGNED:+--out "$SIGNED"} \
+          --keystore "$RUNNER_TEMP/ohos.p12" --cert "$RUNNER_TEMP/ohos.cer" \
+          --profile "$RUNNER_TEMP/ohos.p7b" --key-alias "$KEY_ALIAS"
+        rm -f "$RUNNER_TEMP/ohos.p12" "$RUNNER_TEMP/ohos.cer" "$RUNNER_TEMP/ohos.p7b"
+        [ -f "$SIGNED" ] || { echo "::error::day sign apply wrote no $SIGNED"; exit 1; }
+        if [ "$SIGNED" != "$PACKAGE" ]; then
+          rm -f "$PACKAGE"
+          for side in "$PACKAGE".*; do
+            [ -e "$side" ] || continue
+            mv "$side" "$SIGNED${side#"$PACKAGE"}"
+          done
+        fi
     # --- Apple -----------------------------------------------------------------------------
     - name: Create an ephemeral signing keychain
       if: inputs.target == 'ios-uikit'

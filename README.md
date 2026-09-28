@@ -491,17 +491,28 @@ absent — it never fails for that reason. On semantic-version tags, the same `D
 exist and the caller forwards them with `secrets: inherit`. Branch and PR builds always pack
 dev-signed, even when the secrets exist.
 
-An App Store `.ipa` is packed unsigned by the build leg (`day pack --no-sign`, which produces
-`<stem>-ios-uikit-unsigned.ipa`) and signed afterwards by `sign-ios`, a job that checks out no
-code, the way `sign-macos` signs the `.app`. The job hands the package and the material to the
-[`sign-package`](#sign-package) action, which imports the distribution certificate
-(`DAY_APPLE_CERT_P12` with `DAY_APPLE_CERT_PASSWORD`) into an ephemeral keychain, decodes the App
-Store provisioning profile (`DAY_IOS_PROFILE_B64`), runs `day sign apply` over the package, and
-destroys the keychain; the job republishes `dist-ios-uikit` with the signed `.ipa` in place of
-the unsigned one. The App Fair's queue signs with the same action. The job that
-builds and runs the app's code never holds Apple material. Without both secrets the unsigned
-`.ipa` ships as it is and the App Store upload refuses it. The upload itself takes
-`DAY_APPLE_TEAM` and the API key trio `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64`.
+On a release, every store package is packed unsigned by the build leg (`day pack --no-sign`,
+which produces `<stem>-<target>-unsigned.<ext>`: the iOS `.ipa`, the Android `.aab` and `.apk`,
+the HarmonyOS `.hap`) and signed afterwards by `sign`, one job row per store target, each of
+which checks out no code, the way `sign-macos` signs the `.app`. A row hands its package and its
+platform's material alone to the [`sign-package`](#sign-package) action: the distribution
+certificate (`DAY_APPLE_CERT_P12` with `DAY_APPLE_CERT_PASSWORD`) and the App Store profile
+(`DAY_IOS_PROFILE_B64`) for iOS, into an ephemeral keychain; the upload keystore
+(`DAY_ANDROID_KEYSTORE_B64`, `DAY_ANDROID_KEY_ALIAS`, `DAY_KS_PASS`, `DAY_KEY_PASS`) for Android;
+the keystore, certificate and profile (`DAY_OHOS_KEYSTORE_B64`, `DAY_OHOS_CERT_B64`,
+`DAY_OHOS_PROFILE_B64`, `DAY_OHOS_KEY_ALIAS`, `DAY_OHOS_KS_PASS`, `DAY_OHOS_KEY_PASS`) for
+HarmonyOS, whose hap-sign-tool comes from the OpenHarmony SDK the row installs. The action runs
+`day sign apply` over the package and removes the material; the row republishes `dist-<target>`
+with the signed package in place of the unsigned one. The App Fair's queue signs with the same
+action. The job that builds and runs the app's code never holds a signing key for any platform,
+so nothing an app's own build script or dependency runs can read one. A row whose material is
+not set says so and ships the unsigned package as it is; the store upload for that target then
+stands down. The App Store upload itself takes `DAY_APPLE_TEAM` and the API key trio
+`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64`.
+
+Every store upload runs on the same gate: the whole build matrix succeeded (a failed walkthrough
+on any device is a regression the release does not ship, as the release job already holds) and
+that platform's signer ran. A release with a red leg therefore holds every store, not one.
 
 Signing after the build is not only a trust boundary. An archive signed automatically on a CI
 runner, whose keychain starts empty, had Xcode's cloud provisioning mint a new development
@@ -738,8 +749,11 @@ Signs a packed app with key material named on the command line, through `day sig
 re-signs the package as an archive so no app code runs. An iOS `.ipa` takes a distribution
 certificate and an App Store profile — a stored one, or one the action issues now from an App
 Store Connect key (`fastlane sigh`) so the caller stores none per app; an Android `.aab` or
-`.apk` takes the upload keystore, with further `.apk` files signed best-effort. The certificate
-lives in an ephemeral keychain the action destroys when it ends, whatever happened in between.
+`.apk` takes the upload keystore, with further `.apk` files signed best-effort; a HarmonyOS
+`.hap` takes its keystore, certificate and profile (`ohos-*` inputs), signed by the OpenHarmony
+SDK's hap-sign-tool, so the caller sets that SDK up first (`setup-day-deps`). The certificate
+lives in an ephemeral keychain the action destroys when it ends, whatever happened in between,
+and the decoded files do not outlive their step.
 A package named `<stem>-unsigned.<ext>` is signed to `<stem>.<ext>` with its provenance sidecars
 renamed along. The caller sets up the CLI first (`setup-day-cli`).
 
@@ -778,7 +792,7 @@ the CLI first.
     play-json-key: ${{ secrets.DAY_PLAY_JSON_KEY }}
 ```
 
-Both actions are what `dayapp.yml`'s `sign-ios` and upload jobs run, and what the App Fair's
+Both actions are what `dayapp.yml`'s `sign` and upload jobs run, and what the App Fair's
 queue runs in its signing stage, so the two pipelines sign and upload one way.
 
 ## Validation
