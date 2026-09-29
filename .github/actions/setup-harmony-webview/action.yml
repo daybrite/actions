@@ -1,0 +1,41 @@
+name: Prepare Harmony WebView
+description: Install a verified x86_64 ArkWeb runtime into a fresh disposable Oniro 6.1 emulator.
+inputs:
+  target:
+    description: HDC address of the disposable emulator; the guest will be modified and rebooted.
+    default: '127.0.0.1:55555'
+runs:
+  using: composite
+  steps:
+    - name: Install disk extraction tools
+      shell: bash
+      run: |
+        if ! command -v debugfs >/dev/null; then
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs
+        fi
+    - name: Cache the verified x86_64 ArkWeb package
+      uses: actions/cache@v6
+      with:
+        path: ~/.cache/day-arkweb/x86_64-7120ee8df5207d59
+        key: arkweb-x86_64-7120ee8df5207d592cfdf7448da79ac16a6f791f916ec060b55525d43f24f4a7
+    - name: Download and verify the runtime
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        python3 "$ACTION_PATH/arkweb.py" prepare "$HOME/.cache/day-arkweb/x86_64-7120ee8df5207d59"
+    - name: Install the runtime and reboot the emulator
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        HDC_TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/harmony-arkweb-diagnostics"
+        python3 "$ACTION_PATH/arkweb.py" install \
+          "$HOME/.cache/day-arkweb/x86_64-7120ee8df5207d59/ArkWebCore.hap" \
+          --target "$HDC_TARGET" --disposable-emulator \
+          --diagnostics "$RUNNER_TEMP/harmony-arkweb-diagnostics" \
+          2>&1 | tee "$RUNNER_TEMP/harmony-arkweb-diagnostics/setup.log"
+        echo "DAY_OHOS_TARGET=$HDC_TARGET" >> "$GITHUB_ENV"

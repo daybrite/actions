@@ -196,6 +196,12 @@ newest installed rather than pinning a major that the next image drops.
 **Every mobile target runs on a phone and a tablet by default**, with no configuration in the
 calling workflow. `ios-uikit` runs `iPhone * Pro Max` in portrait and `iPad Pro 13-inch` in
 landscape; `android-mdc` runs `medium_phone` in portrait and `medium_tablet` in landscape;
+Harmony walkthroughs automatically install a checksum-verified x86_64 ArkWeb runtime,
+apply the Oniro renderer/GPU compatibility fixes, and reboot before launching the app.
+The extracted runtime is cached; callers need no WebView-specific setup. This enables
+bundled WebViews used by Showcase, Lottie, News, and other apps. See the
+[setup details and emulator limitations](.github/actions/setup-harmony-webview/README.md).
+
 `harmony-arkui` runs its one Oniro image on a `phone` panel (360x720) in portrait and a `tablet`
 panel (1280x800) in landscape. Each is its own parallel job, its own screenshot artifact and its
 own gallery column, and captures land under `<target>/<slug>/<variant>/` — `ios-uikit/iphone/`,

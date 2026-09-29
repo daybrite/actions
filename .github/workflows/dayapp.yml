@@ -2067,7 +2067,7 @@ jobs:
           # a CLI from before panels were selectable refuses. That CLI boots the phone and only
           # the phone, so the row that asked for anything else fails here rather than publishing
           # phone captures under a tablet's name.
-          args=(devices boot -p harmony-arkui --headless)
+          args=(devices boot -p harmony-arkui --headless --wait)
           if grep -Fq "names the panel" <<< "$HELP"; then
             [ -n "${PROFILE:-}" ] && args+=(--device "$PROFILE")
             [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
@@ -2086,8 +2086,21 @@ jobs:
           IMAGES="$(dirname "$(find "$RUNNER_TEMP/oniro-emulator" -name bzImage -print -quit)")"
           echo "DAY_OHOS_EMULATOR=$IMAGES" >> "$GITHUB_ENV"
           DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" "${args[@]}"
-      - name: Run dayscripts (harmony emulator · ${{ matrix.profile }})
+      - name: Prepare the x86_64 WebView runtime
+        id: arkweb
+        timeout-minutes: 20
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.ohosemu.outcome == 'success'
+        continue-on-error: ${{ inputs.tolerate-failures }}
+        uses: daybrite/actions/.github/actions/setup-harmony-webview@main
+      - name: Upload Harmony runtime diagnostics
+        if: always() && steps.arkweb.outcome != 'skipped' && matrix.target == 'harmony-arkui'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}arkweb-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/harmony-arkweb-diagnostics/
+          if-no-files-found: ignore
+      - name: Run dayscripts (harmony emulator · ${{ matrix.profile }})
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.arkweb.outcome == 'success'
         continue-on-error: ${{ inputs.tolerate-failures }}
         env:
           # Per-screenshot compositor settle before capture (script.rs): matches the measured
