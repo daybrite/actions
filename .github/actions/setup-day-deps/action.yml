@@ -24,7 +24,7 @@ inputs:
   target:
     description: >-
       The platform-toolkit combo to prepare for: macos-appkit, macos-gtk, macos-qt, ios-uikit,
-      linux-gtk, linux-qt, android-mdc, harmony-arkui, windows-xaml, windows-qt, windows-gtk,
+      linux-gtk, linux-qt, android-mdc, harmony-arkui, windows-winui, windows-xaml, windows-qt, windows-gtk,
       web-dom. An unknown value fails loudly rather than installing nothing and failing later
       inside cargo.
     required: true
@@ -61,7 +61,7 @@ inputs:
       Extra packages this target needs beyond Day's own set, space-separated — an app's own
       needs, such as a media player's codecs. Installed after the toolkit's, with the runner's
       package manager and its defaults: apt on Linux (recommended packages included), Homebrew
-      on macOS, Chocolatey for windows-xaml, and MSYS2's MINGW64 packages for windows-qt and
+      on macOS, Chocolatey for windows-winui and windows-xaml, and MSYS2's MINGW64 packages for windows-qt and
       windows-gtk, beside the toolkit's own.
     required: false
     default: ""
@@ -74,7 +74,7 @@ runs:
       run: |
         case "${{ inputs.target }}" in
           macos-appkit | macos-gtk | macos-qt | ios-uikit | linux-gtk | linux-qt \
-            | android-mdc | harmony-arkui | windows-xaml | windows-qt | windows-gtk | web-dom) ;;
+            | android-mdc | harmony-arkui | windows-winui | windows-xaml | windows-qt | windows-gtk | web-dom) ;;
           *)
             echo "::error::setup-day-deps: unknown target '${{ inputs.target }}'"
             exit 1 ;;
@@ -295,6 +295,38 @@ runs:
         echo "CC=$GCC" >> "$GITHUB_ENV"
         echo "CXX=$(cygpath -m "$MINGW_PREFIX/bin/g++.exe")" >> "$GITHUB_ENV"
 
+    # --- Windows WinUI 3: the Windows App SDK -------------------------------------------------------
+    # windows-winui builds against the Windows App SDK's NuGet packages (the build fetches them
+    # into %LOCALAPPDATA%\day\winappsdk on first use, ~270 MB, so they are cached per release) and
+    # a development build runs on the installed Windows App Runtime, which is not part of Windows.
+    # A packed app is self-contained and needs neither. WINAPPSDK_RELEASE is the release the day
+    # CLI pins (RUNTIME_VERSION in day's crates/day-toolchain/src/winappsdk.rs); keep them in step.
+    - name: Cache the Windows App SDK packages (windows-winui)
+      if: inputs.target == 'windows-winui'
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\day\winappsdk
+        key: winappsdk-2.5.1-${{ runner.arch }}
+    - name: Windows App Runtime (windows-winui)
+      if: inputs.target == 'windows-winui'
+      shell: pwsh
+      env:
+        WINAPPSDK_RELEASE: "2.5.1"
+      run: |
+        $release = $env:WINAPPSDK_RELEASE
+        $have = Get-AppxPackage Microsoft.WindowsAppRuntime.2 | Where-Object { [version]$_.Version -ge [version]$release } | Select-Object -First 1
+        if (-not $have) {
+          $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $mm = ($release -split '\.')[0..1] -join '.'
+          $url = "https://aka.ms/windowsappsdk/$mm/$release/windowsappruntimeinstall-$arch.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\windowsappruntimeinstall.exe"
+          & "$env:RUNNER_TEMP\windowsappruntimeinstall.exe" --quiet --force
+          if ($LASTEXITCODE -ne 0) { throw "the Windows App Runtime installer exited $LASTEXITCODE" }
+          $have = Get-AppxPackage Microsoft.WindowsAppRuntime.2 | Where-Object { [version]$_.Version -ge [version]$release } | Select-Object -First 1
+          if (-not $have) { throw "Microsoft.WindowsAppRuntime.2 >= $release is not registered after the install" }
+        }
+        Write-Host "Windows App Runtime: $($have.Version)"
+
     # --- packaging tools (inputs.pack) ----------------------------------------------------------
     - name: Flatpak tooling (linux pack)
       if: inputs.pack == 'true' && (inputs.target == 'linux-gtk' || inputs.target == 'linux-qt')
@@ -341,8 +373,8 @@ runs:
           echo "DAY_LINUXDEPLOY_PLUGIN_${TOOLKIT^^}=$PLUGIN"
           echo "APPIMAGE_EXTRACT_AND_RUN=1"
         } >> "$GITHUB_ENV"
-    - name: NSIS (windows-xaml pack)
-      if: inputs.pack == 'true' && inputs.target == 'windows-xaml'
+    - name: NSIS (windows pack)
+      if: inputs.pack == 'true' && (inputs.target == 'windows-winui' || inputs.target == 'windows-xaml')
       shell: pwsh
       run: |
         # The Windows runner images ship no NSIS. Chocolatey installs it, but its feed answers

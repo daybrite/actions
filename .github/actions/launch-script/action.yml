@@ -86,9 +86,12 @@ runs:
         # The NSIS installer, not the .msix: an .msix will not install unless its certificate is
         # one Windows already trusts, and CI signs with a per-run development cert. The installer
         # is per-user and relocatable, so the script can put it in a temp directory.
-        win="$(asset_for windows-xaml exe)"
+        # windows-winui's installer when the release has one; the deprecated windows-xaml's for a
+        # project that has not moved to WinUI yet.
+        win="$(asset_for windows-winui exe)"
+        [ -n "$win" ] || win="$(asset_for windows-xaml exe)"
         if [ -z "$win" ]; then
-          echo "::notice::no windows-xaml -setup.exe in this release — no launch.ps1 generated"
+          echo "::notice::no windows-winui (or windows-xaml) -setup.exe in this release — no launch.ps1 generated"
         else
           render "$ACTION_DIR/launch.ps1" launch.ps1 <<EOF
         \$Repo = "$RELEASE_REPO"
