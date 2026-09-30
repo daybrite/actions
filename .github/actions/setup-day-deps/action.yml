@@ -345,12 +345,40 @@ runs:
       if: inputs.pack == 'true' && inputs.target == 'windows-xaml'
       shell: pwsh
       run: |
-        choco install nsis -y --no-progress
+        # The Windows runner images ship no NSIS. Chocolatey installs it, but its feed answers
+        # 503 now and then (one did on 2026-09-30 and failed a whole windows-xaml leg), so the
+        # install is retried, and when the feed stays down the same release comes straight from
+        # SourceForge instead: pinned, checksummed (the sum Chocolatey's own package carries),
+        # and installed silently with `/S`. Either way the outcome is judged by finding
+        # makensis.exe, not by an exit code.
+        #
         # `choco` edits the MACHINE PATH, which does not reach later steps: Actions hands every step
         # the environment captured when the job started. So locate makensis.exe now and hand it to
         # `day pack` explicitly (DAY_MAKENSIS is what `day doctor` probes too).
-        $roots = @("$env:ProgramFiles\NSIS", "${env:ProgramFiles(x86)}\NSIS", "$env:ChocolateyInstall\bin", "$env:ChocolateyInstall\lib\nsis") | Where-Object { $_ -and (Test-Path $_) }
-        $exe = Get-ChildItem -Path $roots -Recurse -Filter makensis.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $exe) { throw "makensis.exe not found after 'choco install nsis' (looked in: $($roots -join '; '))" }
+        function Find-Makensis {
+          $roots = @("$env:ProgramFiles\NSIS", "${env:ProgramFiles(x86)}\NSIS", "$env:ChocolateyInstall\bin", "$env:ChocolateyInstall\lib\nsis") | Where-Object { $_ -and (Test-Path $_) }
+          if (-not $roots) { return $null }
+          Get-ChildItem -Path $roots -Recurse -Filter makensis.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        $exe = $null
+        for ($attempt = 1; $attempt -le 3 -and -not $exe; $attempt++) {
+          if ($attempt -gt 1) { Start-Sleep -Seconds (15 * $attempt) }
+          try { choco install nsis -y --no-progress } catch { Write-Host "choco: $_" }
+          $exe = Find-Makensis
+          if (-not $exe) { Write-Host "::warning::choco install nsis left no makensis.exe (attempt $attempt of 3)" }
+        }
+        if (-not $exe) {
+          $version = '3.13'
+          $sha256 = 'db9a1038bbc0e53fef24f423fd609979bd578e942f1be1198db186d1c42652a3'
+          $setup = Join-Path $env:RUNNER_TEMP "nsis-$version-setup.exe"
+          Write-Host "Chocolatey failed three times; installing NSIS $version from SourceForge"
+          curl.exe -fsSL --retry 3 -o $setup "https://downloads.sourceforge.net/project/nsis/NSIS%203/$version/nsis-$version-setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS $version download failed (curl exit $LASTEXITCODE)" }
+          $got = (Get-FileHash -Path $setup -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $sha256) { throw "nsis-$version-setup.exe: SHA-256 $got, expected $sha256" }
+          Start-Process -FilePath $setup -ArgumentList '/S' -Wait
+          $exe = Find-Makensis
+        }
+        if (-not $exe) { throw "makensis.exe not found after installing NSIS (Chocolatey and SourceForge both tried)" }
         "DAY_MAKENSIS=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         Write-Host "makensis: $($exe.FullName)"
