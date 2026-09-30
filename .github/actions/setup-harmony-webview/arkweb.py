@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned ArkWeb runtime for disposable Oniro 6.1 x86_64 test emulators.
+"""Pinned ArkWeb runtime for disposable x86_64 OpenHarmony test emulators (ohos-qemu 7.0, Oniro 6.1).
 
 Used automatically by dayapp.yml after booting a fresh CI emulator.
 """
@@ -17,8 +17,15 @@ import zipfile
 ARCHIVE_URL = "https://update.dbankcdn.com/download/data/pub_13/HWHOTA_hota_900_9/4a/v3/SurZ60PYSryhwf0W4QEK1g/system-image-phone-x86.zip"
 ARCHIVE_SHA = "874e359f7f07b93c2b6761b9052fc2681ac2da0202eed7fa0c299a2179487d4a"
 HAP_SHA = "7120ee8df5207d592cfdf7448da79ac16a6f791f916ec060b55525d43f24f4a7"
-EGL_SHA = "0f16b8f14a24200f590c74661c21d82f64df14d2aa12e93e407062e301e5ead3"
-PATCHED_EGL_SHA = "a3ed3f41a13cc30ddc941bd446d3a7758233ebca6a7672828e55b5721b63d8e6"
+# Each tested EGL wrapper, original → patched: the only binaries this installer will modify.
+EGL_SHAS = {
+    # harmony-contrib/ohos-qemu v20260919, OpenHarmony 7.0.0.39 x86_64_virt (what CI boots).
+    "e4967375b5abc43bbd3bf79a8446ff6a831ccf0d50df8c789356c5d0a5fa42bf":
+        "3a1adf18437a8ef380166040cbb27b1abffd1a5fe24d3f02242d12ed70f92317",
+    # Eclipse Oniro v6.1, OpenHarmony 6.1.0.31.
+    "0f16b8f14a24200f590c74661c21d82f64df14d2aa12e93e407062e301e5ead3":
+        "a3ed3f41a13cc30ddc941bd446d3a7758233ebca6a7672828e55b5721b63d8e6",
+}
 BUNDLE = "com.huawei.hmos.arkwebcore"
 EGL_PATH = "/system/lib64/platformsdk/libEGL.so"
 SANDBOX_PATH = "/system/etc/sandbox/appdata-sandbox.json"
@@ -91,9 +98,9 @@ def prepare(cache):
 
 def patch_egl(data):
     digest = hashlib.sha256(data).hexdigest()
-    if digest == PATCHED_EGL_SHA:
+    if digest in EGL_SHAS.values():
         return data
-    if digest != EGL_SHA:
+    if digest not in EGL_SHAS:
         raise ValueError(f"Unsupported EGL wrapper: {digest}; refusing to patch")
     token = b"EGL_EXT_create_context_robustness "
     if data.count(token) != 1:
@@ -184,7 +191,8 @@ def install(hap, target, diagnostics):
         try:
             if device.shell("param get bootevent.boot.completed") == "true":
                 device.run("file", "recv", EGL_PATH, diagnostics / "libEGL.installed.so")
-                require_hash(diagnostics / "libEGL.installed.so", PATCHED_EGL_SHA)
+                require_hash(diagnostics / "libEGL.installed.so",
+                             hashlib.sha256(patched_egl).hexdigest())
                 print(f"ArkWeb ready: {installed}", flush=True)
                 return
         except (RuntimeError, subprocess.SubprocessError):

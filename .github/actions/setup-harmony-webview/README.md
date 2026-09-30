@@ -31,6 +31,22 @@ confined to disposable emulators and the demo's bundled offline content. It is a
 test fixture, not a supported production browser distribution. The repository
 does not vendor or republish the Huawei binaries.
 
+## The emulator: OpenHarmony 7.0, not Oniro 6.1
+
+CI boots [harmony-contrib/ohos-qemu](https://github.com/harmony-contrib/ohos-qemu)'s
+OpenHarmony 7.0.0.39 `x86_64_virt` phone image (release `v20260919`, pinned by checksum in
+`dayapp.yml`). Its own ArkWeb is Chromium M144 but, like Oniro's, arm64-only, so this action
+still installs the x86_64 runtime above. On the Oniro 6.1 image that runtime renders, but the
+app crashes on nearly every change to a live web view (a swapped animation, an evaluated script,
+a page change): `SIGSEGV` in Mesa llvmpipe's `lp_scene_is_resource_referenced`, reached from
+`ohos_create_image_from_native_buffer` on `RSRenderThread`, as the render thread imports a frame
+buffer ArkWeb has just reallocated. The same runtime on 7.0, with its own Mesa 21.3.3 build,
+passes day-piece-lottie's demo scripts (35/35 and 75/75, 2026-09-30) with no fault log.
+
+On 7.0 the kernel has PID and network namespaces, so the sandbox rules below are left as they
+are; the EGL advertisement below is patched on 7.0 as on Oniro, each against its pinned wrapper
+hash.
+
 ## Two additional Oniro 6.1 problems
 
 Installing the x86_64 package alone is insufficient:
@@ -57,7 +73,7 @@ These are image workarounds; no WebView Rust or ArkTS changes were needed.
 
 ## Shared workflow behavior
 
-`dayapp.yml` automatically invokes `setup-harmony-webview` after a fresh Oniro
+`dayapp.yml` automatically invokes `setup-harmony-webview` after a fresh OpenHarmony
 emulator boots and before running any Harmony dayscripts. Applications need no
 additional setup inputs. Phone and tablet jobs each prepare their own guest.
 Build-only jobs do not download a browser runtime.
@@ -74,7 +90,7 @@ existing opt-in behavior, but a failed setup never proceeds into the walkthrough
 Original and patched system files and installation output are uploaded as runtime
 diagnostics. A reboot loads the patched EGL wrapper before the app starts.
 
-The action is for **fresh disposable Oniro 6.1 CI guests**. Do not use it on a
+The action is for **fresh disposable OpenHarmony 7.0 (ohos-qemu) or Oniro 6.1 CI guests**. Do not use it on a
 physical device or an everyday emulator. It requires Python 3.11+, `hdc`, `curl`,
 and `debugfs` (`e2fsprogs`, installed automatically by the action when missing).
 It rejects unknown EGL binaries instead of attempting an unverified patch.
@@ -88,7 +104,7 @@ python3 .github/actions/setup-harmony-webview/arkweb.py install \
   --disposable-emulator --diagnostics /tmp/arkweb-diagnostics
 ```
 
-For a custom workflow that boots its own fresh Oniro instance after installing
+For a custom workflow that boots its own fresh OpenHarmony emulator after installing
 the Harmony SDK, the action is also directly reusable:
 
 ```yaml

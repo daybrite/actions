@@ -466,8 +466,8 @@ on:
                 device=phone,  orientation=portrait,  slug=phone
                 device=tablet, orientation=landscape, slug=tablet
 
-          There is one Oniro emulator image, and its screen is whatever size QEMU is told, so a
-          `device` here is a PANEL rather than a catalog entry: `phone` (360x720, what every run
+          There is one emulator image (ohos-qemu's OpenHarmony 7.0 x86_64_virt), and its screen is
+          whatever size QEMU is told, so a `device` here is a PANEL rather than a catalog entry: `phone` (360x720, what every run
           captured on before profiles existed), `tablet` (1280x800, the size the Android tablet
           row captures at, so a walkthrough written against that layout sees the same points), or
           a literal `WxH`. `orientation` turns the panel (`tablet, orientation=portrait` is
@@ -1131,7 +1131,7 @@ jobs:
                  {device: "medium_tablet", os: "36", orientation: "landscape", density: "",
                   slug: "tablet", optional: false}]
               elif $t == "harmony-arkui" then
-                # One Oniro image on two panels (`harmony-devices` above): the phone every run
+                # One emulator image on two panels (`harmony-devices` above): the phone every run
                 # captured on before, and a landscape tablet the size of the Android one.
                 [{device: "phone",  os: "", orientation: "portrait",  density: "",
                   slug: "phone", optional: false},
@@ -2038,18 +2038,23 @@ jobs:
           ANDROID_SERIAL: ${{ steps.androidemu.outputs.serial }}
         run: bash ${{ runner.temp }}/run-dayscripts.sh
 
-      # --- HarmonyOS: the Oniro emulator, the same recipe daybrite/day's own CI runs.
+      # --- HarmonyOS: harmony-contrib/ohos-qemu's OpenHarmony 7.0 x86_64_virt image, pinned by
+      # release and checksum. Not the Oniro 6.1 image any longer: with the x86_64 ArkWeb runtime
+      # installed below, Oniro's software GL (Mesa llvmpipe) crashes an app on nearly every change
+      # to a live web view (SIGSEGV in lp_scene_is_resource_referenced on RSRenderThread), while
+      # the same runtime on 7.0 passes day-piece-lottie's demo scripts. `day devices boot` reads
+      # either layout from the image files.
       # Best-effort from boot to walkthrough only under tolerate-failures: the QEMU guest is slow
       # and occasionally flaky, and a caller may prefer losing a run's OHOS screenshots to
       # re-running the leg. By default a wedged emulator fails the leg; the packages are already
       # uploaded either way. QEMU itself comes from setup-day-deps (extras).
-      - name: Cache the Oniro emulator image
+      - name: Cache the OpenHarmony emulator image
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
         uses: actions/cache@v6
         with:
-          path: ~/.cache/oniro-emulator/v6.1
-          key: oniro-emulator-v6.1-oniro_emulator.zip
-      - name: Boot the Oniro emulator (${{ matrix.profile }})
+          path: ~/.cache/ohos-qemu/v20260919
+          key: ohos-qemu-v20260919-x86_64_virt-phone
+      - name: Boot the OpenHarmony emulator (${{ matrix.profile }})
         id: ohosemu
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
         continue-on-error: ${{ inputs.tolerate-failures }}
@@ -2072,18 +2077,23 @@ jobs:
             [ -n "${PROFILE:-}" ] && args+=(--device "$PROFILE")
             [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
           elif [ -n "${PROFILE:-}" ] && [ "$PROFILE" != phone ]; then
-            echo "::error::this day CLI boots the Oniro emulator on its phone panel only; the $PROFILE row needs a CLI with 'day devices boot --device' for harmony-arkui. Update day-version."
+            echo "::error::this day CLI boots the OpenHarmony emulator on its phone panel only; the $PROFILE row needs a CLI with 'day devices boot --device' for harmony-arkui. Update day-version."
             exit 1
           fi
-          ZIP="$HOME/.cache/oniro-emulator/v6.1/oniro_emulator.zip"
-          if [ ! -f "$ZIP" ]; then
-            mkdir -p "$(dirname "$ZIP")"
-            curl -fL -o "$ZIP" \
-              "https://github.com/eclipse-oniro4openharmony/device_board_oniro/releases/download/v6.1/oniro_emulator.zip"
+          # A cached archive is checked too, so a corrupt cache entry fails here rather than
+          # booting something other than the pinned image.
+          TGZ="$HOME/.cache/ohos-qemu/v20260919/openharmony-qemu-x86_64-x86_64_virt-phone.tar.gz"
+          SHA=08d35399119ec9b87d564cd8bf024e8a189921f5bacf09da889b7b223848a488
+          if [ ! -f "$TGZ" ]; then
+            mkdir -p "$(dirname "$TGZ")"
+            curl -fL -o "$TGZ" \
+              "https://github.com/harmony-contrib/ohos-qemu/releases/download/v20260919/openharmony-qemu-x86_64-x86_64_virt-phone.tar.gz"
           fi
-          rm -rf "$RUNNER_TEMP/oniro-emulator" && mkdir -p "$RUNNER_TEMP/oniro-emulator"
-          unzip -q "$ZIP" -d "$RUNNER_TEMP/oniro-emulator"
-          IMAGES="$(dirname "$(find "$RUNNER_TEMP/oniro-emulator" -name bzImage -print -quit)")"
+          echo "$SHA  $TGZ" | sha256sum -c -
+          rm -rf "$RUNNER_TEMP/ohos-emulator" && mkdir -p "$RUNNER_TEMP/ohos-emulator"
+          # The archive was made on macOS; GNU tar only warns about its xattr headers.
+          tar -xzf "$TGZ" -C "$RUNNER_TEMP/ohos-emulator" --warning=no-unknown-keyword
+          IMAGES="$(dirname "$(find "$RUNNER_TEMP/ohos-emulator" -name bzImage -print -quit)")"
           echo "DAY_OHOS_EMULATOR=$IMAGES" >> "$GITHUB_ENV"
           DAY_OHOS_EMULATOR="$IMAGES" "$DAY_BIN" "${args[@]}"
       - name: Prepare the x86_64 WebView runtime
