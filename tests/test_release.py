@@ -207,6 +207,17 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(rows[0]["label"], "harmony-arkui · 1200x1920")
         self.assertEqual(rows[0]["device_slug"], "")
 
+    def test_portable_hosts_keep_build_rows_but_have_no_package_consumers(self):
+        result, values = self.plan(TARGETS_IN="macos-gtk, windows-qt, web-dom")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual([r["target"] for r in json.loads(values["pack_matrix"])["include"]],
+                         ["web-dom"])
+        self.assertTrue(self.rows(values, "macos-gtk"))
+        self.assertTrue(self.rows(values, "windows-qt"))
+        result, values = self.plan(TARGETS_IN="macos-qt")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(values["pack_matrix"])["include"], [])
+
     def test_targets_all_reads_the_manifest(self):
         """`all` resolves to Day.toml's [app] targets, once, so every later check and the
         release job see one concrete list; without a manifest to read it is an error."""

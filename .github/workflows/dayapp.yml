@@ -192,6 +192,15 @@ on:
           apply, so anything a command downloads or writes belongs under `$RUNNER_TEMP`.
         type: string
         default: ""
+      script-setup:
+        description: >-
+          Bash commands sourced once from the project directory immediately before the
+          dayscript launches, after the simulator/emulator is ready. DAY_SCRIPT_TARGET names
+          the target; ANDROID_SERIAL selects the Android device. Use this for test fixtures
+          and reverse ports. An EXIT trap can stop services when the scripts finish or fail.
+          Write logs/generated files under RUNNER_TEMP, not into the checkout.
+        type: string
+        default: ""
       scripts:
         description: >-
           Dayscripts to run on each target, comma- or space-separated paths relative to the
@@ -985,9 +994,10 @@ jobs:
           done
           [ ${#rows[@]} -gt 0 ] || { echo "::error::inputs.targets is empty"; exit 1; }
           matrix="{\"include\":[$(IFS=,; echo "${rows[*]}")]}"
-          # One row per target: what a PACKAGE consumer wants, since only a target's primary
-          # profile row packs one. The build matrix below may carry several rows per target.
-          echo "pack_matrix=$matrix" | tee -a "$GITHUB_OUTPUT"
+          # Only shipped targets have package artifacts. Portable GTK/Qt hosts still remain
+          # in the build matrix below, with full compilation and walkthrough coverage.
+          pack_matrix=$(jq -c '.include |= map(select(.tier == "primary"))' <<< "$matrix")
+          echo "pack_matrix=$pack_matrix" | tee -a "$GITHUB_OUTPUT"
 
           # Device profiles (inputs.ios-profiles / android-profiles) fan a mobile target out into
           # one row — one parallel job — per profile. jq builds them rather than bash: a device
@@ -1529,7 +1539,7 @@ jobs:
           target: ${{ matrix.target }}
           # Only the row that packs pays for the packaging tools: a second device-profile row
           # builds and runs scripts and never packs, so it can skip flatpak/linuxdeploy/NSIS.
-          pack: ${{ matrix.primary }}
+          pack: ${{ matrix.primary && matrix.tier == 'primary' }}
           extras: true
           java: true
           # The toolchain step above already installed the matrix's rust targets.
@@ -1616,9 +1626,8 @@ jobs:
         # Only a target's PRIMARY profile row packs. A second row exists for its screenshots on
         # another device; letting it pack too would upload a second copy of every package under
         # the same artifact name and, on a tag, race the first for the release asset.
-        if: matrix.target != 'web-dom' && matrix.primary
-        # Best-effort on the non-primary combos only when the caller asks (tolerate-failures).
-        continue-on-error: ${{ inputs.tolerate-failures && matrix.tier == 'extra' }}
+        if: matrix.target != 'web-dom' && matrix.primary && matrix.tier == 'primary'
+        # Portable GTK/Qt hosts still build and run scripts; Day has no packer for them yet.
         working-directory: ${{ inputs.project-path }}
         env:
           ANDROID_ABIS_IN: ${{ inputs.android-abis }}
@@ -1679,7 +1688,7 @@ jobs:
         # before it — lint, doctor — skips it, and skipping this too keeps the log honest), and
         # pack must not have failed. A skipped pack still uploads: that is web-dom, which stages a
         # zip of the dist instead of packing.
-        if: always() && matrix.primary && steps.build.outcome == 'success' && steps.pack.outcome != 'failure'
+        if: always() && matrix.primary && matrix.tier == 'primary' && steps.build.outcome == 'success' && steps.pack.outcome != 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}${{ matrix.dist_artifact }}
@@ -1699,6 +1708,7 @@ jobs:
         working-directory: ${{ inputs.project-path }}
         env:
           # The row's per-target list (inputs.target-scripts) wins over the global one.
+          SCRIPT_SETUP_IN: ${{ inputs.script-setup }}
           SCRIPTS_IN: ${{ matrix.scripts != '' && matrix.scripts || inputs.scripts }}
           LOCALES_IN: ${{ inputs.locales }}
           THEMES_IN: ${{ inputs.themes }}
@@ -1875,6 +1885,17 @@ jobs:
               fi
             done
           fi
+          # Source caller setup at execution time, after device boot. Keep the commands in
+          # a separate file: never interpolate shell source through the generator's heredoc.
+          printf '%s\n' "$SCRIPT_SETUP_IN" > "$RUNNER_TEMP/day-script-setup.sh"
+          {
+            printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+            printf 'cd %q\n' "$PWD"
+            printf 'export DAY_SCRIPT_TARGET=%q\n' "$COMBO"
+            printf 'source %q\n' "$RUNNER_TEMP/day-script-setup.sh"
+            cat "$OUT"
+          } > "$OUT.with-setup"
+          mv "$OUT.with-setup" "$OUT"
           chmod +x "$OUT"
           echo "generated $OUT:"
           cat "$OUT"
@@ -2246,7 +2267,7 @@ jobs:
     needs: [preflight, build]
     permissions:
       contents: read
-    if: ${{ inputs.validate-rebuild && !cancelled() }}
+    if: ${{ inputs.validate-rebuild && !cancelled() && fromJSON(needs.preflight.outputs.pack-matrix).include[0] != null }}
     runs-on: ${{ matrix.os }}
     env:
       # Same switch as the build job: `day rebuild` runs a full pack, and a comparison failure
