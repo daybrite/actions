@@ -248,6 +248,14 @@ on:
           sees the state the earlier scripts left.
         type: string
         default: ""
+      fast-scripts:
+        description: >-
+          Request fast functional walkthroughs (DAY_TEST_FAST=1): supported Day runtimes
+          finish decorative motion immediately. Literal pauses, media and real I/O keep
+          their timing. Set false for animation tests. An explicit DAY_TEST_FAST in
+          launch-env overrides this setting. Older runtimes retain their normal behavior.
+        type: boolean
+        default: true
       launch-env:
         description: >-
           Space-separated KEY=VALUE pairs passed to every scripted launch as `--env` (values must
@@ -1715,6 +1723,7 @@ jobs:
           SCRIPTS_IN: ${{ matrix.scripts != '' && matrix.scripts || inputs.scripts }}
           LOCALES_IN: ${{ inputs.locales }}
           THEMES_IN: ${{ inputs.themes }}
+          FAST_SCRIPTS_IN: ${{ inputs.fast-scripts }}
           LAUNCH_ENV_IN: ${{ inputs.launch-env }}
           SCRIPTS_ONCE_IN: ${{ inputs.scripts-once }}
           CAPTURE_SIZE_IN: ${{ inputs.capture-size }}
@@ -1772,7 +1781,15 @@ jobs:
             echo "locales: all → $LOCALES"
           fi
           THEMES="${THEMES_IN//,/ }"
+          # Use the existing --env interface, so older CLIs need no new flag. An
+          # explicit caller value wins without depending on duplicate-env ordering.
+          FAST_VALUE=1
+          [ "${FAST_SCRIPTS_IN:-true}" = false ] && FAST_VALUE=0
+          for kv in $LAUNCH_ENV_IN; do
+            case "$kv" in DAY_TEST_FAST=*) FAST_VALUE="" ;; esac
+          done
           ENVS=""
+          [ -z "$FAST_VALUE" ] || ENVS=" --env DAY_TEST_FAST=$FAST_VALUE"
           for kv in $LAUNCH_ENV_IN; do ENVS="$ENVS --env $kv"; done
           OUT="$RUNNER_TEMP/run-dayscripts.sh"
           # Two runner shapes, chosen by what the installed CLI supports:
