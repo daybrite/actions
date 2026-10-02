@@ -36,6 +36,25 @@ Beside the packages, a release carries every capture the run took:
 | `gallery.json` | that same index on its own, so a tool can read what a release contains without downloading the images |
 | `screenshots-<target>.zip` | one target's captures, for someone who wants just those |
 
+With `screenshot-bundle: frames` the release carries one archive in place of the zips:
+
+| asset | what it is |
+| --- | --- |
+| `screenshots.frames.zst` | every capture's pixels in one Zstandard stream, one independent Zstandard frame per target and device profile |
+| `gallery.json` | the merged index, with an `archive` block describing the file and, per capture, a `frame`: its group, byte offset, length, pixel format and the sha-256 of its pixels |
+
+Captures of one app repeat each other: a page in eight theme and locale variants, forty pages
+around one sidebar. PNG compresses each file alone, and a long-window Zstandard stream over the
+decoded pixels compresses the set. Day-Showcase v0.4.25's 392 iPad captures are 191 MB as PNG
+files, 159 MB zipped, and 24 MB packed; its release carries 1.3 GB of screenshot zips.
+
+`day screenshot unpack gallery.json --out <dir>` checks the archive's sha-256 and every capture's
+pixel sha-256, then writes `<target>/[<device>/]<variant>/<shot>.png` and a `gallery.json` that
+describes the files it wrote. The pixels are exactly the ones captured. The PNG files are new
+encodings, so their bytes differ from the originals. `--check` verifies and writes nothing. The
+website job unpacks a release's archive this way, and the release job runs `--check` on the
+archive before it publishes. The format is specified in day's `docs/screenshot-archive.md`.
+
 Before the release publishes them, the job holds the listing's screenshots to the stores' rules
 (`day store screenshots`, for every store target whose listing declares screenshots) and fails
 with the store's reason when one would refuse the set: the same check the upload jobs and the
@@ -149,6 +168,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `release-assets` | boolean | `True` | Whether this call assembles the GitHub release for a semantic-version tag. `false` leaves it to another call, which is what a second workflow in the same repository needs — one owns the release, the other builds and uploads a `store-flavor` submission. |
 | `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
 | `release-mode` | string | — | What the tag's release becomes: `publish` (public and latest), `pre-release` (public, flagged, so `releases/latest` skips it), or `draft`. Empty follows `publish-release`. See [Staging a release](#staging-a-release). |
+| `screenshot-bundle` | string | `zip` | How the release carries the captures: `zip` (`screenshots.zip` and the per-target zips) or `frames` (one `screenshots.frames.zst`, about an eighth of the size). See [The screenshot bundle](#the-screenshot-bundle). |
 | `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
 | `tab-release` | boolean | `True` | Give the website a version tab for the latest release, built from that release's own assets. It owns the site's root while it is shown. |
@@ -865,7 +885,7 @@ The site publishes the app twice, with a version picker above the platform picke
 | --- | --- | --- |
 | picker label | the release's version, `1.2.3` | the default branch, `main` |
 | downloads | that release's packages, at their `releases/latest/download/` URLs | this run's packages, served from the site under `main/downloads/` |
-| screenshots | that release's `screenshots.zip`, or its per-target zips when it predates the bundle | the captures this run's dayscripts took |
+| screenshots | that release's `screenshots.frames.zst` or `screenshots.zip`, or its per-target zips when it predates the bundle | the captures this run's dayscripts took |
 | web app | that release's `web-dom` dist, at `/webapp/` | this run's, at `/main/webapp/` |
 | page | as published | carries a development-build notice and a link to the release |
 

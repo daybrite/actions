@@ -270,6 +270,85 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(values["website"], "true")
 
 
+DAY_STUB = """#!/bin/sh
+# A day CLI that records its calls. NO_PACK=1 makes it one that predates `screenshot pack`.
+echo "$@" >> "$RUNNER_TEMP/day-calls"
+case "$*" in
+  *"screenshot index"*) for a in "$@"; do out="$a"; done; echo '{"screenshots": []}' > "$out" ;;
+  *"screenshot pack --help"*) [ -z "${NO_PACK:-}" ] || exit 2 ;;
+  *"screenshot pack"*) touch assets/screenshots.frames.zst assets/gallery.json ;;
+esac
+"""
+
+
+class ScreenshotBundleTests(unittest.TestCase):
+    """`screenshot-bundle` picks what the release carries: the zips, or one frame archive."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        day = self.root / "day"
+        day.write_text(DAY_STUB)
+        day.chmod(0o755)
+        for target in ("macos-appkit", "ios-uikit"):
+            shot = self.root / f"shots-in/screenshots-{target}/{target}/light/home.png"
+            shot.parent.mkdir(parents=True)
+            shot.write_bytes(b"png")
+        (self.root / "dist-in/dist-macos-appkit").mkdir(parents=True)
+        (self.root / "dist-in/dist-macos-appkit/demo-macos-appkit.dmg").write_bytes(b"dmg")
+
+    def bundle(self, mode, **env):
+        env = {**os.environ, "RUNNER_TEMP": str(self.root), "GITHUB_WORKSPACE": str(self.root),
+               "GITHUB_OUTPUT": str(self.root / "output"), "DAY_BIN": str(self.root / "day"),
+               "TARGETS_IN": "macos-appkit, ios-uikit", "SCREENSHOT_BUNDLE": mode,
+               "DAYCLI_OUTCOME": "success", **env}
+        for name in ("Assemble release assets", "Merge the capture trees", "Bundle the screenshots"):
+            result = subprocess.run(["bash", "-c", STEPS[name]["run"]], cwd=self.root, env=env,
+                                    text=True, capture_output=True)
+            if result.returncode != 0:
+                break
+        calls = self.root / "day-calls"
+        made = self.root / "assets"
+        assets = sorted(p.name for p in made.iterdir()) if made.exists() else []
+        return result, assets, (calls.read_text().splitlines() if calls.exists() else [])
+
+    def test_zip_is_the_default_and_keeps_every_asset(self):
+        self.assertEqual(yaml.safe_load(WORKFLOW.read_text())[True]["workflow_call"]["inputs"]
+                         ["screenshot-bundle"]["default"], "zip")
+        result, assets, calls = self.bundle("zip")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(assets, ["demo-macos-appkit.dmg", "gallery.json", "screenshots-ios-uikit.zip",
+                                  "screenshots-macos-appkit.zip", "screenshots.zip"])
+        self.assertFalse(any("screenshot pack" in c for c in calls))
+
+    def test_frames_packs_one_archive_and_checks_it(self):
+        result, assets, calls = self.bundle("frames")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(assets, ["demo-macos-appkit.dmg", "gallery.json", "screenshots.frames.zst"])
+        self.assertEqual(calls[-2:], [
+            "screenshot pack shots-merged/gallery.json --out assets/screenshots.frames.zst "
+            "--index-out assets/gallery.json",
+            "screenshot unpack assets/gallery.json --check",
+        ])
+
+    def test_frames_falls_back_to_the_zips_without_a_cli_that_packs(self):
+        for env in ({"NO_PACK": "1"}, {"DAYCLI_OUTCOME": "failure"}):
+            for leftover in ("assets", "shots-merged", "day-calls"):
+                subprocess.run(["rm", "-rf", str(self.root / leftover)], check=True)
+            result, assets, _ = self.bundle("frames", **env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("::warning::screenshot-bundle is frames", result.stdout)
+            self.assertIn("screenshots.zip", assets)
+            self.assertIn("screenshots-ios-uikit.zip", assets)
+            self.assertNotIn("screenshots.frames.zst", assets)
+
+    def test_an_unknown_bundle_is_refused(self):
+        result, _, _ = self.bundle("mp4")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("screenshot-bundle: zip or frames", result.stdout)
+
+
 class PromotionGateTests(unittest.TestCase):
     """A `release: released` run rebuilds the site; it assembles no release and uploads nothing."""
 
