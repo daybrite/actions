@@ -59,7 +59,7 @@ jobs:
                 demo-app-windows-winui-setup.exe.sbom-cdx.json \
                 demo-app-windows-xaml.msix demo-app-windows-xaml-setup.exe \
                 demo-app-windows-xaml-setup.exe.sbom-cdx.json \
-                demo-app-android-mdc.aab demo-app-ios-uikit.ipa screenshots-macos-appkit.zip
+                demo-app-android-mdc.aab demo-app-ios-uikit.ipa screenshots-macos-appkit.tar.xz
       - name: Generate them
         uses: ./.github/actions/launch-script
         with:

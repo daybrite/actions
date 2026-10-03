@@ -9,7 +9,7 @@ Builds a conventional Day project for a set of platform-toolkit targets, runs it
 first and gates the whole matrix: `cargo fmt --all -- --check` by default, with clippy, check, and
 test available through the `preflight-checks` input — so a formatting slip fails one small ubuntu
 job before any build runner starts. On a semantic-version tag (`vX.Y.Z`), a final job attaches
-every package, a per-target screenshot zip, one merged `screenshots.zip` with the `gallery.json`
+every package, one `screenshots.tar.xz` bundle, one per-target `screenshots-<target>.tar.xz` with the `gallery.json`
 index beside it — plus a `SHA256SUMS` manifest — to the GitHub release for that tag, and
 [store-upload jobs](#store-uploads) can hand the packed artifacts to the app's own fastlane lanes.
 
@@ -32,28 +32,25 @@ Beside the packages, a release carries every capture the run took:
 
 | asset | what it is |
 | --- | --- |
-| `screenshots.zip` | the merged capture tree — `<target>/[<device>/]<variant>/<shot>.png` for every target, each target's (and each device profile's) own index beside its captures — with the merged `gallery.json` at its root |
-| `gallery.json` | that same index on its own, so a tool can read what a release contains without downloading the images |
-| `screenshots-<target>.zip` | one target's captures, for someone who wants just those |
+| `screenshots.tar.xz` | every target's captures, `<target>/[<device>/]<variant>/<shot>.png`, each target's (and each device profile's) own index beside them, the merged `gallery.json` at the root, and `SHA256SUMS` first |
+| `screenshots-<target>[-<device>].tar.xz` | one capture tree, the way one CI leg uploaded it, with its own `SHA256SUMS` |
+| `gallery.json` | the merged index on its own, with an `archive` block naming the bundles, their sizes and sha-256s, and each capture's size and sha-256 as archived |
 
-With `screenshot-bundle: frames` the release carries one archive in place of the zips:
+The bundles are plain tar.xz files, written by `day screenshot pack` in one pass over the
+capture trees. The PNG files inside are uncompressed, so xz's window compresses across the
+captures: a page's eight theme and locale variants, forty pages around one sidebar. On Day
+Showcase's 392 iPad captures that is 20.6 MB against 191 MB of PNG files or 120 MB of
+`.tar.gz`. The merged bundle and the per-target ones share their compressed bodies, so
+compressing a tree happens once.
 
-| asset | what it is |
-| --- | --- |
-| `screenshots.frames.zst` | every capture's pixels in one Zstandard stream, one independent Zstandard frame per target and device profile |
-| `gallery.json` | the merged index, with an `archive` block describing the file and, per capture, a `frame`: its group, byte offset, length, pixel format and the sha-256 of its pixels |
-
-Captures of one app repeat each other: a page in eight theme and locale variants, forty pages
-around one sidebar. PNG compresses each file alone, and a long-window Zstandard stream over the
-decoded pixels compresses the set. Day-Showcase v0.4.25's 392 iPad captures are 191 MB as PNG
-files, 159 MB zipped, and 24 MB packed; its release carries 1.3 GB of screenshot zips.
-
-`day screenshot unpack gallery.json --out <dir>` checks the archive's sha-256 and every capture's
-pixel sha-256, then writes `<target>/[<device>/]<variant>/<shot>.png` and a `gallery.json` that
-describes the files it wrote. The pixels are exactly the ones captured. The PNG files are new
-encodings, so their bytes differ from the originals. `--check` verifies and writes nothing. The
-website job unpacks a release's archive this way, and the release job runs `--check` on the
-archive before it publishes. The format is specified in day's `docs/screenshot-archive.md`.
+`tar -xJf screenshots.tar.xz` extracts the files anywhere, as large PNG files;
+`sha256sum -c SHA256SUMS` then checks them. `day screenshot unpack screenshots.tar.xz --out
+<dir>` does both as it streams and writes each capture back as a compact PNG of the same
+pixels, with a `gallery.json` that describes the files it wrote; `--check` verifies and
+writes nothing. The website job unpacks a release's bundle this way, and the release job runs
+`--check` on the bundle before it publishes. The format is specified in day's
+`docs/screenshot-archive.md`. A tool that reads a release's screenshots takes
+`screenshots.tar.xz`; there is no zip.
 
 Before the release publishes them, the job holds the listing's screenshots to the stores' rules
 (`day store screenshots`, for every store target whose listing declares screenshots) and fails
@@ -168,7 +165,6 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `release-assets` | boolean | `True` | Whether this call assembles the GitHub release for a semantic-version tag. `false` leaves it to another call, which is what a second workflow in the same repository needs — one owns the release, the other builds and uploads a `store-flavor` submission. |
 | `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
 | `release-mode` | string | — | What the tag's release becomes: `publish` (public and latest), `pre-release` (public, flagged, so `releases/latest` skips it), or `draft`. Empty follows `publish-release`. See [Staging a release](#staging-a-release). |
-| `screenshot-bundle` | string | `zip` | How the release carries the captures: `zip` (`screenshots.zip` and the per-target zips) or `frames` (one `screenshots.frames.zst`, about an eighth of the size). See [The screenshot bundle](#the-screenshot-bundle). |
 | `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
 | `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
 | `tab-release` | boolean | `True` | Give the website a version tab for the latest release, built from that release's own assets. It owns the site's root while it is shown. |
@@ -885,7 +881,7 @@ The site publishes the app twice, with a version picker above the platform picke
 | --- | --- | --- |
 | picker label | the release's version, `1.2.3` | the default branch, `main` |
 | downloads | that release's packages, at their `releases/latest/download/` URLs | this run's packages, served from the site under `main/downloads/` |
-| screenshots | that release's `screenshots.frames.zst` or `screenshots.zip`, or its per-target zips when it predates the bundle | the captures this run's dayscripts took |
+| screenshots | that release's `screenshots.tar.xz` | the captures this run's dayscripts took |
 | web app | that release's `web-dom` dist, at `/webapp/` | this run's, at `/main/webapp/` |
 | page | as published | carries a development-build notice and a link to the release |
 

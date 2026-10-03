@@ -580,23 +580,6 @@ on:
         type: string
         required: false
         default: ""
-      screenshot-bundle:
-        description: >-
-          How the tag's release carries the run's captures:
-
-            zip     `screenshots.zip` and one `screenshots-<target>.zip` per target (the default)
-            frames  one `screenshots.frames.zst`, a frame archive `day screenshot pack` writes
-
-          The frame archive holds every capture's pixels in one Zstandard stream and is about an
-          eighth of the zips' combined size: Day-Showcase's 392 iPad captures are 159 MB zipped
-          and 24 MB packed. `gallery.json` beside it records where each capture sits and the
-          sha-256 of its pixels, and `day screenshot unpack` checks those and writes the PNG tree
-          back. The website job reads either form. A release tool that reads `screenshots.zip`
-          itself needs `day screenshot unpack` first. With a day CLI older than the `pack`
-          command the release falls back to `zip` with a warning.
-        type: string
-        required: false
-        default: zip
       deploy-web:
         description: >-
           Publish the web-dom build to the CALLER's GitHub Pages after the build matrix (reusing
@@ -2711,13 +2694,8 @@ jobs:
       - name: Assemble release assets
         env:
           TARGETS_IN: ${{ needs.preflight.outputs.targets }}
-          SCREENSHOT_BUNDLE: ${{ inputs.screenshot-bundle }}
         run: |
           set -euo pipefail
-          case "${SCREENSHOT_BUNDLE:-zip}" in
-            zip|frames) ;;
-            *) echo "::error::screenshot-bundle: zip or frames — got '$SCREENSHOT_BUNDLE'"; exit 1 ;;
-          esac
           mkdir -p assets
           # actions/download-artifact extracts a SINGLE pattern match FLAT into `path` — only
           # multiple matches get `<path>/<artifact-name>/` subdirectories. A one-target app (e.g.
@@ -2762,34 +2740,19 @@ jobs:
               cp "$f" "assets/$base"
             done
           done
-          # One zip of screenshots per target. With `screenshot-bundle: frames` the captures
-          # ship as one frame archive, packed by the bundle step below.
-          for d in shots-in/screenshots-*/; do
-            [ -d "$d" ] || continue
-            [ "${SCREENSHOT_BUNDLE:-zip}" = zip ] || continue
-            combo="$(basename "$d")"; combo="${combo#screenshots-}"
-            if [ -n "$(find "$d" -type f -print -quit)" ]; then
-              (cd "$d" && zip -qr "$GITHUB_WORKSPACE/assets/screenshots-${combo}.zip" .)
-            fi
-          done
+          # The captures become bundles further down, once the CLI is up.
           [ -n "$(ls -A assets)" ] || [ -n "$(find shots-in -type f -print -quit 2>/dev/null)" ] \
             || { echo "::error::no release assets found under dist-in/ or shots-in/ — artifact download layout mismatch?"; exit 1; }
-      # --- the release's own screenshot bundle -----------------------------------------------
-      # One `screenshots.zip` holding every target's captures, and `gallery.json` beside it —
-      # the same index, published twice: once at the zip's root so the archive describes itself,
-      # once as an asset of its own so a tool can read what a release contains without
-      # downloading the images.
-      #
-      # With `screenshot-bundle: frames` the bundle is `screenshots.frames.zst` instead: every
-      # capture's pixels in one Zstandard stream (day's docs/screenshot-archive.md), an eighth of
-      # the zips' size. `gallery.json` then records each capture's place in it and the sha-256 of
-      # its pixels, and `day screenshot unpack` writes the PNG tree back.
-      #
-      # This is what makes the project site's RELEASE channel buildable from the release alone
-      # (daysite's src/lib/channels.ts). The per-target `screenshots-<target>.zip` assets above
-      # stay: they are what someone grabbing one platform's captures wants, and every release
-      # since before this bundle existed has carried them, which is also the fallback the site
-      # build uses on a release that predates it.
+      # --- the release's screenshot bundles --------------------------------------------------
+      # `screenshots.tar.xz` holds every target's captures and the merged `gallery.json` at its
+      # root, and `screenshots-<target>[-<device>].tar.xz` holds one capture tree each: plain
+      # tar.xz files of uncompressed PNG files, which xz's window compresses across captures to
+      # about a tenth of what the PNG files compress to alone (day's docs/screenshot-archive.md).
+      # `day screenshot pack` writes them all in one pass; `tar -xJf` reads them anywhere, and
+      # `day screenshot unpack` checks every file against the SHA256SUMS each bundle opens with.
+      # `gallery.json` is also an asset of its own, so a tool can read what a release contains
+      # without downloading the images. The index and the bundle are what let a project site
+      # build its RELEASE channel from the release alone (daysite's src/lib/channels.ts).
       - name: Merge the capture trees
         id: shots
         run: |
@@ -2833,47 +2796,31 @@ jobs:
         if: ${{ steps.shots.outputs.merged == 'true' }}
         env:
           PROJECT_PATH: ${{ inputs.project-path }}
-          SCREENSHOT_BUNDLE: ${{ inputs.screenshot-bundle }}
           DAYCLI_OUTCOME: ${{ steps.daycli.outcome }}
         run: |
           set -euo pipefail
-          if [ "$DAYCLI_OUTCOME" = success ]; then
-            # Indexed from the per-artifact directories, not the merged tree: two device
-            # profiles' artifacts can both carry `<target>/gallery.json`, and only one survives
-            # a merge. Each root's index is read whole; the merged tree supplies the files.
-            roots=()
-            for d in shots-in/screenshots-*/; do [ -d "$d" ] && roots+=("${d%/}"); done
-            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
-              --screenshot-paths "${roots[@]}" --out shots-merged/gallery.json
+          # The bundles need the CLI; a release without its captures would leave the project
+          # site's release channel empty, so this fails rather than ships without them.
+          if [ "$DAYCLI_OUTCOME" != success ]; then
+            echo "::error::the day CLI did not install, so the release's screenshot bundles cannot be written"
+            exit 1
           fi
-          # The frame archive needs the index it is packed from and a CLI that has the command.
-          # Without either the release carries the zips, so it never ships without captures.
-          bundle="${SCREENSHOT_BUNDLE:-zip}"
-          if [ "$bundle" = frames ]; then
-            if [ "$DAYCLI_OUTCOME" != success ] || ! "$DAY_BIN" screenshot pack --help >/dev/null 2>&1; then
-              echo "::warning::screenshot-bundle is frames, and this run has no day CLI with 'screenshot pack': the release carries the zip bundles instead"
-              bundle=zip
-              for d in shots-in/screenshots-*/; do
-                [ -d "$d" ] || continue
-                combo="$(basename "$d")"; combo="${combo#screenshots-}"
-                if [ -n "$(find "$d" -type f -print -quit)" ]; then
-                  (cd "$d" && zip -qr "$GITHUB_WORKSPACE/assets/screenshots-${combo}.zip" .)
-                fi
-              done
-            fi
-          fi
-          if [ "$bundle" = frames ]; then
-            # Pack, then read the archive back and hold every capture to its checksum before
-            # the release publishes it.
-            "$DAY_BIN" screenshot pack shots-merged/gallery.json \
-              --out assets/screenshots.frames.zst --index-out assets/gallery.json
-            "$DAY_BIN" screenshot unpack assets/gallery.json --check
-            ls -l assets/screenshots.frames.zst
-          else
-            [ ! -f shots-merged/gallery.json ] || cp shots-merged/gallery.json assets/gallery.json
-            (cd shots-merged && zip -qr "$GITHUB_WORKSPACE/assets/screenshots.zip" .)
-            ls -l assets/screenshots.zip
-          fi
+          # Indexed from the per-artifact directories, not the merged tree: two device
+          # profiles' artifacts can both carry `<target>/gallery.json`, and only one survives
+          # a merge. Each root's index is read whole; the merged tree supplies the files.
+          roots=()
+          for d in shots-in/screenshots-*/; do [ -d "$d" ] && roots+=("${d%/}"); done
+          "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
+            --screenshot-paths "${roots[@]}" --out shots-merged/gallery.json
+          # One pass over the trees: the merged bundle, one bundle per tree, and the index
+          # describing them. Then the merged bundle is read back and every file held to its
+          # checksum before the release publishes it.
+          args=()
+          for r in "${roots[@]}"; do args+=(--root "$r"); done
+          "$DAY_BIN" screenshot pack "${args[@]}" --index shots-merged/gallery.json \
+            --index-out assets/gallery.json --out assets/screenshots.tar.xz --each assets
+          "$DAY_BIN" screenshot unpack assets/screenshots.tar.xz --check
+          ls -l assets/screenshots*.tar.xz
       # The listing's screenshots against the stores' rules, before the release publishes them:
       # the same check `day store stage` and the App Fair's queue run later, here on the merged
       # index, so a listing a store would refuse fails the app's own release with the reason in
@@ -3494,7 +3441,7 @@ jobs:
   # the two are assembled from deliberately different sources:
   #
   #   release  the newest GitHub release, from that release's own assets and nothing else — the
-  #            packages it carries, its screenshots.zip, its web-dom dist. It owns the locale
+  #            packages it carries, its screenshots.tar.xz, its web-dom dist. It owns the locale
   #            root (`/en/`), so the address someone shares is the released app.
   #   main     the newest build of the default branch, from the artifacts THIS run produced —
   #            the screenshots the dayscripts just captured, the packages the matrix just
@@ -3714,46 +3661,18 @@ jobs:
           fetch() { # $1 = tag, $2 = capture tree to fill (rel-shots / pre-shots)
             local tag="$1" out="$2" assets="$RUNNER_TEMP/assets-$1.json"
             mkdir -p "zips-$out" "$out"
-            # A frame archive (`screenshot-bundle: frames`) unpacks to the capture tree and its
-            # index through the CLI, which checks every capture's pixels on the way.
-            if jq -e 'any(.name == "screenshots.frames.zst")' "$assets" >/dev/null; then
-              if [ "${{ steps.daycli.outcome }}" != success ] || ! "$DAY_BIN" screenshot unpack --help >/dev/null 2>&1; then
-                echo "::warning::$tag ships its captures as a frame archive, and this run has no day CLI with 'screenshot unpack': its channel has no screenshots"
-                return 0
-              fi
-              gh release download "$tag" --dir "zips-$out" --clobber \
-                --pattern 'screenshots.frames.zst' --pattern 'gallery.json'
-              "$DAY_BIN" screenshot unpack "zips-$out/gallery.json" --out "$out"
-              echo "$(find "$out" -name '*.png' | wc -l) capture(s) from $tag"
+            # The release's `screenshots.tar.xz` unpacks to the capture tree and its index
+            # through the CLI, which checks every file against the bundle's SHA256SUMS.
+            if ! jq -e 'any(.name == "screenshots.tar.xz")' "$assets" >/dev/null; then
+              echo "::warning::$tag carries no screenshots.tar.xz, so its channel has no screenshots"
               return 0
             fi
-            # The merged `screenshots.zip` when the release has one, and the per-target zips
-            # otherwise — every Day release carried those before the bundle existed, and they
-            # unzip to the same capture tree, so a release made before this change still gets a
-            # full gallery.
-            if jq -e 'any(.name == "screenshots.zip")' "$assets" >/dev/null; then
-              gh release download "$tag" --dir "zips-$out" --clobber --pattern 'screenshots.zip'
-            else
-              gh release download "$tag" --dir "zips-$out" --clobber --pattern 'screenshots-*.zip'
+            if [ "${{ steps.daycli.outcome }}" != success ]; then
+              echo "::warning::this run has no day CLI, so $tag's screenshots are not unpacked and its channel has none"
+              return 0
             fi
-            # Each zip unpacks into its own directory first: two device profiles' zips can both
-            # carry `<target>/gallery.json`, and the index is read from those roots before the
-            # captures are folded into one tree.
-            local roots=()
-            for z in "zips-$out"/*.zip; do
-              [ -e "$z" ] || continue
-              local dir
-              dir="in-$out/$(basename "$z" .zip)"
-              mkdir -p "$dir" && unzip -qo "$z" -d "$dir"
-              roots+=("$dir")
-              cp -R "$dir/." "$out/"
-            done
-            # A merged bundle carries the index at its root; per-target zips carry only their
-            # own, so the CLI merges them the way it just did for the development channel.
-            if [ ! -f "$out/gallery.json" ] && [ "${{ steps.daycli.outcome }}" = success ] && [ "${#roots[@]}" -gt 0 ]; then
-              "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
-                --screenshot-paths "${roots[@]}" --out "$out/gallery.json"
-            fi
+            gh release download "$tag" --dir "zips-$out" --clobber --pattern 'screenshots.tar.xz'
+            "$DAY_BIN" screenshot unpack "zips-$out/screenshots.tar.xz" --out "$out"
             echo "$(find "$out" -name '*.png' | wc -l) capture(s) from $tag"
           }
           if [ -n "${REL_TAG:-}" ]; then fetch "$REL_TAG" rel-shots; fi
