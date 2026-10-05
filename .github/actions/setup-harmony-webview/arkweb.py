@@ -17,7 +17,7 @@ import zipfile
 ARCHIVE_URL = "https://update.dbankcdn.com/download/data/pub_13/HWHOTA_hota_900_9/4a/v3/SurZ60PYSryhwf0W4QEK1g/system-image-phone-x86.zip"
 ARCHIVE_SHA = "874e359f7f07b93c2b6761b9052fc2681ac2da0202eed7fa0c299a2179487d4a"
 HAP_SHA = "7120ee8df5207d592cfdf7448da79ac16a6f791f916ec060b55525d43f24f4a7"
-# Each tested EGL wrapper, original → patched: the only binaries this installer will modify.
+# Each tested EGL wrapper, original → patched.
 EGL_SHAS = {
     # harmony-contrib/ohos-qemu v20260919, OpenHarmony 7.0.0.39 x86_64_virt (what CI boots).
     "e4967375b5abc43bbd3bf79a8446ff6a831ccf0d50df8c789356c5d0a5fa42bf":
@@ -29,6 +29,41 @@ EGL_SHAS = {
 BUNDLE = "com.huawei.hmos.arkwebcore"
 EGL_PATH = "/system/lib64/platformsdk/libEGL.so"
 SANDBOX_PATH = "/system/etc/sandbox/appdata-sandbox.json"
+
+# OpenHarmony 7 calls new mouse methods missing from the pinned API-12 engine.
+# Redirect only this verified emulator glue's wrappers to the existing legacy APIs.
+# Readable source and ABI rationale: mouse_compat.S and INPUT-COMPAT.md.
+INPUT_BRIDGE_PATH = "/system/lib64/libarkweb_core_loader_glue.z.so"
+INPUT_BRIDGE_SHA = "3b4bce159ac7e57c27893932d5acf4b38134e82df464e8d1afe6b2b9e62b8ea8"
+INPUT_BRIDGE_PATCHED_SHA = "71fa347aae5f804fa10ab56d014e0bd129a10bce1838071fbccbe3bf199f0eb1"
+MOUSE_ADAPTER = bytes.fromhex(
+    "415741564154534883ec2864488b042528000000488944242048893c24488b1e"
+    "4885db74544889df488b03ff50104189c44889df488b03ff50184189c64889df"
+    "488b03ff50204189c74889df488b03ff5028894424084889df488b03ff503041"
+    "89c1488b3c244489e64489f24489f9448b442408e847b6ffff64488b04252800"
+    "0000483b4424200f859400000090909090909090909090909090909090909090"
+    "9090909090909090909090909090909090909090909090909090909090909090"
+    "9090909090909090909090909090909090909090909090909090909090909090"
+    "9090909090909090909090909090909090909090909090909090909090909090"
+    "9090909090909090909090909090909090909090904883c4285b415c415e415f"
+    "c3e8da1b0c00"
+)
+MOUSE_WHEEL_ADAPTER = bytes.fromhex("e90bc0ffff")
+
+
+def patch_input_bridge(data):
+    digest = hashlib.sha256(data).hexdigest()
+    if digest == INPUT_BRIDGE_PATCHED_SHA:
+        return data
+    if digest != INPUT_BRIDGE_SHA:
+        raise ValueError(f"Unsupported ArkWeb input bridge: {digest}; refusing to patch")
+    patched = bytearray(data)
+    # Executable PT_LOAD: virtual address = file offset + 0x1000.
+    patched[0x1060e0:0x1060e0 + len(MOUSE_ADAPTER)] = MOUSE_ADAPTER
+    patched[0x105780:0x105780 + len(MOUSE_WHEEL_ADAPTER)] = MOUSE_WHEEL_ADAPTER
+    if hashlib.sha256(patched).hexdigest() != INPUT_BRIDGE_PATCHED_SHA:
+        raise ValueError("Unexpected patched ArkWeb input bridge")
+    return bytes(patched)
 
 
 def require_hash(path, expected):
@@ -159,6 +194,14 @@ def install(hap, target, diagnostics):
     if device.shell("uname -m") != "x86_64" or device.shell("id -u") != "0":
         raise ValueError("Requires a rooted x86_64 disposable emulator")
     diagnostics.mkdir(parents=True, exist_ok=True)
+    patched_input = None
+    # 6.1 keeps its existing setup. This patch is specific to the 7.0 image/ABI;
+    # every binary is checked before any guest system files are changed.
+    if device.shell("param get const.ohos.fullname").strip() == "OpenHarmony-7.0.0.39":
+        original = diagnostics / "libarkweb-input.original.so"
+        device.run("file", "recv", INPUT_BRIDGE_PATH, original)
+        patched_input = patch_input_bridge(original.read_bytes())
+        (diagnostics / "libarkweb-input.patched.so").write_bytes(patched_input)
     device.run("file", "recv", EGL_PATH, diagnostics / "libEGL.original.so")
     patched_egl = patch_egl((diagnostics / "libEGL.original.so").read_bytes())
     device.run("file", "recv", SANDBOX_PATH, diagnostics / "appdata-sandbox.original.json")
@@ -178,10 +221,17 @@ def install(hap, target, diagnostics):
     device.shell(f"param set persist.arkwebcore.package_name {BUNDLE}")
     device.shell(f"param set persist.arkwebcore.install_path {installed}")
     device.shell("mount -o remount,rw /")
+    if patched_input is not None:
+        # appspawn already maps this library. Stage and rename so live mappings are
+        # not overwritten; reboot below makes new apps inherit the replacement.
+        device.run("file", "send", diagnostics / "libarkweb-input.patched.so",
+                   INPUT_BRIDGE_PATH + ".day-new")
+        device.shell(f"chmod 644 {INPUT_BRIDGE_PATH}.day-new && "
+                     f"mv {INPUT_BRIDGE_PATH}.day-new {INPUT_BRIDGE_PATH}")
     device.run("file", "send", diagnostics / "libEGL.patched.so", EGL_PATH)
     device.run("file", "send", diagnostics / "appdata-sandbox.patched.json", SANDBOX_PATH)
     device.shell("sync")
-    # Reboot is essential: appspawn otherwise retains the original EGL mapping.
+    # Reboot is essential: appspawn otherwise retains the original library mappings.
     device.run("shell", "reboot")
     time.sleep(5)
     deadline = time.monotonic() + 150
@@ -193,6 +243,10 @@ def install(hap, target, diagnostics):
                 device.run("file", "recv", EGL_PATH, diagnostics / "libEGL.installed.so")
                 require_hash(diagnostics / "libEGL.installed.so",
                              hashlib.sha256(patched_egl).hexdigest())
+                if patched_input is not None:
+                    verified = diagnostics / "libarkweb-input.installed.so"
+                    device.run("file", "recv", INPUT_BRIDGE_PATH, verified)
+                    require_hash(verified, INPUT_BRIDGE_PATCHED_SHA)
                 print(f"ArkWeb ready: {installed}", flush=True)
                 return
         except (RuntimeError, subprocess.SubprocessError):

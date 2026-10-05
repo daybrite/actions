@@ -1,6 +1,11 @@
 import copy
 import importlib.util
+import os
 from pathlib import Path
+import platform
+import shutil
+import struct
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,6 +16,57 @@ spec.loader.exec_module(arkweb)
 
 
 class RuntimeGuards(unittest.TestCase):
+    def test_unknown_input_bridge_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported ArkWeb input bridge"):
+            arkweb.patch_input_bridge(b"different emulator build")
+
+    def test_unknown_input_bridge_stops_install_before_guest_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(arkweb, "validate_hap"), patch.object(arkweb, "Device") as device:
+                guest = device.return_value
+                guest.shell.side_effect = ["x86_64", "0", "OpenHarmony-7.0.0.39"]
+                def receive(*args):
+                    self.assertEqual(args[:3], ("file", "recv", arkweb.INPUT_BRIDGE_PATH))
+                    args[3].write_bytes(b"different emulator build")
+                guest.run.side_effect = receive
+                with self.assertRaisesRegex(ValueError, "Unsupported ArkWeb input bridge"):
+                    arkweb.install(Path("unused.hap"), "test", Path(directory))
+                self.assertEqual(guest.shell.call_count, 3)
+                self.assertEqual(guest.run.call_count, 1)
+
+    @unittest.skipUnless(platform.system() == "Linux" and platform.machine() == "x86_64"
+                         and all(shutil.which(t) for t in ("clang", "clang++", "ld", "objcopy")),
+                         "requires Linux x86_64 clang and binutils")
+    def test_mouse_adapter_reproduces_bytes_and_preserves_event_abi(self):
+        source = Path(arkweb.__file__).with_name("mouse_compat.S")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["clang", "-c", str(source), "-o", str(root / "mouse.o")], check=True)
+            subprocess.run(["ld", "-Ttext=0x1070e0", "--defsym=legacy_mouse=0x1027a0",
+                            "--defsym=stack_chk_fail=0x1c8de0", "-e", "arkweb_mouse_compat",
+                            str(root / "mouse.o"), "-o", str(root / "mouse.elf")], check=True)
+            subprocess.run(["objcopy", "-O", "binary", "--only-section=.text",
+                            str(root / "mouse.elf"), str(root / "mouse.bin")], check=True)
+            self.assertEqual((root / "mouse.bin").read_bytes(), arkweb.MOUSE_ADAPTER)
+            self.assertEqual(len(arkweb.MOUSE_ADAPTER), 0x126)
+            self.assertEqual(arkweb.MOUSE_WHEEL_ADAPTER,
+                             b"\xe9" + struct.pack("<i", 0x102790 - (0x106780 + 5)))
+            subprocess.run(["clang++", "-std=c++17", "-O2",
+                            str(Path(__file__).with_name("arkweb_mouse_abi.cpp")),
+                            str(root / "mouse.o"), "-o", str(root / "abi-test")], check=True)
+            subprocess.run([str(root / "abi-test")], check=True)
+
+    @unittest.skipUnless(os.environ.get("ARKWEB_TEST_BRIDGE"), "optional original emulator library")
+    def test_real_input_bridge_patch_is_bounded_and_idempotent(self):
+        original = Path(os.environ["ARKWEB_TEST_BRIDGE"]).read_bytes()
+        self.assertEqual(arkweb.hashlib.sha256(original).hexdigest(), arkweb.INPUT_BRIDGE_SHA)
+        patched = arkweb.patch_input_bridge(original)
+        self.assertEqual(len(patched), len(original))
+        self.assertEqual(arkweb.patch_input_bridge(patched), patched)
+        self.assertEqual(patched[:0x105780], original[:0x105780])
+        self.assertEqual(patched[0x105785:0x1060e0], original[0x105785:0x1060e0])
+        self.assertEqual(patched[0x106206:], original[0x106206:])
+
     def test_cached_runtime_is_verified_without_downloading(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory)

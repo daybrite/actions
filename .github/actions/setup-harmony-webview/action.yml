@@ -1,5 +1,5 @@
 name: Prepare Harmony WebView
-description: Install a verified x86_64 ArkWeb runtime into a fresh disposable Oniro 6.1 emulator.
+description: Install a verified x86_64 ArkWeb runtime into a fresh disposable OpenHarmony 7.0 or Oniro 6.1 emulator.
 inputs:
   target:
     description: HDC address of the disposable emulator; the guest will be modified and rebooted.
