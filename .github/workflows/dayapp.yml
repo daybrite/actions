@@ -321,7 +321,9 @@ on:
         description: >-
           Prefix for the package artifact names, so a repository that already publishes
           `dist-<target>` from another workflow does not collide. `showcase-` yields
-          `showcase-dist-macos-appkit`. Screenshot artifacts are always `screenshots-<target>`.
+          `showcase-dist-macos-appkit`, and the same prefix goes on the screenshot artifacts
+          (`showcase-screenshots-<target>`), so two calls of this workflow in one run keep their
+          captures apart too.
         type: string
         required: false
         default: ""
@@ -2248,8 +2250,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           # `screenshots-<target>` for the primary profile — the name every consumer already
-          # reads — and `screenshots-<target>-<slug>` for each additional device.
-          name: ${{ matrix.shots_artifact }}
+          # reads — and `screenshots-<target>-<slug>` for each additional device, each under the
+          # caller's artifact prefix, as the packages are.
+          name: ${{ inputs.artifact-prefix }}${{ matrix.shots_artifact }}
           path: ${{ inputs.project-path }}/build/day${{ matrix.flavor != '' && format('/flavors/{0}', matrix.flavor) || '' }}/screenshots/
           if-no-files-found: ignore
           # Uploaded even when the leg fails, so a re-run of the failed leg must replace it: the
@@ -2706,11 +2709,12 @@ jobs:
       - name: Download screenshots
         uses: actions/download-artifact@v7
         with:
-          pattern: screenshots-*
+          pattern: ${{ inputs.artifact-prefix }}screenshots-*
           path: shots-in
       - name: Assemble release assets
         env:
           TARGETS_IN: ${{ needs.preflight.outputs.targets }}
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
         run: |
           set -euo pipefail
           mkdir -p assets
@@ -2732,7 +2736,7 @@ jobs:
             fi
           }
           normalize dist-in dist
-          normalize shots-in screenshots
+          normalize shots-in "${ARTIFACT_PREFIX:-}screenshots"
           # With only a flavor's packages downloaded, the flat-mode fallback above named the
           # directory `dist-<target>`; the loop below reads both shapes, so either name works.
           # Flatten the per-target package dirs. `day pack` already names every artifact
@@ -2776,7 +2780,7 @@ jobs:
           set -euo pipefail
           rm -rf shots-merged
           mkdir -p shots-merged
-          for d in shots-in/screenshots-*/; do
+          for d in shots-in/*screenshots-*/; do
             [ -d "$d" ] || continue
             cp -R "$d." shots-merged/
           done
@@ -2826,7 +2830,7 @@ jobs:
           # profiles' artifacts can both carry `<target>/gallery.json`, and only one survives
           # a merge. Each root's index is read whole; the merged tree supplies the files.
           roots=()
-          for d in shots-in/screenshots-*/; do [ -d "$d" ] && roots+=("${d%/}"); done
+          for d in shots-in/*screenshots-*/; do [ -d "$d" ] && roots+=("${d%/}"); done
           "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" screenshot index \
             --screenshot-paths "${roots[@]}" --out shots-merged/gallery.json
           # One pass over the trees: the merged bundle, one bundle per tree, and the index
@@ -3569,7 +3573,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          pattern: screenshots-*
+          pattern: ${{ inputs.artifact-prefix }}screenshots-*
           path: shots-in
       # `day screenshot index` merges the per-target indexes into shots/gallery.json — the
       # machine-readable index of every screenshot (URL, localized title/caption, theme,
@@ -3586,13 +3590,13 @@ jobs:
           set -euo pipefail
           if [ -d shots-in ] && [ -n "$(find shots-in -name '*.png' -print -quit)" ]; then
             # A single matching artifact is extracted flat; give it a directory of its own.
-            if ! compgen -G "shots-in/screenshots-*/" >/dev/null; then
+            if ! compgen -G "shots-in/*screenshots-*/" >/dev/null; then
               mkdir shots-in/screenshots-all
               find shots-in -mindepth 1 -maxdepth 1 ! -name screenshots-all -exec mv {} shots-in/screenshots-all/ \;
             fi
             roots=()
             mkdir -p shots
-            for d in shots-in/screenshots-*/; do
+            for d in shots-in/*screenshots-*/; do
               roots+=("${d%/}")
               cp -R "$d." shots/
             done
