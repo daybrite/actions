@@ -863,6 +863,10 @@ hosted under the site's `webapp/` subdirectory (`site.toml` `webapp` key names i
 comes from what the repo already maintains: `Day.toml`, the `store/` listings, the screenshots
 your dayscripts capture in this very workflow, and the latest release's assets.
 
+Follow Day's [App websites guide](https://daybrite.dev/docs/websites) for the complete setup,
+local previews, customization, GitHub Pages settings, and optional custom domains. A custom
+Astro project still uses `website/site.toml` and the workflow's staging/output contract.
+
 ```toml
 # website/site.toml — the only required key:
 host = "https://<owner>.github.io/<repo>"
@@ -901,16 +905,37 @@ before staging, including channels without an artifact, so template leftovers ca
 
 ### Deploys and setup
 
-Deploys follow `deploy-web`'s ref rule — pushes to the default branch, or
-`web-deploy-tag-pattern` when set — **plus every `vX.Y.Z` tag**, because the release channel's
-content changes the moment a release is published, and the job waits for the release job so it
-sees the release it just made. It also waits for every build leg to succeed: the site hosts the
+By default, the site deploys on pushes to the default branch and release tags, because the
+release channel's content changes when a release is published. Setting
+`web-deploy-tag-pattern` restricts automatic website deployment to matching tags instead.
+The job waits for the release job so it sees the release it just made. It also waits for
+every build leg to succeed: the site hosts the
 web app, screenshots and packages that build produced, so a run whose build failed or never ran
 leaves the live site as it was. They need the same one-time setup: grant `pages: write` +
 `id-token: write` and set Settings → Pages → Source = "GitHub Actions". `daysite-version`
 selects the template revision; the default, `main`, means every rebuild takes the template's
 latest fixes, which is what the Day apps want. Without a `website/` directory,
 `deploy-web: true` keeps its original behavior — the bare web app at the Pages root.
+
+Apps can select a separate website theme in `website/site.toml`:
+
+```toml
+[theme]
+repository = "appfair/appsite"
+ref = "main" # A released tag or commit can pin the theme independently of daysite-version.
+```
+
+The website job checks it out as `site-theme`, installs the theme and project website npm
+dependencies from their lockfiles, and runs daysite's renderer selection. Local themes can use
+`path = "./theme"` instead, relative to `website/site.toml`. With no theme, the default site and
+the existing `theme.css` behavior are unchanged. An app can supply `website/daysite.config.mjs`
+for component/style overrides or `website/astro.config.mjs` to own its Astro configuration;
+the latter takes precedence over a theme's configuration. Generated screenshots, release
+downloads, and hosted web builds stay in `daysite/public`; the uploaded output stays in
+`daysite/dist`. See the [daysite customization contract](https://github.com/daybrite/daysite/blob/main/docs/customization.md)
+for component wrapping, custom routes, and Astro blogs. This requires the updated actions and
+daysite revisions. Existing apps pinned to older daysite revisions still use their original
+default build. The App Fair repository must be published before selecting it remotely.
 
 A workflow that calls `dayapp.yml` twice in one run (a second call with `artifact-prefix`, say,
 to pack a demo-data variant) must set `deploy-website: "false"` on the second call. Left to the

@@ -51,6 +51,79 @@ class WebsiteTests(unittest.TestCase):
             capture_output=True,
         )
 
+    def theme_config(self, text):
+        site = self.root / "app/website"
+        site.mkdir(parents=True, exist_ok=True)
+        (site / "site.toml").write_text('host = "https://example.test"\n' + text)
+
+    def test_existing_site_selects_no_theme(self):
+        self.theme_config("")
+        result = self.run_step("Select the website theme")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "outputs").read_text(), "repository=\nref=main\ncustomization=false\n")
+
+    def test_repository_theme_and_pinned_ref(self):
+        self.theme_config('[theme]\nrepository = "appfair/appsite"\nref = "v1.2.3"\n')
+        result = self.run_step("Select the website theme")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "outputs").read_text(), "repository=appfair/appsite\nref=v1.2.3\ncustomization=true\n")
+
+    def test_local_theme_and_project_configs_require_customization_support(self):
+        # Synthetic project files: exercise selection without evaluating an Astro module.
+        for config in ("theme", "daysite.config.mjs", "astro.config.ts"):
+            with self.subTest(config=config):
+                self.theme_config('[theme]\npath = "./theme"\n' if config == "theme" else "")
+                project_config = self.root / "app/website" / config
+                if config != "theme":
+                    project_config.write_text("// synthetic fixture")
+                result = self.run_step("Select the website theme")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("customization=true", (self.root / "outputs").read_text())
+                project_config.unlink(missing_ok=True)
+
+    def test_pinned_old_template_rejects_customization_but_keeps_default(self):
+        for customized in (False, True):
+            with self.subTest(customized=customized):
+                self.env["DAYSITE_CUSTOMIZATION"] = str(customized).lower()
+                result = self.run_step("Install website customization dependencies")
+                self.assertEqual(result.returncode == 0, not customized, result.stderr)
+                if customized:
+                    self.assertIn("update daysite-version", result.stdout)
+
+    def test_invalid_theme_metadata_fails_before_checkout(self):
+        for text in (
+            'theme = "bad"\n',
+            '[theme]\nrepository = "https://github.com/example/theme"\n',
+            '[theme]\nrepository = ""\n',
+            '[theme]\npath = 42\n',
+            '[theme]\npath = ""\n',
+            '[theme]\nrepository = "example/theme"\nref = ""\n',
+            '[theme]\nrepository = "example/theme"\npath = "../theme"\n',
+            '[theme]\nref = "injected\\noutput=value"\n',
+        ):
+            with self.subTest(text=text):
+                self.theme_config(text)
+                result = self.run_step("Select the website theme")
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_new_and_pinned_old_template_build_commands(self):
+        # Execute the workflow body with synthetic commands; no actual build or deployment.
+        for new_template in (False, True):
+            with self.subTest(new_template=new_template):
+                scripts = self.root / "scripts"
+                scripts.mkdir(exist_ok=True)
+                if new_template:
+                    (scripts / "build-site.mjs").write_text("// synthetic fixture")
+                for name in ("node", "npx"):
+                    command = self.root / "bin" / name
+                    command.write_text('#!/bin/sh\nprintf "%s" "$*" > "$RUNNER_TEMP/' + name + '-args"\n')
+                    command.chmod(0o755)
+                result = self.run_step("Build the site")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                command = "node" if new_template else "npx"
+                self.assertEqual((self.root / (command + "-args")).read_text(),
+                                 "scripts/build-site.mjs build" if new_template else "astro build")
+
     def channels(self, release=False, prerelease=False, main=True):
         channels = []
         if release:

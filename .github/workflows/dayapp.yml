@@ -3507,6 +3507,45 @@ jobs:
           repository: daybrite/daysite
           ref: ${{ inputs.daysite-version }}
           path: daysite
+      - name: Select the website theme
+        id: theme
+        env:
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          # Read TOML without evaluating any theme or project code.
+          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import os, re, tomllib
+          from pathlib import Path
+          config = Path("app") / os.environ.get("PROJECT_PATH", ".") / "website/site.toml"
+          with config.open("rb") as source:
+              theme = tomllib.load(source).get("theme", {})
+          if not isinstance(theme, dict):
+              raise SystemExit("website/site.toml: theme must be a table")
+          repository = theme.get("repository", "")
+          ref = theme.get("ref", "main")
+          path = theme.get("path")
+          if not isinstance(repository, str) or ("repository" in theme and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)):
+              raise SystemExit("theme.repository must be a GitHub owner/repository")
+          if path is not None and (not isinstance(path, str) or not path):
+              raise SystemExit("theme.path must be a nonempty string")
+          if not isinstance(ref, str) or not ref or any(c in ref for c in "\n\r\0"):
+              raise SystemExit("theme.ref must be a nonempty, single-line Git ref")
+          if repository and path:
+              raise SystemExit("Select either theme.repository or theme.path")
+          project_configs = ["daysite.config.mjs"] + [f"astro.config.{extension}" for extension in ("mjs", "js", "ts", "mts", "cjs", "cts")]
+          customized = bool(repository or path or any((config.parent / name).is_file() for name in project_configs))
+          print(f"repository={repository}")
+          print(f"ref={ref}")
+          print(f"customization={str(customized).lower()}")
+          PYTHON
+      - name: Check out the website theme
+        if: ${{ steps.theme.outputs.repository != '' }}
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.theme.outputs.repository }}
+          ref: ${{ steps.theme.outputs.ref }}
+          path: site-theme
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -3856,11 +3895,33 @@ jobs:
             fi
           done
           du -sh daysite/public/* 2>/dev/null || true
+      - name: Install website customization dependencies
+        working-directory: daysite
+        env:
+          DAYSITE_CONFIG: ${{ env.SITE_DIR }}/site.toml
+          DAYSITE_THEME: ${{ steps.theme.outputs.repository != '' && format('{0}/site-theme', github.workspace) || '' }}
+          DAYSITE_CUSTOMIZATION: ${{ steps.theme.outputs.customization }}
+        run: |
+          if [ -f scripts/install-customization.mjs ]; then
+            node scripts/install-customization.mjs
+          elif [ "$DAYSITE_CUSTOMIZATION" = true ]; then
+            echo "::error::This daysite-version predates website customization; update daysite-version"
+            exit 1
+          fi
       - name: Build the site
         working-directory: daysite
         env:
           DAYSITE_CONFIG: ${{ env.SITE_DIR }}/site.toml
-        run: npx astro build
+          DAYSITE_THEME: ${{ steps.theme.outputs.repository != '' && format('{0}/site-theme', github.workspace) || '' }}
+          DAYSITE_PUBLIC_DIR: ${{ github.workspace }}/daysite/public
+          DAYSITE_OUT_DIR: ${{ github.workspace }}/daysite/dist
+        run: |
+          if [ -f scripts/build-site.mjs ]; then
+            node scripts/build-site.mjs build
+          else
+            # Existing callers may pin an older daysite revision. Its default build still works.
+            npx astro build
+          fi
       # The artifact name carries the RUN ATTEMPT (docs: the re-run story below). Artifacts are
       # scoped to the run, not the attempt, and survive a re-run — so a second attempt uploading
       # `github-pages` again leaves TWO artifacts under that name in the same run, and
