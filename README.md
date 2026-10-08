@@ -26,6 +26,29 @@ holding seven targets says which file each document describes:
 `app-fair-macos-appkit.dmg.buildinfo.json`, `.sbom-cdx.json`, `.sbom-spdx.json`. That is what
 `day rebuild <downloaded-package>` reads.
 
+### DayScript reports
+
+`dayscript_report_summary: true` (the default) adds a summary job after all build matrix
+legs finish. It groups runs by script and shows target/device, variant/locale/flavor, start
+time, outcome, passed/skipped/failed/aborted steps, duration, sample count, min/max/average/end
+memory in MB, metric, and hardware/OS. Retries stay separate; platform memory metrics are
+not mixed. End is the last observed sample, including on interrupted runs.
+
+Every build leg sets host `DAY_SCRIPT_REPORT=1`. A compatible Day CLI/runtime writes
+incremental JSON to `build/day/reports/dayscript/` (or the flavor's build directory), including
+samples collected during pauses and long steps. Each script invocation has a unique report.
+Older versions yield an explicit missing/unavailable report; logs are never parsed for memory.
+
+Both report uploads and summary aggregation use `always()`, so assertion failures, app crashes
+and failed build jobs do not suppress available evidence. A job manifest identifies scripts
+that never produced a report. A killed CLI's last running checkpoint is shown as interrupted.
+An unavailable/destroyed runner may be unable to upload; the summary lists missing artifacts.
+
+Artifacts are named `<artifact-prefix>dayscript-reports-<shots_artifact>-<run_attempt>`; the existing matrix
+suffix separates targets, device profiles and flavors; rerun attempts retain earlier artifacts. Downloads retain separate artifact
+directories to avoid collisions. `dayscript_report_summary: false` skips the summary job;
+collection and uploads remain enabled. The summary action writes to `GITHUB_STEP_SUMMARY`.
+
 ### The screenshot bundle
 
 Beside the packages, a release carries every capture the run took:

@@ -248,6 +248,15 @@ on:
           sees the state the earlier scripts left.
         type: string
         default: ""
+      dayscript_report_summary:
+        description: >-
+          Assemble per-script duration, step outcomes and sampled min/max/avg/end memory
+          into the GitHub job summary after all build legs finish, even when they fail.
+          Reports are collected and uploaded regardless of this switch or job success.
+          Requires a Day CLI/runtime with structured report support; older versions are
+          identified as missing reports rather than inferred from console logs.
+        type: boolean
+        default: true
       fast-scripts:
         description: >-
           Request fast functional walkthroughs (DAY_TEST_FAST=1): supported Day runtimes
@@ -1547,6 +1556,9 @@ jobs:
       # and every scripted launch — including the ones the generated dayscript runner performs,
       # which no flag from this file could reach — forward their sub-commands' raw output.
       DAY_VERBOSE: ${{ inputs.day-verbose && '1' || '0' }}
+      DAY_SCRIPT_REPORT: "1"
+      DAY_SCRIPT_REPORT_CONTEXT: ${{ toJSON(matrix) }}
+
       # NO signing material reaches this job on any ref, for any platform. It builds arbitrary
       # repository code — cargo, every dependency's build.rs, the app's own dayscripts — so it
       # packs the .dmg at the DEV tier even on a tag and every store package (.ipa always;
@@ -1789,6 +1801,7 @@ jobs:
             echo "no dayscripts to run"
             exit 0
           fi
+          printf 'planned=%s\n' "$(printf %s "$LIST" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
           # Scripts the caller marked `scripts-once` leave the crossed list and run last, once.
           # Membership is by path as written, matched whole, so `crash.yaml` cannot catch
           # `pre-crash.yaml`.
@@ -2290,6 +2303,39 @@ jobs:
           fi
           echo "the AppImage stayed up for 20s"
 
+      - name: Record dayscript job outcome
+        if: always()
+        working-directory: ${{ github.workspace }}
+        env:
+          REPORT_DIR: ${{ inputs.project-path }}/build/day${{ matrix.flavor != '' && format('/flavors/{0}', matrix.flavor) || '' }}/reports/dayscript
+          REPORT_JOB_STATUS: ${{ job.status }}
+          REPORT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          REPORT_PLANNED_SCRIPTS: ${{ steps.scripts.outputs.planned }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['REPORT_DIR'])
+          root.mkdir(parents=True, exist_ok=True)
+          context = json.loads(os.environ['DAY_SCRIPT_REPORT_CONTEXT'])
+          keys = ['target', 'label', 'os', 'profile', 'device_slug', 'device_os',
+                  'device_orientation', 'device_density', 'flavor', 'tier', 'optional']
+          data = {'schema_version': 1, 'kind': 'job',
+                  'context': {key: context[key] for key in keys if key in context},
+                  'status': os.environ['REPORT_JOB_STATUS'],
+                  'run_attempt': os.environ['REPORT_RUN_ATTEMPT'],
+                  'scripts': os.environ.get('REPORT_PLANNED_SCRIPTS', '').split()}
+          (root / 'job.json').write_text(json.dumps(data), encoding='utf-8')
+          PY
+      - name: Upload dayscript reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}dayscript-reports-${{ matrix.shots_artifact }}-${{ github.run_attempt }}
+          path: ${{ inputs.project-path }}/build/day${{ matrix.flavor != '' && format('/flavors/{0}', matrix.flavor) || '' }}/reports/dayscript/
+          if-no-files-found: warn
+          overwrite: true
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v7
@@ -2330,6 +2376,20 @@ jobs:
   # toolchain against what built it, clones the recorded commit, packs it again, and compares the
   # compiled payload. Off by default because it costs a second full build per target; worth turning
   # on for a release branch, where "the tag is what it says it is" is the claim being made.
+  dayscript-reports:
+    name: DayScript reports
+    needs: [preflight, build]
+    if: ${{ always() && inputs.dayscript_report_summary }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: daybrite/actions/.github/actions/dayscript-report-summary@v1
+        with:
+          artifact-prefix: ${{ inputs.artifact-prefix }}
+          expected-matrix: ${{ needs.preflight.outputs.matrix }}
+          build-result: ${{ needs.build.result }}
+
   validate:
     name: validate (${{ matrix.target }})
     needs: [preflight, build]

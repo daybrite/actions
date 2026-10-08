@@ -1,0 +1,33 @@
+name: Summarize dayscript reports
+description: Download structured reports and summarize each script, including failed and interrupted runs.
+inputs:
+  artifact-prefix:
+    description: Same artifact prefix as dayapp.
+    default: ''
+  expected-matrix:
+    description: Planned build matrix, for jobs that never uploaded a report.
+    default: '{}'
+  build-result:
+    description: Aggregate build job result.
+    default: unknown
+runs:
+  using: composite
+  steps:
+    - name: Download dayscript reports
+      id: reports
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        pattern: ${{ inputs.artifact-prefix }}dayscript-reports-*
+        path: ${{ runner.temp }}/dayscript-reports
+        merge-multiple: false
+    - name: Write dayscript summary
+      if: always()
+      shell: bash
+      env:
+        REPORT_ROOT: ${{ runner.temp }}/dayscript-reports
+        EXPECTED_MATRIX: ${{ inputs.expected-matrix }}
+        BUILD_RESULT: ${{ inputs.build-result }}
+        DOWNLOAD_RESULT: ${{ steps.reports.outcome }}
+        REPORT_SCRIPT: ${{ github.action_path }}/summary.py
+      run: python3 "$REPORT_SCRIPT"
