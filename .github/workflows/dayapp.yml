@@ -657,6 +657,18 @@ on:
         type: string
         required: false
         default: fmt
+      preflight-exclude:
+        description: >-
+          Directories the preflight checks leave alone, relative to the repository root, comma-,
+          space- or newline-separated (`crates`, `vendor/third-party`). Every local package whose
+          Cargo.toml sits under one of them is left out: `fmt` then names the remaining packages
+          instead of `--all`, which also formats a project's path dependencies, and clippy/check/
+          test pass each excluded workspace member as `--exclude`. For a Day project added to a
+          repository whose other crates it depends on by path but does not maintain, so their
+          formatting is not this workflow's to judge. Empty (default) checks every local package.
+        type: string
+        required: false
+        default: ""
       update-day-deps:
         description: >-
           Refresh the day crates in Cargo.lock to the tip of what the app's git dependency tracks,
@@ -898,14 +910,47 @@ jobs:
         working-directory: ${{ inputs.project-path }}
         env:
           CHECKS_IN: ${{ inputs.preflight-checks }}
+          EXCLUDE_IN: ${{ inputs.preflight-exclude }}
         run: |
           set -euo pipefail
+          # The package set. Without inputs.preflight-exclude it is the whole workspace, and
+          # `fmt --all` also reaches the project's path dependencies. With it, the workspace
+          # members whose manifest lies outside every excluded directory, named one by one:
+          # `fmt` takes them as `-p` (so a path dependency the project does not maintain is
+          # never formatted), and the compiling checks keep `--workspace` with each excluded
+          # member as `--exclude`. `--no-deps` keeps this to the members, so nothing is fetched.
+          FMT_ARGS=(--all)
+          WS_ARGS=(--workspace)
+          if [ -n "${EXCLUDE_IN//[[:space:],]/}" ]; then
+            python3 - "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/preflight-packages" <<'PY'
+          import json, os, subprocess, sys
+          root = os.path.realpath(sys.argv[1])
+          excluded = [os.path.realpath(os.path.join(root, d)) for d in os.environ["EXCLUDE_IN"].replace(",", " ").split()]
+          meta = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"]))
+          keep, drop = [], []
+          for p in meta["packages"]:
+              d = os.path.realpath(os.path.dirname(p["manifest_path"]))
+              under = any(d == e or d.startswith(e + os.sep) for e in excluded)
+              (drop if under else keep).append(p["name"])
+          print(" ".join(keep))
+          print(" ".join(drop))
+          PY
+            KEEP=$(sed -n 1p "$RUNNER_TEMP/preflight-packages")
+            DROP=$(sed -n 2p "$RUNNER_TEMP/preflight-packages")
+            if [ -z "$KEEP" ]; then
+              echo "::error::preflight-exclude leaves no workspace member to check"; exit 1
+            fi
+            echo "preflight packages: $KEEP (excluded: ${DROP:-none; path dependencies stay out})"
+            FMT_ARGS=()
+            for p in $KEEP; do FMT_ARGS+=(-p "$p"); done
+            for p in $DROP; do WS_ARGS+=(--exclude "$p"); done
+          fi
           for c in ${CHECKS_IN//,/ }; do
             case "$c" in
-              fmt)    cargo fmt --all -- --check ;;
-              clippy) cargo clippy --workspace --all-targets --locked -- -D warnings ;;
-              check)  cargo check --workspace --locked ;;
-              test)   cargo test --workspace --locked ;;
+              fmt)    cargo fmt "${FMT_ARGS[@]}" -- --check ;;
+              clippy) cargo clippy "${WS_ARGS[@]}" --all-targets --locked -- -D warnings ;;
+              check)  cargo check "${WS_ARGS[@]}" --locked ;;
+              test)   cargo test "${WS_ARGS[@]}" --locked ;;
               *) echo "::error::unknown check '$c' in inputs.preflight-checks — supported: fmt clippy check test"; exit 1 ;;
             esac
           done

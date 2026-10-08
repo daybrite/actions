@@ -122,6 +122,7 @@ jobs:
       scripts: dayscript/walkthrough.yaml
       locales: all   # every locale the app ships; or name them, `en fr`
       # preflight-checks: fmt clippy   # opt into clippy before the matrix (fmt alone is the default)
+      # preflight-exclude: crates      # directories whose crates the checks leave alone (upstream code)
 ```
 
 ### Inputs
@@ -174,6 +175,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `deploy-website` | string | — | Whether this call deploys the project website. Empty auto-detects from `website/site.toml` and the ref; `"false"` turns it off, which a second call of the workflow in one job graph needs (see [Project website](#project-website-daysite)); `"true"` forces it. |
 | `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. A [project website](#project-website-daysite) also deploys on every `vX.Y.Z` tag when this is empty, since a new release changes what its release channel shows. |
 | `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
+| `preflight-exclude` | string | — | Directories the preflight checks leave alone, relative to the repository root (`crates`, `vendor/third-party`), comma-, space- or newline-separated. Workspace members under one are left out: `fmt` then names the remaining members with `-p` instead of `--all` (which also formats path dependencies), and clippy/check/test add `--exclude`. For a Day project added to a repository whose other crates it depends on by path but does not maintain. |
 | `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. |
 | `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has lanes for it, either a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios` or a `store/storefront.toml` listing that `day store stage` turns into lanes, and the App Store Connect key secrets `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and `DAY_ASC_KEY_B64` are set. `"true"`/`"false"` override. |
 | `upload-macos` | string | — | Upload the `macos-appkit` build products to the Mac App Store on semantic-version tags through `macos-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` with `platform :mac` when the App Store Connect key secrets are set; `"true"`/`"false"` override. |
