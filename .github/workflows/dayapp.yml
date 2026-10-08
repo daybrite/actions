@@ -161,6 +161,30 @@ on:
           project, use `target-packages` and `target-setup` instead.
         type: string
         default: ""
+      post-pack-command:
+        description: >-
+          Optional bash command run from project-path after packing, before artifact staging.
+          DAY_PACK_TARGET names the target. Use for demo-specific updater helpers and metadata.
+          Runs in the read-only build job without signing credentials; generated files belong
+          under build/. Existing project-path and release-assets already support tagged demo apps.
+        type: string
+        default: ""
+      update-signing:
+        description: Sign update metadata in an isolated job after platform signing; requires DAY_UPDATE_PRIVATE_KEY.
+        type: boolean
+        default: false
+      update-public-key:
+        description: Hex Ed25519 public key embedded by the caller; must match DAY_UPDATE_PRIVATE_KEY.
+        type: string
+        default: ""
+      update-application-id:
+        description: Expected application identity in update metadata.
+        type: string
+        default: ""
+      macos-update-zip:
+        description: Optional safe ZIP asset basename containing the signed and stapled app for self-updates.
+        type: string
+        default: ""
       target-packages:
         description: >-
           Extra packages particular targets need beyond Day's own set — one LINE per entry, as
@@ -760,6 +784,8 @@ on:
     # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
     # absent secrets degrade pack to the dev tier. Forward them all with `secrets: inherit`.
     secrets:
+      DAY_UPDATE_PRIVATE_KEY:
+        required: false
       # The Developer ID used to sign and notarize the macOS .dmg, consumed ONLY by `sign-macos`.
       # Distinct from DAY_APPLE_CERT_P12 below, which is the distribution certificate the iOS
       # build uses during pack.
@@ -1722,6 +1748,14 @@ jobs:
           esac
           $DAY_BIN pack -p ${{ matrix.target }} --no-version-in-name --format json $NO_SIGN
 
+      - name: Prepare additional package assets
+        if: inputs.post-pack-command != '' && matrix.primary && matrix.flavor == '' && steps.pack.outcome == 'success'
+        working-directory: ${{ inputs.project-path }}
+        env:
+          POST_PACK_COMMAND: ${{ inputs.post-pack-command }}
+          DAY_PACK_TARGET: ${{ matrix.target }}
+        run: bash -eo pipefail -c "$POST_PACK_COMMAND"
+
       # The handoff to `sign-macos`: the built .app, its entitlements, and the provenance sidecars,
       # so the signing job can produce a notarized .dmg without ever seeing this build tree.
       - name: Stage the unsigned .app for signing
@@ -2595,9 +2629,25 @@ jobs:
               codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" -s "$SIGN_ID" "$item"
             done
           fi
+          if [ -d "$APP/Contents/Helpers" ]; then
+            find "$APP/Contents/Helpers" -type f -perm -111 -print0 | while IFS= read -r -d '' item; do
+              codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" -s "$SIGN_ID" "$item"
+            done
+          fi
+          if [ -d "$APP/Contents/XPCServices" ]; then
+            find "$APP/Contents/XPCServices" -mindepth 1 -maxdepth 1 -name '*.xpc' -print0 | while IFS= read -r -d '' item; do
+              codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" -s "$SIGN_ID" "$item"
+            done
+          fi
           # shellcheck disable=SC2086 # ENT_ARG is an intentional two-token flag or empty
           codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" -s "$SIGN_ID" $ENT_ARG "$APP"
           codesign -vvv --strict --verify "$APP"
+          if [ -d "$APP/Contents/XPCServices" ]; then
+            find "$APP/Contents/XPCServices" -mindepth 1 -maxdepth 1 -name '*.xpc' -print0 | while IFS= read -r -d '' item; do
+              requirement="$(plutil -extract DYSUClientRequirement raw "$item/Contents/Info.plist" 2>/dev/null || true)"
+              if [ -n "$requirement" ]; then codesign --verify -R "$requirement" "$APP"; fi
+            done
+          fi
 
       - name: Build and sign the .dmg
         run: |
@@ -2629,6 +2679,26 @@ jobs:
           # The ticket must satisfy Gatekeeper on a machine that has never seen this app.
           spctl -a -vvv -t open --context context:primary-signature "$DMG"
 
+      - name: Produce a notarized full-app update ZIP
+        if: inputs.macos-update-zip != ''
+        env:
+          UPDATE_ZIP: ${{ inputs.macos-update-zip }}
+        run: |
+          set -euo pipefail
+          [[ "$UPDATE_ZIP" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.zip$ ]] || { echo "::error::unsafe update ZIP name"; exit 1; }
+          # The DMG submission notarizes its nested app too. Staple the app before archiving
+          # so an update installed without the DMG carries its own Gatekeeper ticket.
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          codesign --verify --deep --strict "$APP"
+          codesign -d --entitlements :- "$APP" 2>/dev/null > "$RUNNER_TEMP/update-entitlements.plist"
+          [ "$(plutil -extract 'com\.apple\.security\.app-sandbox' raw "$RUNNER_TEMP/update-entitlements.plist")" = true ]
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$RUNNER_TEMP/dist/$UPDATE_ZIP"
+          mkdir -p "$RUNNER_TEMP/update-verify"
+          ditto -x -k "$RUNNER_TEMP/dist/$UPDATE_ZIP" "$RUNNER_TEMP/update-verify"
+          xcrun stapler validate "$RUNNER_TEMP/update-verify/$TITLE.app"
+          codesign --verify --deep --strict "$RUNNER_TEMP/update-verify/$TITLE.app"
+
       # The .dmg is assembled in RUNNER_TEMP, but the SBOM and .buildinfo were written next to the
       # unsigned output back in the packing job. `day rebuild` reads both from beside the artifact,
       # so they have to travel with it (§20.4).
@@ -2641,6 +2711,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}dist-macos-appkit
+          overwrite: true
           path: ${{ runner.temp }}/dist/
           if-no-files-found: error
 
@@ -2772,9 +2843,42 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+  sign-updates:
+    name: sign updater metadata
+    needs: [preflight, build, sign-macos, sign]
+    if: >-
+      ${{ !cancelled() && inputs.update-signing
+          && needs.preflight.outputs.release == 'true'
+          && needs.preflight.outputs.promotion != 'true'
+          && needs.build.result == 'success'
+          && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped')
+          && (needs.sign.result == 'success' || needs.sign.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.signing-environment || 'release-signing' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: incoming
+      - uses: daybrite/actions/.github/actions/sign-updates@v1
+        with:
+          assets: incoming
+          output: signed-updates
+          private-key: ${{ secrets.DAY_UPDATE_PRIVATE_KEY }}
+          public-key: ${{ inputs.update-public-key }}
+          application-id: ${{ inputs.update-application-id }}
+          tag: ${{ github.ref_name }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signed-update-metadata
+          path: signed-updates/
+          if-no-files-found: error
+
   release:
     name: release assets
-    needs: [preflight, build, sign-macos, sign]
+    needs: [preflight, build, sign-macos, sign, sign-updates]
     # `!cancelled()` + explicit results, for the same reason sign-macos documents: without it,
     # GitHub's implicit success() gate reads sign-macos's SKIP (no signing-environment
     # configured — the common case) as "a need did not succeed" and silently skips the release.
@@ -2789,7 +2893,8 @@ jobs:
           && needs.preflight.outputs.promotion != 'true'
           && needs.build.result == 'success'
           && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped')
-          && (needs.sign.result == 'success' || needs.sign.result == 'skipped') }}
+          && (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+          && (needs.sign-updates.result == 'success' || (!inputs.update-signing && needs.sign-updates.result == 'skipped')) }}
     runs-on: ubuntu-latest
     steps:
       # The checkout is for `day screenshot index` further down, which reads the project for
@@ -2983,6 +3088,14 @@ jobs:
           assets-dir: assets
           repo: ${{ github.repository }}
           tag: ${{ github.ref_name }}
+      - name: Download authenticated updater metadata
+        if: inputs.update-signing
+        uses: actions/download-artifact@v8
+        with:
+          name: signed-update-metadata
+          path: assets
+      - name: Remove unsigned updater templates
+        run: find assets -maxdepth 1 -name 'update-*.unsigned.json' -delete
       - name: Checksum the assets
         run: |
           set -euo pipefail

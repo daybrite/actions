@@ -999,3 +999,40 @@ identity, the listing text per locale, the store records, and the declared permi
 their reasons in every locale), which is everything the site says about the app; the site build
 itself fetches nothing, and fails if the built site would load a resource from another origin.
 A release also carries that document as `storefront.json`, beside `gallery.json`.
+
+### Signed desktop updates and demo releases
+
+Tagged `day-piece-*` / `day-part-*` demo apps already use `project-path: demo` with
+`release-assets: true` (the default). The tag's workflow builds and publishes that app through the
+same path as a standalone app. The demo's package version/build must be advanced before tagging.
+
+An updater can additionally opt into:
+
+```yaml
+project-path: demo
+post-pack-command: python ../scripts/release.py stage "$DAY_PACK_TARGET"
+signing-environment: release-signing
+macos-update-zip: selfupdate-demo-macos-appkit-update.zip
+update-signing: true
+update-public-key: ${{ vars.DAY_UPDATE_PUBLIC_KEY }}
+update-application-id: dev.daybrite.selfupdatedemo
+```
+
+`post-pack-command` runs from the project directory after packing and before artifact staging,
+with `DAY_PACK_TARGET` set. It has no signing credentials. It can embed helper/XPC code in the
+packed macOS app and place extra payloads plus `update-<target>-<arch>.unsigned.json` templates
+under `build/day/dist/`. The template names `application_id`, `version`, increasing integer `build`,
+`target`, `archive`, and (for Windows/Linux) `helper.name`; it does not supply trusted hashes.
+
+The isolated macOS signer signs Helpers and XPCServices before the enclosing app. With
+`macos-update-zip`, it also validates the app sandbox entitlement, staples the app after the DMG's
+notarization, and archives the app with Apple metadata preserved. The ZIP is a separate update
+payload, while the signed DMG remains the initial-install package.
+
+`update-signing` adds a separate job after platform signing. It reads `DAY_UPDATE_PRIVATE_KEY`
+from the signing environment, checks it against `update-public-key`, hashes the final package and
+helper files, and signs exact schema-2 metadata bytes using Ed25519. Its only executable code is
+the maintained `sign-updates` action and its cryptography dependency; it never builds or runs the
+app or its helper with the key present. The release waits for this job, attaches the `.json` and
+`.json.sig` files, and drops unsigned templates. Missing/mismatched keys fail release publication.
+Existing callers remain unchanged unless they opt in.

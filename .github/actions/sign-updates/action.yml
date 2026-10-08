@@ -1,0 +1,41 @@
+name: Sign application updates
+description: Sign exact release metadata binding final package and helper hashes with Ed25519.
+inputs:
+  assets:
+    required: true
+    description: Downloaded package artifact directory, including update templates.
+  output:
+    required: true
+    description: Destination for signed metadata.
+  private-key:
+    required: true
+    description: 32-byte Ed25519 seed encoded as hex. Never exposed to build jobs.
+  public-key:
+    required: true
+    description: Expected installed trust anchor, encoded as hex.
+  application-id:
+    required: true
+    description: Application identity the release may update.
+  tag:
+    required: true
+    description: Immutable GitHub release tag.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - name: Install signature implementation before exposing credentials
+      shell: bash
+      run: python -m pip install cryptography==46.0.3
+    - name: Sign final payload hashes
+      shell: bash
+      env:
+        UPDATE_ASSETS: ${{ inputs.assets }}
+        UPDATE_OUTPUT: ${{ inputs.output }}
+        UPDATE_PRIVATE_KEY: ${{ inputs.private-key }}
+        UPDATE_PUBLIC_KEY: ${{ inputs.public-key }}
+        UPDATE_APP_ID: ${{ inputs.application-id }}
+        UPDATE_TAG: ${{ inputs.tag }}
+        SIGN_SCRIPT: ${{ github.action_path }}/sign.py
+      run: python "$SIGN_SCRIPT"
