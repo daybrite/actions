@@ -937,6 +937,11 @@ for component wrapping, custom routes, and Astro blogs. This requires the update
 daysite revisions. Existing apps pinned to older daysite revisions still use their original
 default build. The App Fair repository must be published before selecting it remotely.
 
+After upgrading a reusable workflow tag such as `v1`, start a new app workflow run or choose
+**Re-run all jobs**. Re-running only a failed job retains the reusable workflow's original
+commit, so it cannot pick up a newly added theme checkout or renderer launcher. See GitHub's
+[reusable workflow rerun behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#behavior-of-reusable-workflows-when-re-running-jobs).
+
 A workflow that calls `dayapp.yml` twice in one run (a second call with `artifact-prefix`, say,
 to pack a demo-data variant) must set `deploy-website: "false"` on the second call. Left to the
 `site.toml` rule, both calls deploy: the first publishes a site assembled from its own
