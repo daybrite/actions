@@ -710,10 +710,12 @@ on:
           above pass `--locked`. Turn it on for a repository whose job is to prove the CURRENT
           framework still builds — the reference app — where a lock pinned at whatever revision
           it was generated against would silently stop testing day at all.
-          The revision is resolved ONCE, in preflight, and every build and validate leg is moved
-          to that exact revision. Resolving per job instead would let a push land mid-run and give
-          `validate-rebuild` two different framework revisions to compare, which fails as an
-          unreproducible build when nothing is actually wrong.
+          The lock is resolved ONCE, in preflight, and handed to every build and validate leg as
+          an artifact, so no leg reads the committed lock at all: a lock that cannot be resolved
+          (one `day patch --local` rewrote, say) is replaced, not built. Resolving per job instead
+          would let a push land mid-run and give `validate-rebuild` two different framework
+          revisions to compare, which fails as an unreproducible build when nothing is actually
+          wrong.
         type: boolean
         required: false
         default: false
@@ -939,6 +941,21 @@ jobs:
           )
           echo "rev=$REV" >> "$GITHUB_OUTPUT"
           echo "tracking day at $REV" >> "$GITHUB_STEP_SUMMARY"
+
+      # The lock every leg builds with. Each leg checks the repository out afresh, so the lock
+      # prepared above would otherwise stay here: a leg would start from the COMMITTED lock and
+      # repeat the resolution, and a committed lock that `Prepare Cargo.lock` had to throw away
+      # would fail it (`cargo update -p day` finds no git-sourced `day` in a lock `day patch
+      # --local` rewrote). Shipping the file instead means the legs never read the committed
+      # lock, and all of them build the same resolution of every crate, not only day.
+      - name: Upload the lock the legs build with
+        if: inputs.setup-command == '' && inputs.update-day-deps
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}day-lock
+          path: ${{ inputs.project-path }}/Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
 
       - name: First-pass checks
         if: inputs.setup-command == '' && inputs.preflight-checks != ''
@@ -1598,14 +1615,16 @@ jobs:
           targets: ${{ matrix.rust_targets }}
       - uses: Swatinem/rust-cache@v2
 
-      # The day revision preflight resolved (inputs.update-day-deps). `--precise` and not a bare
-      # `cargo update`, so every leg of the matrix compiles the SAME framework revision even if
-      # someone pushes to day while the run is in flight. Empty output = the input is off, and the
-      # committed lock stands.
-      - name: Track the day revision preflight resolved
+      # The lock preflight resolved (inputs.update-day-deps), over the committed one: every leg
+      # of the matrix then compiles the SAME framework revision even if someone pushes to day
+      # while the run is in flight, and a committed lock the checkout cannot resolve is never
+      # read. Empty output = the input is off, and the committed lock stands.
+      - name: Use the lock preflight resolved
         if: needs.preflight.outputs.day-rev != ''
-        working-directory: ${{ inputs.project-path }}
-        run: cargo update -p day --precise "${{ needs.preflight.outputs.day-rev }}"
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}day-lock
+          path: ${{ inputs.project-path }}
 
       # --- the day CLI (cargo install, per the day-version input) -------------------------
       - name: Set up the day CLI
@@ -2451,13 +2470,15 @@ jobs:
           name: ${{ inputs.artifact-prefix }}dist-${{ matrix.target }}
           path: shipped
 
-      # The same revision the build leg used, for the same reason — and here it is the whole point
+      # The same lock the build leg used, for the same reason — and here it is the whole point
       # of the job: `day rebuild` compares its output against the artifact built above, so a
-      # different framework revision would read as an unreproducible build.
-      - name: Track the day revision preflight resolved
+      # different revision of any crate would read as an unreproducible build.
+      - name: Use the lock preflight resolved
         if: needs.preflight.outputs.day-rev != ''
-        working-directory: ${{ inputs.project-path }}
-        run: cargo update -p day --precise "${{ needs.preflight.outputs.day-rev }}"
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}day-lock
+          path: ${{ inputs.project-path }}
 
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
