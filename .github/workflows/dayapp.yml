@@ -254,6 +254,25 @@ on:
           nothing on a target that should only build.
         type: string
         default: ""
+      grant-permissions:
+        description: >-
+          Portable permissions to mark granted on the device before each scripted launch, so a
+          script never meets the OS consent prompt it cannot dismiss — one LINE per rule, as
+          `<targets>: <permissions>`, in the same shape as `target-scripts`. Each launch on a
+          named target gets `--grant` per permission (`pm grant` on the Android emulator,
+          `simctl privacy grant` on the iOS Simulator), which the CLI refuses up front on a
+          target with no tool for it: HarmonyOS, macOS, web-dom, and the camera on the iOS
+          Simulator, which has none.
+
+              grant-permissions: |
+                android-mdc: camera microphone
+                ios-uikit: microphone
+
+          Per target by design: the same script may need the permission on one leg and assert
+          the undecided state on another. The names are those of `[permissions]` in Day.toml.
+          A day CLI that predates `--grant` ignores this with a warning.
+        type: string
+        default: ""
       scripts-once:
         description: >-
           Scripts that run ONCE, in the app's own theme and locale, instead of once per
@@ -1012,6 +1031,7 @@ jobs:
         env:
           TARGETS_IN: ${{ inputs.targets }}
           TARGET_SCRIPTS_IN: ${{ inputs.target-scripts }}
+          GRANTS_IN: ${{ inputs.grant-permissions }}
           ANDROID_ABIS_IN: ${{ inputs.android-abis }}
           IOS_PROFILES_IN: ${{ inputs.ios-profiles }}
           IOS_DEVICES_IN: ${{ inputs.ios-devices }}
@@ -1170,11 +1190,13 @@ jobs:
           }
           check_per_target target-packages "${TARGET_PACKAGES_IN:-}"
           check_per_target target-setup "${TARGET_SETUP_IN:-}"
+          check_per_target grant-permissions "${GRANTS_IN:-}"
           matrix=$(printf '%s' "$matrix" | jq -c \
             --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" \
             --arg androiddev "$ANDROID_D" --arg harmonydev "$HARMONY_D" \
             --arg packages "${TARGET_PACKAGES_IN:-}" \
-            --arg setup "${TARGET_SETUP_IN:-}" --arg tscripts "${TARGET_SCRIPTS_IN:-}" '
+            --arg setup "${TARGET_SETUP_IN:-}" --arg tscripts "${TARGET_SCRIPTS_IN:-}" \
+            --arg grants "${GRANTS_IN:-}" '
             def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-")
                          | sub("^-+"; "") | sub("-+$"; "");
             def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -1314,6 +1336,9 @@ jobs:
                     # The dayscript list for this target, when `target-scripts` names it. Empty
                     # means "no rule for this target", which the leg reads as `scripts`.
                     scripts: (per_target($tscripts; $r.target) | join(" ")),
+                    # The permissions every scripted launch on this target pre-grants
+                    # (inputs.grant-permissions), as `--grant` flags.
+                    grants: (per_target($grants; $r.target) | join(" ")),
                   }
               ] }')
           # Build flavors (inputs.flavors): one more leg per row per flavor, the base app always
@@ -1839,6 +1864,7 @@ jobs:
           LAUNCH_ENV_IN: ${{ inputs.launch-env }}
           SCRIPTS_ONCE_IN: ${{ inputs.scripts-once }}
           CAPTURE_SIZE_IN: ${{ inputs.capture-size }}
+          GRANTS_IN: ${{ matrix.grants }}
           COMBO: ${{ matrix.target }}
           DEVICE_SLUG: ${{ matrix.device_slug }}
         run: |
@@ -1940,6 +1966,18 @@ jobs:
                 echo "::warning::capture-size: ignored — the installed day CLI predates --capture-size"
               fi
             fi
+            # The permissions this target's launches pre-grant (inputs.grant-permissions), one
+            # `--grant` each. The CLI itself refuses a grant the target cannot carry out, so a
+            # rule naming the wrong leg fails at the launch with the reason, not at an
+            # assertion minutes later.
+            GRANTFLAG=""
+            if [ -n "${GRANTS_IN:-}" ] && [ -n "${GRANTS_IN// /}" ]; then
+              if $DAY_BIN launch --help 2>/dev/null | grep -q -- --grant; then
+                for g in ${GRANTS_IN//,/ }; do GRANTFLAG="$GRANTFLAG --grant $g"; done
+              else
+                echo "::warning::grant-permissions: ignored — the installed day CLI predates --grant"
+              fi
+            fi
             cat > "$OUT" <<EOF
           #!/usr/bin/env bash
           set -euo pipefail
@@ -1947,14 +1985,14 @@ jobs:
           run_one() {
             local flags=()
             for s in "\$@"; do flags+=(--script "\$s"); done
-            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$CAPFLAG$ENVS
+            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
           }
           # Same launch without the theme/locale cross (inputs.scripts-once): one run in the
           # app's own appearance and language.
           run_once() {
             local flags=()
             for s in "\$@"; do flags+=(--script "\$s"); done
-            $DAY_BIN launch -p $COMBO "\${flags[@]}"$DEVFLAG$CAPFLAG$ENVS
+            $DAY_BIN launch -p $COMBO "\${flags[@]}"$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
           }
           EOF
             if [ "$COMBO" = web-dom ]; then
@@ -1977,6 +2015,9 @@ jobs:
           else
             if [ -n "${THEMES// /}" ]; then
               echo "::warning::themes: ignored — the installed day CLI predates --themes (day > 0.1.2)"
+            fi
+            if [ -n "${GRANTS_IN:-}" ] && [ -n "${GRANTS_IN// /}" ]; then
+              echo "::warning::grant-permissions: ignored — the installed day CLI predates --grant"
             fi
             # Per-target launch wrapper: linux-gtk renders under xvfb sized to the app window
             # (so the root-capture screenshot fallback is exactly the app); linux-qt uses the

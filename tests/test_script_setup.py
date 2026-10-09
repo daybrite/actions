@@ -12,7 +12,7 @@ STEPS = WORKFLOW['jobs']['build']['steps']
 
 class ScriptSetupTests(unittest.TestCase):
     def run_fixture(self, fail=False, legacy=False, fast="true", launch_env="",
-                    target="android-mdc", once=""):
+                    target="android-mdc", once="", grants="", help_flags=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cli = root / 'day'
@@ -36,8 +36,10 @@ trap 'echo cleanup >> "$EVENT_LOG"' EXIT
                        ARG_LOG=str(root/'args'), FAST_SCRIPTS_IN=fast,
                        SCRIPT_SETUP_IN=setup, SCRIPTS_IN='one.yaml two.yaml',
                        LOCALES_IN='', THEMES_IN='', LAUNCH_ENV_IN=launch_env, SCRIPTS_ONCE_IN=once,
-                       CAPTURE_SIZE_IN='', COMBO=target, DEVICE_SLUG='',
-                       HELP_FLAGS='' if legacy else '--locales', LAUNCH_EXIT='7' if fail else '0')
+                       CAPTURE_SIZE_IN='', GRANTS_IN=grants, COMBO=target, DEVICE_SLUG='',
+                       HELP_FLAGS=(help_flags if help_flags is not None
+                                   else '' if legacy else '--locales'),
+                       LAUNCH_EXIT='7' if fail else '0')
             generator = next(s['run'] for s in STEPS if s.get('id') == 'scripts')
             subprocess.run(['bash', '-c', generator], cwd=root, env=env, check=True,
                            capture_output=True, text=True)
@@ -60,6 +62,25 @@ trap 'echo cleanup >> "$EVENT_LOG"' EXIT
 
     def test_legacy_runner_also_sources_setup(self):
         self.run_fixture(legacy=True)
+
+    def test_grants_reach_every_launch_when_the_cli_knows_the_flag(self):
+        # One --grant per name, on the per-variant and the once-only runners alike.
+        for target, once in [("android-mdc", ""), ("ios-uikit", "two.yaml")]:
+            with self.subTest(target=target, once=once):
+                launches = self.run_fixture(target=target, once=once,
+                                            grants="camera, microphone",
+                                            help_flags="--locales --grant")
+                self.assertEqual(len(launches), 2)
+                for args in launches:
+                    granted = [args[i + 1] for i, a in enumerate(args) if a == "--grant"]
+                    self.assertEqual(granted, ["camera", "microphone"])
+
+    def test_grants_are_dropped_when_the_cli_predates_the_flag(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                launches = self.run_fixture(legacy=legacy, grants="camera")
+                for args in launches:
+                    self.assertNotIn("--grant", args)
 
     def test_fast_policy_reaches_every_launch_and_explicit_env_wins(self):
         # Run the actual generated shell for modern, legacy, web and once-only paths.
