@@ -1709,7 +1709,7 @@ jobs:
       - name: Build (${{ matrix.target }})
         id: build
         working-directory: ${{ inputs.project-path }}
-        run: $DAY_BIN build -p ${{ matrix.target }}
+        run: $DAY_BIN build --target ${{ matrix.target }}
 
       # --- distribution packaging (before scripts, so packages survive a script flake) ------
       # No signing material reaches this job, for any platform: on a release every store
@@ -1724,7 +1724,7 @@ jobs:
         working-directory: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
-          $DAY_BIN build -p web-dom --profile release
+          $DAY_BIN build --target web-dom --profile release
           dist="$DAY_BUILD_DIR/cargo/web-dom/release/dist"
           if [ ! -f "$dist/index.html" ]; then
             echo "::error::web-dom release build produced no dist at $dist — does the app's Cargo.toml declare the 'dom = [\"day/dom\"]' feature? (day new app scaffolds it.)"
@@ -1790,7 +1790,7 @@ jobs:
           case " ${{ needs.preflight.outputs.sign-targets }} " in
             *" ${{ matrix.target }} "*) NO_SIGN="--no-sign" ;;
           esac
-          $DAY_BIN pack -p ${{ matrix.target }} --no-version-in-name --format json $NO_SIGN
+          $DAY_BIN pack --target ${{ matrix.target }} --no-version-in-name --format json $NO_SIGN
 
       - name: Prepare additional package assets
         if: inputs.post-pack-command != '' && matrix.primary && matrix.flavor == '' && steps.pack.outcome == 'success'
@@ -1985,14 +1985,14 @@ jobs:
           run_one() {
             local flags=()
             for s in "\$@"; do flags+=(--script "\$s"); done
-            $DAY_BIN launch -p $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
+            $DAY_BIN launch --target $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
           }
           # Same launch without the theme/locale cross (inputs.scripts-once): one run in the
           # app's own appearance and language.
           run_once() {
             local flags=()
             for s in "\$@"; do flags+=(--script "\$s"); done
-            $DAY_BIN launch -p $COMBO "\${flags[@]}"$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
+            $DAY_BIN launch --target $COMBO "\${flags[@]}"$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
           }
           EOF
             if [ "$COMBO" = web-dom ]; then
@@ -2040,10 +2040,10 @@ jobs:
           cd "$PWD"
           LOG="\${RUNNER_TEMP:-/tmp}/dayscript.log"
           run_one() {
-            if $PREFIX day launch -p $COMBO --script "\$@"$ENVS 2>&1 | tee "\$LOG"; then return 0; fi
+            if $PREFIX day launch --target $COMBO --script "\$@"$ENVS 2>&1 | tee "\$LOG"; then return 0; fi
             if $RETRY && grep -q "engine connection lost" "\$LOG" && ! grep -q "✗" "\$LOG"; then
               echo "::warning::engine connection lost (flaky simulator app-death) — retrying the script once"
-              $PREFIX day launch -p $COMBO --script "\$@"$ENVS
+              $PREFIX day launch --target $COMBO --script "\$@"$ENVS
             else
               return 1
             fi
@@ -2104,7 +2104,7 @@ jobs:
           # would need. Without it, an Xcode 27 runner used to print "Unable to find application
           # named 'Simulator'" into this log while the boot itself succeeded. Orientation does not
           # need the window; `devicectl` turns the device itself.
-          args=(devices boot -p ios-uikit --device "$PROFILE" --wait --headless)
+          args=(devices boot --target ios-uikit --device "$PROFILE" --wait --headless)
           [ -n "${DEVICE_OS:-}" ] && args+=(--os "$DEVICE_OS")
           [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
           "$DAY_BIN" "${args[@]}"
@@ -2129,7 +2129,7 @@ jobs:
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       - name: Enable KVM group perms (android / harmony emulator)
-        # Make /dev/kvm world-accessible so the emulators can open it (`day devices boot -p harmony-arkui` auto-selects `-accel kvm` when /dev/kvm exists).
+        # Make /dev/kvm world-accessible so the emulators can open it (`day devices boot -t harmony-arkui` auto-selects `-accel kvm` when /dev/kvm exists).
         if: steps.scripts.outputs.found == 'true' && (matrix.target == 'android-mdc' || matrix.target == 'harmony-arkui')
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -2175,7 +2175,7 @@ jobs:
           # breaks the run — which is exactly what happened when sdkmanager's download bars landed
           # there and the whole blob was passed to `--device`. Naming it needs no such trust.
           AVD="day-ci-$(printf %s "$PROFILE" | tr -cs '[:alnum:]' '-')"
-          $DAY_BIN devices setup -p android-mdc --name "$AVD" \
+          $DAY_BIN devices setup --target android-mdc --name "$AVD" \
             --device "$PROFILE" --os "${DEVICE_OS:-36}" --arch x86_64 \
             ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"} \
             ${DEVICE_DENSITY:+--density "$DEVICE_DENSITY"}
@@ -2199,7 +2199,7 @@ jobs:
             [ -n "$d" ] && [ -d "$d" ] && { echo "  $d:"; ls -1 "$d" | sed 's/^/    /'; }
           done
           echo "--- day's own view ---"
-          $DAY_BIN devices list -p android-mdc 2>&1 | head -20 || true
+          $DAY_BIN devices list --target android-mdc 2>&1 | head -20 || true
           echo "::endgroup::"
           # `--wait` blocks on sys.boot_completed rather than on adbd answering, and the serial
           # comes back on stdout so the walkthrough drives exactly the device this booted.
@@ -2208,7 +2208,7 @@ jobs:
           # heartbeat every 15s, and the emulator's own log tail if it exits or times out. Set the
           # caller's `day-verbose: true` (DAY_VERBOSE reaches here from the job env) for a line per
           # poll instead — worth doing when a boot hangs rather than fails.
-          SERIAL="$($DAY_BIN devices boot -p android-mdc --device "$AVD" --wait --headless \
+          SERIAL="$($DAY_BIN devices boot --target android-mdc --device "$AVD" --wait --headless \
             ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"})"
           # Set and verify this even when the caller pins an older Day CLI. Error
           # dialogs must not cover gallery captures; crashes still appear in logcat.
@@ -2267,7 +2267,7 @@ jobs:
           # a CLI from before panels were selectable refuses. That CLI boots the phone and only
           # the phone, so the row that asked for anything else fails here rather than publishing
           # phone captures under a tablet's name.
-          args=(devices boot -p harmony-arkui --headless --wait)
+          args=(devices boot --target harmony-arkui --headless --wait)
           if grep -Fq "names the panel" <<< "$HELP"; then
             [ -n "${PROFILE:-}" ] && args+=(--device "$PROFILE")
             [ -n "${DEVICE_ORIENTATION:-}" ] && args+=(--orientation "$DEVICE_ORIENTATION")
@@ -3133,7 +3133,7 @@ jobs:
                                        or ([(.value.stores // {})[] | (.screenshots // {}) | length] | add // 0) > 0)
                               | .key' assets/storefront.json); do
             case "$t" in ios-uikit|android-mdc) ;; *) continue ;; esac
-            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" store screenshots assets/gallery.json -p "$t" || failed=1
+            "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" store screenshots assets/gallery.json --target "$t" || failed=1
           done
           if [ "$failed" != 0 ]; then
             echo "::error::a store would refuse this release's listing screenshots (the reasons are above): fix store/storefront.toml or the device profiles, then re-tag"
@@ -4019,7 +4019,7 @@ jobs:
           if [ -n "${PRE_TAG:-}" ]; then fetch "$PRE_TAG" pre-shots; fi
       # --- shared inputs -----------------------------------------------------------------------
       # The raster favicon set (apple-touch, PWA tile, legacy favicon) comes from the renderer
-      # every platform's icon does: `day icon build -p web-dom` writes the size-exact png/ family
+      # every platform's icon does: `day icon build -t web-dom` writes the size-exact png/ family
       # under build/day/host/, and the generator copies the sizes it needs. The site build
       # carries no image library. Best-effort: without the CLI the site keeps the SVG master
       # (or the largest PNG under resource/icons/) as its only icon.
@@ -4033,7 +4033,7 @@ jobs:
             echo "::error::The installed day CLI lacks 'icon build'. Update day-version to build website icons."
             exit 1
           fi
-          "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" icon build -p web-dom
+          "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" icon build --target web-dom
       # The storefront as the CLI resolves it (docs/store.md "Exporting"): the app's identity
       # and locales, the listing text per target, store and locale, the live store records,
       # and the declared permissions with their native keys per platform and reasons per

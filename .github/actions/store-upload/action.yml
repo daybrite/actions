@@ -150,7 +150,7 @@ runs:
         # `/store-rules.toml`, 2026-09-25).
         [ -z "${DAY_STORE_RULES:-}" ] || [ -f "$DAY_STORE_RULES" ] || { echo "::error::rules: $DAY_STORE_RULES is not a file — the store-rules action's path output, or a file in the checkout"; exit 1; }
         # The set the store would refuse is refused here, before anything is staged or sent.
-        "$DAY_BIN" $FLAVOR_ARGS store screenshots "$INDEX" -p "$TARGET"
+        "$DAY_BIN" $FLAVOR_ARGS store screenshots "$INDEX" --target "$TARGET"
 
     - name: Stage the listing
       if: steps.where.outputs.own != 'true'
@@ -172,7 +172,7 @@ runs:
         # `day store stage` holds the listing to the store rules (lint's errors, and placeholder
         # text unless allowed), writes the fastlane tree from store/storefront.toml, and places
         # the listing's screenshots from the index.
-        args=(store stage -p "$TARGET")
+        args=(store stage --target "$TARGET")
         [ -n "$INDEX" ] && args+=(--screenshots "$INDEX")
         [ "$ALLOW" = true ] && args+=(--allow-placeholders)
         "$DAY_BIN" $FLAVOR_ARGS "${args[@]}"

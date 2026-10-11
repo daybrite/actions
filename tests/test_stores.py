@@ -226,7 +226,7 @@ class UploadActionTests(unittest.TestCase):
     def test_the_screenshots_are_checked_and_refused_for_an_app_with_its_own_fastfile(self):
         result, calls = self.run_step("Check the listing's screenshots", cwd=self.project, INDEX=str(self.root / "index.json"), OWN="false", FLAVOR_ARGS="--flavor appfair")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(calls, [f"--flavor appfair store screenshots {self.root}/index.json -p ios-uikit"])
+        self.assertEqual(calls, [f"--flavor appfair store screenshots {self.root}/index.json --target ios-uikit"])
         result, calls = self.run_step("Check the listing's screenshots", cwd=self.project, INDEX=str(self.root / "index.json"), OWN="true", FLAVOR_ARGS="")
         self.assertEqual(result.returncode, 1)
         self.assertIn("its own Fastfile", result.stdout)
@@ -237,9 +237,9 @@ class UploadActionTests(unittest.TestCase):
     def test_staging_takes_the_index_and_the_placeholder_switch(self):
         for target in ("ios-uikit", "android-mdc"):
             _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET=target, INDEX="/w/shots/gallery.json", FLAVOR_ARGS="", ALLOW="false")
-            self.assertEqual(calls, [f"store stage -p {target} --screenshots /w/shots/gallery.json"])
+            self.assertEqual(calls, [f"store stage --target {target} --screenshots /w/shots/gallery.json"])
             _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET=target, INDEX="", FLAVOR_ARGS="--flavor x", ALLOW="true")
-            self.assertEqual(calls, [f"--flavor x store stage -p {target} --allow-placeholders"])
+            self.assertEqual(calls, [f"--flavor x store stage --target {target} --allow-placeholders"])
         result, calls = self.run_step("Stage the listing", cwd=self.project, TARGET="macos-appkit", INDEX="", FLAVOR_ARGS="", ALLOW="false")
         self.assertEqual(result.returncode, 1)
         self.assertIn("no lanes for macos-appkit", result.stdout)
