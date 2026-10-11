@@ -216,7 +216,17 @@ runs:
 
     # --- HarmonyOS ------------------------------------------------------------------------------
     # The public SDK supplies the NDK (and hdc); hvigor and ohpm do NOT ship in it and come from the
-    # command-line-tools, which is why there are two halves here.
+    # command-line-tools, which is why there are two halves here. cargo-ohos drives the Rust
+    # cross-compile (`day build` runs `cargo ohos rustc`): it reads the SDK's `native` component as
+    # OHOS_SDK_NATIVE and sets the linker, the cc-rs compilers, bindgen, cmake and pkg-config for
+    # the target itself, so none of that is exported by hand here. Pinned: the tool is young and
+    # its flags still move between releases (install-action falls back to cargo-binstall's prebuilt
+    # binary for it).
+    - name: cargo-ohos (harmony)
+      if: inputs.target == 'harmony-arkui'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-ohos@0.3.4
     - name: OHOS SDK
       if: inputs.target == 'harmony-arkui'
       uses: openharmony-rs/setup-ohos-sdk@v1
@@ -230,9 +240,11 @@ runs:
         set -euo pipefail
         NATIVE="${{ steps.ohos-sdk.outputs.ohos_sdk_native }}"
         echo "$(dirname "$NATIVE")/toolchains" >> "$GITHUB_PATH"
+        echo "OHOS_SDK_NATIVE=$NATIVE" >> "$GITHUB_ENV"
+        # napi-ohos's build script reads the NDK under this name for its link search paths, the
+        # one variable cargo-ohos does not set. `day build` bridges it itself; a bare
+        # `cargo ohos clippy` in a caller's step needs it from here.
         echo "OHOS_NDK_HOME=$NATIVE" >> "$GITHUB_ENV"
-        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER=$NATIVE/llvm/bin/aarch64-unknown-linux-ohos-clang" >> "$GITHUB_ENV"
-        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_OHOS_LINKER=$NATIVE/llvm/bin/x86_64-unknown-linux-ohos-clang" >> "$GITHUB_ENV"
         # hvigor's OpenHarmony mode REJECTS the flat SDK layout with "The SDK management mode has
         # changed" — it wants the versioned view (<base>/<api>/{ets,native,toolchains,…}).
         OH="$(dirname "$NATIVE")"
