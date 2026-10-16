@@ -202,7 +202,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `preflight-exclude` | string | — | Directories the preflight checks leave alone, relative to the repository root (`crates`, `vendor/third-party`), comma-, space- or newline-separated. Workspace members under one are left out: `fmt` then names the remaining members with `-p` instead of `--all` (which also formats path dependencies), and clippy/check/test add `--exclude`. For a Day project added to a repository whose other crates it depends on by path but does not maintain. |
 | `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. The lock is resolved once, in preflight, and handed to every leg, so the committed lock is never what a leg builds with; one the checkout cannot resolve is replaced. |
 | `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has lanes for it, either a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios` or a `store/storefront.toml` listing that `day store stage` turns into lanes, and the App Store Connect key secrets `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and `DAY_ASC_KEY_B64` are set. `"true"`/`"false"` override. |
-| `upload-macos` | string | — | Upload the `macos-appkit` build products to the Mac App Store on semantic-version tags through `macos-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` with `platform :mac` when the App Store Connect key secrets are set; `"true"`/`"false"` override. |
+| `upload-macos` | string | — | Sign the built `macos-appkit` bundle into a Mac App Store `.pkg` and upload it on semantic-version tags through `macos-upload-lane`. Empty auto-detects: on when the listing names `mac-app-store` (or a `fastlane/Fastfile` has `platform :mac`), `macos-appkit` is among the targets, and the App Store Connect key and `DAY_MAS_CERT_P12`/`DAY_MAS_CERT_PASSWORD` secrets are set; `"true"`/`"false"` override. |
 | `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/storefront.toml` listing that `day store stage` turns into lanes, when `DAY_PLAY_JSON_KEY` is set; `"true"`/`"false"` override. |
 | `ios-upload-lane` | string | `ios upload` | The fastlane arguments the `appstore-ios` job runs (platform + lane). The staged lanes are `ios validate`, `ios upload`, and `ios release`, which also submits the version for review. |
 | `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
@@ -559,7 +559,12 @@ certificate (`DAY_APPLE_CERT_P12` with `DAY_APPLE_CERT_PASSWORD`) and the App St
 (`DAY_ANDROID_KEYSTORE_B64`, `DAY_ANDROID_KEY_ALIAS`, `DAY_KS_PASS`, `DAY_KEY_PASS`) for Android;
 the keystore, certificate and profile (`DAY_OHOS_KEYSTORE_B64`, `DAY_OHOS_CERT_B64`,
 `DAY_OHOS_PROFILE_B64`, `DAY_OHOS_KEY_ALIAS`, `DAY_OHOS_KS_PASS`, `DAY_OHOS_KEY_PASS`) for
-HarmonyOS, whose hap-sign-tool comes from the OpenHarmony SDK the row installs. The action runs
+HarmonyOS, whose hap-sign-tool comes from the OpenHarmony SDK the row installs. The Mac App
+Store is signed in its upload job instead, since its signature is not the notarized download's:
+`appstore-macos` takes the unsigned `.app` the build staged for `sign-macos` and signs it into a
+`.pkg` with `DAY_MAS_CERT_P12` (one `.p12` holding the Apple Distribution and the Mac Installer
+Distribution identities), `DAY_MAS_CERT_PASSWORD`, and the Mac App Store profile
+`DAY_MAS_PROFILE_B64` (or one issued from the App Store Connect key with `DAY_APPLE_TEAM`). The action runs
 `day sign apply` over the package and removes the material; the row republishes `dist-<target>`
 with the signed package in place of the unsigned one. The App Fair's queue signs with the same
 action. The job that builds and runs the app's code never holds a signing key for any platform,
@@ -578,7 +583,7 @@ Every store upload runs on the same gate: the whole build matrix succeeded (a fa
 on any device is a regression the release does not ship, as the release job already holds) and
 that platform's signer ran. A release with a red leg therefore holds every signer and every
 store, not one. An upload that is on while its signer will not run (Play with no Android
-material, the App Store with no certificate, the Mac App Store with no signing environment) is
+material, the App Store with no certificate, the Mac App Store with no `DAY_MAS_CERT_P12`) is
 refused when the uploads are decided, with the secrets to set, rather than by the lane after
 the build.
 
@@ -596,20 +601,24 @@ running a lane from the app's own fastlane config:
 | job | store | artifact it downloads | env it sets |
 |---|---|---|---|
 | `appstore-ios` | App Store Connect | `dist-ios-uikit` (the `.ipa`) | `DAY_IPA` |
-| `appstore-macos` | Mac App Store | `dist-macos-appkit` (notarized when `signing-environment` is set) | `DAY_PKG_OR_APP` |
+| `appstore-macos` | Mac App Store | `app-macos-appkit` (the unsigned `.app`, which the job signs into a `.pkg`) | `DAY_PKG` (and `DAY_PKG_OR_APP`) |
 | `playstore-android` | Google Play | `dist-android-mdc` (the `.aab`) | `DAY_AAB` |
 
 The `upload-*` and `*-upload-lane` inputs that drive them are in [Inputs](#inputs).
 
 With an `upload-*` input left empty, the upload runs exactly when the repo has a fastlane config
 for that platform — a `fastlane/Fastfile` under `project-path` (for iOS also
-`platform/ios/fastlane/Fastfile`, for Play also `platform/android/fastlane/Fastfile`) containing
-the literal `platform :ios`, `platform :mac`, or `platform :android` (case-sensitive). For iOS and Play a
-`store/storefront.toml` listing counts as well: the job runs `day store stage` and uses the lanes it
-writes (`ios validate`, `ios upload`, and `ios release`, which also submits the version for
-review; `android validate`, `android upload`, and `android release`). An auto upload also needs
-the store's upload credentials: the App Store Connect key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
-`DAY_ASC_KEY_B64`) for iOS and the Mac App Store, and `DAY_PLAY_JSON_KEY` for Play. Every app
+`platform/ios/fastlane/Fastfile`, for the Mac `platform/macos/fastlane/Fastfile`, for Play also
+`platform/android/fastlane/Fastfile`) containing the literal `platform :ios`, `platform :mac`, or
+`platform :android` (case-sensitive). For iOS and Play a `store/storefront.toml` listing counts as
+well: the job runs `day store stage` and uses the lanes it writes (`ios validate`, `ios upload`,
+and `ios release`, which also submits the version for review; `android validate`, `android
+upload`, and `android release`). The Mac App Store is opt-in, so for it the listing counts when it
+names `mac-app-store` (a `[storefront.macos-appkit.mac-app-store.*]` table), and the lanes are
+`mac validate`, `mac upload`, `mac submit` and `mac release`. An auto upload also needs the store's
+upload credentials: the App Store Connect key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
+`DAY_ASC_KEY_B64`) for iOS and the Mac App Store, `DAY_MAS_CERT_P12` and `DAY_MAS_CERT_PASSWORD`
+for the Mac App Store's signature, and `DAY_PLAY_JSON_KEY` for Play. Every app
 scaffold carries a `store/` listing for its website and web manifest, so a tagged release of an
 app without those secrets skips the store jobs instead of failing in them. The `store uploads` job
 runs on release tags and prints a `::notice` for each auto decision.
@@ -624,12 +633,11 @@ ship it). The iOS job hands it the App Store Connect API key (`DAY_ASC_KEY_ID`, 
 `DAY_ASC_KEY_B64`), which reaches the lane as `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and
 `DAY_ASC_KEY` (the `.p8` as a file), what the staged lanes read; a repository's own Fastfile may
 read the same names or its own. The Play job hands it `DAY_PLAY_JSON_KEY` (the service-account
-JSON), which reaches the lane as `SUPPLY_JSON_KEY`. The macOS job sets no store credentials:
-forward yours with `secrets: inherit` and have the Fastfile read them. The App Fair's queue
-uploads with the same action. A Mac App Store submission needs a `.pkg`
-signed with the MAS installer identity; producing or re-signing it from `DAY_PKG_OR_APP` is the
-lane's job — the workflow hands over build products, not store policy. Caller permissions are
-unchanged: the upload jobs need nothing beyond what the workflow already uses.
+JSON), which reaches the lane as `SUPPLY_JSON_KEY`. The macOS job signs first: it downloads
+the unsigned `.app` (`app-macos-appkit`), signs it into a `.pkg` named after the release's `.dmg`
+through [`sign-package`](#sign-package), and hands that `.pkg` and the App Store Connect key to
+the action as the iOS job does. The App Fair's queue uploads with the same action. Caller
+permissions are unchanged: the upload jobs need nothing beyond what the workflow already uses.
 
 ```ruby
 # fastlane/Fastfile
@@ -697,12 +705,15 @@ The limits themselves are data in this repository,
 [`.github/actions/store-rules/store-rules.toml`](.github/actions/store-rules/store-rules.toml),
 handed to the CLI through `DAY_STORE_RULES`; the day CLI embeds the same file as its
 default. When a store changes what it accepts, edit the file here and every app takes it on its
-next run.
+next run. A CLI from before the staged Mac App Store (an app pinned to an older `day-version`)
+gets a copy with the Mac App Store unstaged, since it reads the rules strictly and would refuse
+the newer keys.
 
 The input needs a dayscript with marked `screenshot:` steps running on the target, and the
 lanes `day store stage` writes: an app with its own Fastfile places its own screenshots, and the
 run fails rather than guess. An artifact with no captures, or a set the stores would refuse,
-fails in the upload job with the reason. The Mac App Store upload is unchanged.
+fails in the upload job with the reason. The Mac App Store upload takes the `screenshots-macos-appkit`
+captures the same way.
 
 ### Web deploy
 
@@ -828,7 +839,10 @@ certificate and an App Store profile — a stored one, or one the action issues 
 Store Connect key (`fastlane sigh`) so the caller stores none per app; an Android `.aab` or
 `.apk` takes the upload keystore, with further `.apk` files signed best-effort; a HarmonyOS
 `.hap` takes its keystore, certificate and profile (`ohos-*` inputs), signed by the OpenHarmony
-SDK's hap-sign-tool, so the caller sets that SDK up first (`setup-day-deps`). The certificate
+SDK's hap-sign-tool, so the caller sets that SDK up first (`setup-day-deps`); a macOS `.app`
+takes one `.p12` with the Apple Distribution and Mac Installer Distribution identities and a
+Mac App Store profile (stored, or issued for the macos platform), and comes out as a `.pkg`
+where `out` says. The certificate
 lives in an ephemeral keychain the action destroys when it ends, whatever happened in between,
 and the decoded files do not outlive their step.
 A package named `<stem>-unsigned.<ext>` is signed to `<stem>.<ext>` with its provenance sidecars
@@ -853,7 +867,7 @@ writes the fastlane project from `store/storefront.toml` (holding the text to `d
 first, and placing the listing's screenshots from a gallery index the action checks against the
 stores' rules); an app with a `fastlane/Fastfile` of its own (or `platform/<os>/fastlane/`) keeps
 it, and the lane runs there instead. The package reaches the lane as `DAY_IPA`, `DAY_AAB` or
-`DAY_PKG_OR_APP`, the credentials as `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY` and
+`DAY_PKG` (also `DAY_PKG_OR_APP`, its older name), the credentials as `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY` and
 `SUPPLY_JSON_KEY`, each given as a value or as a file already on the runner. The caller sets up
 the CLI first.
 

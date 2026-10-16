@@ -6,7 +6,7 @@ description: >-
   An app with a Fastfile of its own keeps it: the lane then runs there and nothing is staged. The
   credentials are named on the command line and reach the lane as the variables the generated
   lanes read (DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY; SUPPLY_JSON_KEY); the package as DAY_IPA,
-  DAY_AAB or DAY_PKG_OR_APP. Both the shared `dayapp.yml` workflow and the App Fair's queue upload
+  DAY_AAB or DAY_PKG (also DAY_PKG_OR_APP, its older name). Both the shared `dayapp.yml` workflow and the App Fair's queue upload
   with this action; a caller sets up the day CLI first (`setup-day-cli`).
 
 inputs:
@@ -165,7 +165,7 @@ runs:
       run: |
         set -euo pipefail
         case "$TARGET" in
-          ios-uikit|android-mdc) ;;
+          ios-uikit|android-mdc|macos-appkit) ;;
           *) echo "::error::day store stage writes no lanes for $TARGET; give the app a fastlane/Fastfile with the lane"; exit 1 ;;
         esac
         [ -z "${DAY_STORE_RULES:-}" ] || [ -f "$DAY_STORE_RULES" ] || { echo "::error::rules: $DAY_STORE_RULES is not a file — the store-rules action's path output, or a file in the checkout"; exit 1; }
@@ -205,7 +205,7 @@ runs:
         case "$TARGET" in
           ios-uikit) export DAY_IPA="$PACKAGE" ;;
           android-mdc) export DAY_AAB="$PACKAGE" ;;
-          macos-appkit) export DAY_PKG_OR_APP="$PACKAGE" ;;
+          macos-appkit) export DAY_PKG="$PACKAGE" DAY_PKG_OR_APP="$PACKAGE" ;;
         esac
         # The credentials, decoded where only this job can read them.
         if [ -n "${ASC_KEY_PATH:-}" ]; then

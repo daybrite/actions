@@ -751,11 +751,16 @@ on:
         default: ""
       upload-macos:
         description: >-
-          Upload the macos-appkit build products to the Mac App Store on semantic-version tags,
-          via the app's own fastlane lane (macos-upload-lane). Empty (default) auto-detects: on
-          when a fastlane/Fastfile under project-path contains `platform :mac` and the App Store
-          Connect key secrets DAY_ASC_KEY_ID, DAY_ASC_ISSUER and DAY_ASC_KEY_B64 are set.
-          "true"/"false" override the detection.
+          Sign the built macos-appkit bundle into a Mac App Store .pkg and upload it to App Store
+          Connect on semantic-version tags, via the app's fastlane lane (macos-upload-lane).
+          Empty (default) auto-detects: on when the app has lanes for it (a fastlane/Fastfile or
+          platform/macos/fastlane/Fastfile under project-path containing `platform :mac`, or a
+          store/storefront.toml listing that names `mac-app-store`, which `day store stage` turns
+          into lanes), macos-appkit is among the targets, and the secrets are set: the App Store
+          Connect key (DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64) and the Mac App Store
+          certificate (DAY_MAS_CERT_P12 and DAY_MAS_CERT_PASSWORD; DAY_MAS_PROFILE_B64 is
+          optional, issued from the key with DAY_APPLE_TEAM when absent). "true"/"false"
+          override the detection.
         type: string
         required: false
         default: ""
@@ -826,6 +831,14 @@ on:
       # installed profile with the certificate above (an API key cannot use Xcode's
       # cloud-managed signing, so an automatic export has nothing to sign with).
       DAY_IOS_PROFILE_B64: { required: false }
+      # The Mac App Store, consumed ONLY by `appstore-macos`: one .p12 holding both the Apple
+      # Distribution identity the app is signed with and the Mac Installer Distribution identity
+      # ("3rd Party Mac Developer Installer: …") the .pkg is signed with, its password, and the
+      # Mac App Store profile, base64 (optional: issued from the App Store Connect key when
+      # absent).
+      DAY_MAS_CERT_P12: { required: false }
+      DAY_MAS_CERT_PASSWORD: { required: false }
+      DAY_MAS_PROFILE_B64: { required: false }
       DAY_ANDROID_KEYSTORE_B64: { required: false }
       DAY_ANDROID_KEY_ALIAS: { required: false }
       # The Google Play service-account JSON (its contents, not base64), which the
@@ -3268,15 +3281,18 @@ jobs:
           # Whether each store's credentials are set is all that crosses into the step.
           HAS_ASC: ${{ secrets.DAY_ASC_KEY_ID != '' && secrets.DAY_ASC_ISSUER != '' && secrets.DAY_ASC_KEY_B64 != '' }}
           HAS_PLAY: ${{ secrets.DAY_PLAY_JSON_KEY != '' }}
+          # The Mac App Store is signed in its upload job, from its own certificate.
+          HAS_MAS: ${{ secrets.DAY_MAS_CERT_P12 != '' && secrets.DAY_MAS_CERT_PASSWORD != '' }}
+          TARGETS: ${{ needs.preflight.outputs.targets }}
           # …and whether the signer that upload needs will run: the store rows preflight planned
-          # (from the same material), and sign-macos when a signing environment is named.
+          # (from the same material); the Mac App Store's is HAS_MAS above.
           SIGN_TARGETS: ${{ needs.preflight.outputs.sign-targets }}
-          SIGNING_ENVIRONMENT: ${{ inputs.signing-environment }}
         run: |
           set -euo pipefail
           PP="${PROJECT_PATH:-.}"
           # Where a platform's lanes come from, or nothing: $1=Fastfile marker, $2=whether a
-          # store/ listing counts, $3…=candidate Fastfiles.
+          # store/ listing counts (true, false, or a store key the listing must name, for an
+          # opt-in store like the Mac App Store), $3…=candidate Fastfiles.
           lanes() {
             local marker="$1" listing="$2" f
             shift 2
@@ -3289,9 +3305,13 @@ jobs:
             # rather than leaving this to guess.
             local dir="$PP/store" f
             [ -n "${STORE_FLAVOR_IN:-}" ] && dir="$PP/store-$STORE_FLAVOR_IN"
-            if [ "$listing" = true ]; then
+            if [ "$listing" != false ]; then
               for f in storefront.toml storefront.yaml storefront.yml app.toml app.yaml app.yml; do
-                if [ -f "$dir/$f" ]; then echo "$dir/$f (lanes from 'day store stage')"; break; fi
+                [ -f "$dir/$f" ] || continue
+                if [ "$listing" = true ] || grep -qF "$listing" "$dir/$f"; then
+                  echo "$dir/$f (lanes from 'day store stage')"
+                fi
+                break
               done
             fi
             return 0
@@ -3319,9 +3339,15 @@ jobs:
           decide upload_ios "$UPLOAD_IOS_IN" \
             "$(lanes 'platform :ios' true "$PP/fastlane/Fastfile" "$PP/platform/ios/fastlane/Fastfile")" \
             "$HAS_ASC" "$ASC"
-          decide upload_macos "$UPLOAD_MACOS_IN" \
-            "$(lanes 'platform :mac' false "$PP/fastlane/Fastfile")" \
-            "$HAS_ASC" "$ASC"
+          # The Mac App Store signs from the bundle the macos-appkit leg builds, so without that
+          # target there is nothing to send.
+          MAC_LANES=""
+          case " ${TARGETS//,/ } " in
+            *" macos-appkit "*) MAC_LANES="$(lanes 'platform :mac' mac-app-store "$PP/fastlane/Fastfile" "$PP/platform/macos/fastlane/Fastfile")" ;;
+          esac
+          [ "$HAS_ASC" = true ] && [ "$HAS_MAS" = true ] && MAS_CREDENTIALS=true || MAS_CREDENTIALS=false
+          decide upload_macos "$UPLOAD_MACOS_IN" "$MAC_LANES" \
+            "$MAS_CREDENTIALS" "DAY_ASC_KEY_ID, DAY_ASC_ISSUER, DAY_ASC_KEY_B64, DAY_MAS_CERT_P12 and DAY_MAS_CERT_PASSWORD"
           decide upload_play "$UPLOAD_PLAY_IN" \
             "$(lanes 'platform :android' true "$PP/fastlane/Fastfile" "$PP/platform/android/fastlane/Fastfile")" \
             "$HAS_PLAY" "DAY_PLAY_JSON_KEY"
@@ -3335,10 +3361,10 @@ jobs:
           }
           case " $SIGN_TARGETS " in *" ios-uikit "*) ios_signed=true ;; *) ios_signed=false ;; esac
           case " $SIGN_TARGETS " in *" android-mdc "*) android_signed=true ;; *) android_signed=false ;; esac
-          [ -n "$SIGNING_ENVIRONMENT" ] && macos_signed=true || macos_signed=false
+          macos_signed="$HAS_MAS"
           signer upload_ios "$ios_signed" "set DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 for the sign (ios-uikit) row"
           signer upload_play "$android_signed" "set DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS for the sign (android-mdc) row"
-          signer upload_macos "$macos_signed" "name the environment holding the Developer ID material in inputs.signing-environment for the sign-macos job"
+          signer upload_macos "$macos_signed" "set DAY_MAS_CERT_P12 (the Apple Distribution and Mac Installer Distribution identities in one .p12) and DAY_MAS_CERT_PASSWORD; the upload job signs the Mac App Store .pkg from them"
 
   # the sign job republishes the signed .ipa under the same dist-ios-uikit name, so having it in
   # `needs` means this job downloads the signed package when the material exists and the
@@ -3454,43 +3480,52 @@ jobs:
           asc-issuer: ${{ secrets.DAY_ASC_ISSUER }}
           asc-key-b64: ${{ secrets.DAY_ASC_KEY_B64 }}
 
-  # sign-macos re-uploads its notarized output under the same dist-macos-appkit name, so having
-  # it in `needs` means this job downloads the signed .dmg when signing is configured and the
-  # build job's dev-tier dist when it is not (the skipped job costs nothing under !cancelled()).
+  # The Mac App Store takes an installer package signed for the store, which is a different
+  # signature from the notarized download's, so this job signs its own from the same unsigned
+  # bundle `sign-macos` starts from: the distribution identity over a Mac App Store profile, the
+  # installer identity on the .pkg (`day sign apply`, through the sign-package action). It checks
+  # out the app for its store/ listing and runs none of the app's code.
   appstore-macos:
     name: upload (mac app store)
-    needs: [preflight, build, sign-macos, stores]
+    needs: [preflight, build, stores]
     permissions:
       contents: read
     if: >-
       ${{ !cancelled() && needs.preflight.outputs.release == 'true'
           && needs.stores.outputs.upload_macos == 'true'
-          && needs.build.result == 'success' && needs.sign-macos.result == 'success' }}
+          && needs.build.result == 'success' }}
     runs-on: ${{ needs.preflight.outputs.macos_runner }}
     env:
       # `day store stage` below reads the listing of the build being published: the base app's
       # `store/`, or the flavor's `store-<name>/` when the caller named one (inputs.store-flavor).
       DAY_FLAVOR: ${{ inputs.store-flavor }}
     steps:
+      - name: Check this build has a bundle to sign
+        if: inputs.store-flavor != ''
+        run: |
+          echo "::error::the build stages the unsigned macOS bundle for the base app only, so a flavor's Mac App Store upload has nothing to sign; set upload-macos: \"false\" for flavor builds"
+          exit 1
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - name: Download the unsigned .app
+        uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-macos-appkit', inputs.store-flavor) || 'dist-macos-appkit' }}
-          path: dist
-      # A Mac App Store submission needs a .pkg signed with the MAS installer identity. Producing
-      # or re-signing that .pkg is the lane's job, not this workflow's: DAY_PKG_OR_APP points at
-      # whatever the build shipped — a .pkg if pack made one, else the .app or .dmg.
-      - name: Find the build product
-        id: package
+          name: ${{ inputs.artifact-prefix }}app-macos-appkit
+          path: ${{ runner.temp }}/incoming
+      # The .pkg takes the release name `day pack` gave the .dmg (`<stem>-macos-appkit.pkg`).
+      - name: Unpack
         run: |
           set -euo pipefail
-          FOUND=""
-          for pat in '*.pkg' '*.app' '*.dmg'; do
-            FOUND="$(find dist -maxdepth 3 -name "$pat" | head -1)"
-            [ -n "$FOUND" ] && break
-          done
-          [ -n "$FOUND" ] || { echo "::error::no .pkg/.app/.dmg in the downloaded dist artifact — is macos-appkit in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
-          echo "path=$PWD/$FOUND" | tee -a "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/stage" "$RUNNER_TEMP/pkg"
+          ditto -x -k "$RUNNER_TEMP/incoming/app.zip" "$RUNNER_TEMP/stage"
+          APP="$(find "$RUNNER_TEMP/stage" -maxdepth 1 -name '*.app' | head -1)"
+          [ -n "$APP" ] || { echo "::error::no .app in the app-macos-appkit artifact"; exit 1; }
+          DMGNAME="$(cat "$RUNNER_TEMP/incoming/dmg-name.txt" 2>/dev/null || true)"
+          [ -n "$DMGNAME" ] || DMGNAME="$(basename "$APP" .app).dmg"
+          {
+            echo "APP=$APP"
+            echo "PKG=$RUNNER_TEMP/pkg/${DMGNAME%.dmg}.pkg"
+            echo "APPID=$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
+          } >> "$GITHUB_ENV"
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
@@ -3498,19 +3533,67 @@ jobs:
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
-      # The Mac App Store takes a .pkg signed with the MAS installer identity, and producing or
-      # re-signing it is the app's own lane's job: the CLI stages no macOS listing, so the app
-      # has to carry the Fastfile, and the action runs the lane there with DAY_PKG_OR_APP set.
-      # No store credentials are set here: forward yours with `secrets: inherit` and have the
-      # Fastfile read them.
+      - name: Sign the Mac App Store package
+        id: signed
+        uses: daybrite/actions/.github/actions/sign-package@v1
+        with:
+          target: macos-appkit
+          package: ${{ env.APP }}
+          out: ${{ env.PKG }}
+          apple-cert-p12: ${{ secrets.DAY_MAS_CERT_P12 }}
+          apple-cert-password: ${{ secrets.DAY_MAS_CERT_PASSWORD }}
+          apple-profile-b64: ${{ secrets.DAY_MAS_PROFILE_B64 }}
+          app-id: ${{ env.APPID }}
+          apple-team: ${{ secrets.DAY_APPLE_TEAM }}
+          asc-key-id: ${{ secrets.DAY_ASC_KEY_ID }}
+          asc-issuer: ${{ secrets.DAY_ASC_ISSUER }}
+          asc-key-b64: ${{ secrets.DAY_ASC_KEY_B64 }}
+      # The listing's screenshots, as the iOS upload takes them: this run's own captures, indexed.
+      - name: Download this run's screenshots
+        if: ${{ inputs.store-screenshots }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ inputs.artifact-prefix }}screenshots-macos-appkit*
+          path: shots-in
+      - name: Index this run's screenshots
+        id: shots
+        if: ${{ inputs.store-screenshots }}
+        env:
+          TARGET: macos-appkit
+          PROJECT_PATH: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(find shots-in -name '*.png' -print -quit 2>/dev/null)" ]; then
+            echo "::error::the screenshots-$TARGET artifact holds no captures, so there is nothing to upload to the store. Does a dayscript with 'screenshot:' steps run on $TARGET, and does store/storefront.toml [storefront] name them?"
+            exit 1
+          fi
+          if [ -d "shots-in/$TARGET" ]; then
+            mkdir "shots-in/screenshots-$TARGET" && mv "shots-in/$TARGET" "shots-in/screenshots-$TARGET/"
+          fi
+          roots=()
+          mkdir -p shots
+          for d in shots-in/*/; do
+            roots+=("${d%/}")
+            cp -R "$d." shots/
+          done
+          "$DAY_BIN" --project "${PROJECT_PATH:-.}" screenshot index --screenshot-paths "${roots[@]}" --out shots/gallery.json
+          echo "index=$PWD/shots/gallery.json" | tee -a "$GITHUB_OUTPUT"
+      - name: Take the stores' rules
+        id: rules
+        uses: daybrite/actions/.github/actions/store-rules@v1
+      # Stage the listing (or take the app's own Fastfile) and run the lane over the signed .pkg.
       - name: Upload to the Mac App Store
         uses: daybrite/actions/.github/actions/store-upload@v1
         with:
           target: macos-appkit
-          package: ${{ steps.package.outputs.path }}
+          package: ${{ steps.signed.outputs.package }}
           lane: ${{ inputs.macos-upload-lane }}
           project-path: ${{ inputs.project-path }}
-          flavor: ${{ inputs.store-flavor }}
+          screenshots: ${{ steps.shots.outputs.index }}
+          rules: ${{ steps.rules.outputs.path }}
+          asc-key-id: ${{ secrets.DAY_ASC_KEY_ID }}
+          asc-issuer: ${{ secrets.DAY_ASC_ISSUER }}
+          asc-key-b64: ${{ secrets.DAY_ASC_KEY_B64 }}
 
   playstore-android:
     name: upload (google play)

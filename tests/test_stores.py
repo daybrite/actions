@@ -81,7 +81,11 @@ class ShapeTests(unittest.TestCase):
         mac = steps("appstore-macos")["Upload to the Mac App Store"]
         self.assertEqual(mac["uses"], STORE_UPLOAD)
         self.assertEqual(mac["with"]["target"], "macos-appkit")
-        self.assertNotIn("screenshots", mac["with"], "the CLI stages no macOS listing")
+        # The package is the one this job signed; the listing is staged like the others.
+        self.assertEqual(mac["with"]["package"], "${{ steps.signed.outputs.package }}")
+        self.assertEqual(mac["with"]["screenshots"], "${{ steps.shots.outputs.index }}")
+        self.assertEqual(mac["with"]["rules"], "${{ steps.rules.outputs.path }}")
+        self.assertIn("secrets.DAY_ASC_KEY_B64", mac["with"]["asc-key-b64"])
 
 
 class IndexStepTests(unittest.TestCase):
@@ -240,10 +244,58 @@ class UploadActionTests(unittest.TestCase):
             self.assertEqual(calls, [f"store stage --target {target} --screenshots /w/shots/gallery.json"])
             _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET=target, INDEX="", FLAVOR_ARGS="--flavor x", ALLOW="true")
             self.assertEqual(calls, [f"--flavor x store stage --target {target} --allow-placeholders"])
-        result, calls = self.run_step("Stage the listing", cwd=self.project, TARGET="macos-appkit", INDEX="", FLAVOR_ARGS="", ALLOW="false")
+        _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET="macos-appkit", INDEX="", FLAVOR_ARGS="", ALLOW="false")
+        self.assertEqual(calls, ["store stage --target macos-appkit"], "the Mac App Store is staged too")
+        result, calls = self.run_step("Stage the listing", cwd=self.project, TARGET="linux-gtk", INDEX="", FLAVOR_ARGS="", ALLOW="false")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("no lanes for macos-appkit", result.stdout)
+        self.assertIn("no lanes for linux-gtk", result.stdout)
         self.assertEqual(calls, [])
+
+
+class DecideStepTests(unittest.TestCase):
+    """The stores job's decision, run over a scratch checkout."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / "store").mkdir()
+        self.out = self.root / "outputs"
+
+    def decide(self, listing, **env):
+        (self.root / "store/storefront.toml").write_text(listing)
+        self.out.write_text("")
+        base = {
+            "UPLOAD_IOS_IN": "false", "UPLOAD_MACOS_IN": "", "UPLOAD_PLAY_IN": "false",
+            "PROJECT_PATH": str(self.root), "STORE_FLAVOR_IN": "",
+            "HAS_ASC": "true", "HAS_PLAY": "false", "HAS_MAS": "true",
+            "TARGETS": "macos-appkit,web-dom", "SIGN_TARGETS": "",
+            "GITHUB_OUTPUT": str(self.out),
+        }
+        result = subprocess.run(
+            ["bash", "-c", steps("stores")["Decide the store uploads"]["run"]],
+            cwd=self.root, env={**os.environ, **base, **env}, text=True, capture_output=True,
+        )
+        return result, dict(l.split("=", 1) for l in self.out.read_text().split() if "=" in l)
+
+    def test_the_mac_app_store_is_on_only_for_a_listing_that_names_it(self):
+        named = "[storefront.macos-appkit.mac-app-store.submission-info]\napple-category = \"DEVELOPER_TOOLS\"\n"
+        result, out = self.decide(named)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(out["upload_macos"], "true")
+        # A listing for the website alone does not publish to the Mac App Store.
+        _, out = self.decide("[storefront.metadata]\nname = \"App\"\n")
+        self.assertEqual(out["upload_macos"], "false")
+        # Nor does one whose run builds no macOS bundle, or that lacks the store certificate.
+        _, out = self.decide(named, TARGETS="web-dom")
+        self.assertEqual(out["upload_macos"], "false")
+        _, out = self.decide(named, HAS_MAS="false")
+        self.assertEqual(out["upload_macos"], "false")
+
+    def test_an_explicit_mac_upload_without_the_certificate_is_refused(self):
+        result, _ = self.decide("", UPLOAD_MACOS_IN="true", HAS_MAS="false")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("DAY_MAS_CERT_P12", result.stdout)
 
 
 if __name__ == "__main__":
@@ -275,3 +327,32 @@ class CompositeOutputTests(unittest.TestCase):
         locate = [s for s in doc["runs"]["steps"] if s.get("id") == "locate"][0]
         self.assertIn("GITHUB_OUTPUT", locate["run"])
         self.assertIn("store-rules.toml", locate["run"])
+
+    def test_a_cli_from_before_the_staged_mac_app_store_gets_rules_it_can_read(self):
+        """An app pinned to an older day-version reads the rules strictly; the staged Mac App
+        Store's `opt-in` key would fail its every store upload, so it gets the store unstaged."""
+        import tomllib
+        doc = yaml.safe_load((ROOT / ".github/actions/store-rules/action.yml").read_text())
+        run = doc["runs"]["steps"][0]["run"].replace(
+            "${{ github.action_path }}", str(ROOT / ".github/actions/store-rules"))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            out = root / "outputs"
+
+            def locate(help_text):
+                day = root / "day"
+                day.write_text(f"#!/bin/sh\necho '{help_text}'\n")
+                day.chmod(0o755)
+                out.write_text("")
+                result = subprocess.run(
+                    ["bash", "-c", run], capture_output=True, text=True,
+                    env={**os.environ, "DAY_BIN": str(day), "RUNNER_TEMP": temp, "GITHUB_OUTPUT": str(out)})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return Path(out.read_text().strip().split("=", 1)[1])
+
+            old = tomllib.loads(locate("Usage: day sign apply <ARTIFACT>").read_text())
+            self.assertEqual(old["mac-app-store"], {"label": "the Mac App Store", "targets": ["macos-appkit"]})
+            self.assertIn("layout", old["apple-app-store"], "every other store is as it was")
+            current = locate("--installer-identity <NAME>")
+            self.assertEqual(current, ROOT / ".github/actions/store-rules/store-rules.toml")
+            self.assertTrue(tomllib.loads(current.read_text())["mac-app-store"]["opt-in"])

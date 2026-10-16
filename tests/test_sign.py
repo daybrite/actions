@@ -112,7 +112,8 @@ class ShapeTests(unittest.TestCase):
     def test_an_upload_without_its_signer_is_refused_where_it_is_decided(self):
         decide = steps("stores")["Decide the store uploads"]
         self.assertEqual(decide["env"]["SIGN_TARGETS"], "${{ needs.preflight.outputs.sign-targets }}")
-        self.assertEqual(decide["env"]["SIGNING_ENVIRONMENT"], "${{ inputs.signing-environment }}")
+        self.assertIn("secrets.DAY_MAS_CERT_P12 != ''", decide["env"]["HAS_MAS"])
+        self.assertIn('macos_signed="$HAS_MAS"', decide["run"])
         for line in ('signer upload_ios "$ios_signed"', 'signer upload_play "$android_signed"',
                      'signer upload_macos "$macos_signed"', "is on but its package will not be signed"):
             self.assertIn(line, decide["run"])
@@ -165,15 +166,31 @@ class ShapeTests(unittest.TestCase):
         sdk = steps("sign")["Set up the HarmonyOS SDK"]
         self.assertIn("matrix.target == 'harmony-arkui'", str(sdk["if"]))
 
-    def test_the_action_signs_all_three_store_platforms(self):
+    def test_the_action_signs_all_four_store_platforms(self):
         for key in ("target", "package"):
             self.assertTrue(ACTION["inputs"][key]["required"], key)
         for key in ("ohos-keystore-b64", "ohos-cert-b64", "ohos-profile-b64", "ohos-key-alias",
-                    "ohos-keystore-password", "ohos-key-password"):
+                    "ohos-keystore-password", "ohos-key-password", "apple-installer-identity", "out"):
             self.assertIn(key, ACTION["inputs"], key)
         check = ACTION["runs"]["steps"][0]["run"]
-        self.assertIn("ios-uikit|android-mdc|harmony-arkui)", check)
+        self.assertIn("ios-uikit|macos-appkit|android-mdc|harmony-arkui)", check)
         self.assertEqual(str(action_step("Sign the HarmonyOS package")["if"]), "inputs.target == 'harmony-arkui'")
+
+    def test_a_mac_bundle_is_signed_into_a_store_package_with_both_identities(self):
+        """The keychain and the profile serve both Apple targets; the Mac App Store adds the
+        installer identity, a .provisionprofile issued for the macos platform, and a .pkg."""
+        for name in ("Create an ephemeral signing keychain", "Take or issue the App Store profile"):
+            self.assertIn("inputs.target == 'macos-appkit'", str(action_step(name)["if"]), name)
+        keychain = action_step("Create an ephemeral signing keychain")["run"]
+        self.assertIn("3rd Party Mac Developer Installer", keychain)
+        self.assertIn('echo "INSTALLER_ID=$INSTALLER_ID"', keychain)
+        self.assertIn("-T /usr/bin/productbuild", keychain)
+        profile = action_step("Take or issue the App Store profile")["run"]
+        self.assertIn("NAME=appstore.provisionprofile; SIGH_PLATFORM=macos", profile)
+        sign = action_step("Sign the .app into a Mac App Store .pkg")
+        self.assertEqual(str(sign["if"]), "inputs.target == 'macos-appkit'")
+        self.assertIn('--installer-identity "$INSTALLER_ID"', sign["run"])
+        self.assertIn("pkgutil --check-signature", sign["run"])
 
     def test_the_action_destroys_its_keychain_whatever_happened(self):
         last = ACTION["runs"]["steps"][-1]
@@ -187,11 +204,20 @@ class ShapeTests(unittest.TestCase):
         with a message about missing secrets (Day-Showcase v0.4.19, 2026-09-28)."""
         self.assertIn("sign", JOBS["release"]["needs"])
         self.assertIn("needs.sign.result == 'skipped'", condition("release"))
-        for job, signer in (("appstore-ios", "sign"), ("playstore-android", "sign"), ("appstore-macos", "sign-macos")):
+        for job, signer in (("appstore-ios", "sign"), ("playstore-android", "sign")):
             self.assertIn(signer, JOBS[job]["needs"], job)
             cond = condition(job)
             self.assertIn("needs.build.result == 'success'", cond, job)
             self.assertIn(f"needs.{signer}.result == 'success'", cond, job)
+        # The Mac App Store's signature differs from the notarized download's, so its upload job
+        # signs its own package from the unsigned bundle, with the store's own certificate.
+        self.assertIn("needs.build.result == 'success'", condition("appstore-macos"))
+        self.assertNotIn("sign-macos", JOBS["appstore-macos"]["needs"])
+        sign = steps("appstore-macos")["Sign the Mac App Store package"]
+        self.assertEqual(sign["uses"], "daybrite/actions/.github/actions/sign-package@v1")
+        self.assertEqual(sign["with"]["target"], "macos-appkit")
+        self.assertIn("secrets.DAY_MAS_CERT_P12", sign["with"]["apple-cert-p12"])
+        self.assertIn("secrets.DAY_MAS_PROFILE_B64", sign["with"]["apple-profile-b64"])
 
 
 class SignStepTests(unittest.TestCase):
@@ -238,6 +264,15 @@ class SignStepTests(unittest.TestCase):
         self.assertEqual((self.root / "outputs").read_text().strip(), f"signed={self.ipa}")
         result = self.run_step("Name the signed package", RENAME="true", PACKAGE=str(self.root / "dist/app.aab"))
         self.assertEqual((self.root / "outputs").read_text().strip(), f"signed={self.root}/dist/app.aab", "a package not marked unsigned keeps its name")
+        # A macOS bundle comes out as a .pkg: where `out` says, else beside it.
+        app = str(self.root / "stage/Day Showcase.app")
+        result = self.run_step("Name the signed package", TARGET="macos-appkit", PACKAGE=app, OUT="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "outputs").read_text().strip(), f"signed={self.root}/stage/Day Showcase.pkg")
+        out = str(self.root / "pkg/day-showcase-macos-appkit.pkg")
+        self.run_step("Name the signed package", TARGET="macos-appkit", PACKAGE=app, OUT=out)
+        self.assertEqual((self.root / "outputs").read_text().strip(), f"signed={out}")
+        self.assertTrue((self.root / "pkg").is_dir(), "the destination directory is made")
 
     def test_the_signed_ipa_replaces_the_unsigned_one_and_keeps_its_sidecars(self):
         result = self.run_step("Sign the .ipa")

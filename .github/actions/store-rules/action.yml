@@ -22,5 +22,22 @@ runs:
         set -euo pipefail
         rules="${{ github.action_path }}/store-rules.toml"
         [ -f "$rules" ] || { echo "::error::store-rules.toml is not beside this action ($rules)"; exit 1; }
+        # A CLI from before the staged Mac App Store (2026-10-16) reads store rules strictly and
+        # would refuse the file over the Mac App Store's `opt-in` key, which fails every store
+        # upload of an app pinned to an older day-version. That CLI gets the Mac App Store as it
+        # knew it, known by name and not staged; `--installer-identity` arrived in the same change.
+        if [ -n "${DAY_BIN:-}" ] && [ -x "$DAY_BIN" ] \
+          && ! "$DAY_BIN" sign apply --help 2>/dev/null | grep -q -- --installer-identity; then
+          legacy="$RUNNER_TEMP/store-rules-legacy.toml"
+          awk '
+            /^\[mac-app-store[].]/ { skip = 1; next }
+            skip && /^\[/ { skip = 0 }
+            skip && /^# Storefronts the CLI knows by name/ { skip = 0 }
+            !skip { print }
+          ' "$rules" > "$legacy"
+          printf '\n[mac-app-store]\nlabel = "the Mac App Store"\ntargets = ["macos-appkit"]\n' >> "$legacy"
+          rules="$legacy"
+          echo "this day CLI predates the staged Mac App Store; handing it the rules without it"
+        fi
         echo "path=$rules" >> "$GITHUB_OUTPUT"
         echo "store rules from $rules"

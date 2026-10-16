@@ -2,20 +2,27 @@ name: Sign a package
 description: >-
   Sign a packed app with key material named on the command line — an iOS .ipa with a
   distribution certificate and an App Store profile (stored, or issued now from an App Store
-  Connect key), an Android .aab or .apk with the upload keystore, a HarmonyOS .hap with its
-  keystore, certificate and profile — through `day sign apply`, which re-signs the package as an
-  archive so no app code runs. The material lives in an ephemeral keychain, or in files removed
+  Connect key), a macOS .app into a Mac App Store .pkg with the distribution and installer
+  identities and a Mac App Store profile, an Android .aab or .apk with the upload keystore, a
+  HarmonyOS .hap with its keystore, certificate and profile — through `day sign apply`, which
+  re-signs the package as an archive so no app code runs. The material lives in an ephemeral keychain, or in files removed
   before the action ends, whatever happened in between. Both the shared `dayapp.yml` workflow
   (its `sign` job) and the App Fair's queue sign with this action; a caller sets up the day CLI
   first (`setup-day-cli`, which exports DAY_BIN), and for a .hap the OpenHarmony SDK too
   (`setup-day-deps`), whose hap-sign-tool does the signing.
 inputs:
   target:
-    description: The Day target the package was packed for, ios-uikit, android-mdc or harmony-arkui.
+    description: The Day target the package was packed for, ios-uikit, macos-appkit, android-mdc or harmony-arkui.
     required: true
   package:
-    description: The package to sign, an absolute path.
+    description: The package to sign, an absolute path (for macos-appkit, the built .app).
     required: true
+  out:
+    description: >-
+      macos-appkit: where to write the Mac App Store .pkg, an absolute path. Empty writes it
+      beside the .app, named after it.
+    required: false
+    default: ""
   rename-unsigned:
     description: >-
       A package named `<stem>-unsigned.<ext>` (what `day pack --no-sign` writes) is signed to
@@ -64,7 +71,9 @@ inputs:
     required: false
   # --- Apple --------------------------------------------------------------------------------
   apple-cert-p12:
-    description: Base64 distribution certificate (.p12).
+    description: >-
+      Base64 distribution certificate (.p12). For macos-appkit, one .p12 holding both the Apple
+      Distribution identity and the Mac Installer Distribution identity.
     required: false
   apple-cert-password:
     description: The password for that certificate.
@@ -76,11 +85,18 @@ inputs:
       identity the certificate holds, and refuses a certificate that holds more than one.
     required: false
     default: ""
+  apple-installer-identity:
+    description: >-
+      macos-appkit: the installer identity the .pkg is signed with, by name. Empty takes the one
+      Mac App Store installer identity ("3rd Party Mac Developer Installer: …") the certificate
+      holds.
+    required: false
+    default: ""
   apple-profile-b64:
     description: >-
-      Base64 App Store provisioning profile. Empty asks Apple for one now, for `app-id` against
-      the imported certificate, through the App Store Connect key below (`fastlane sigh`), so
-      the caller stores no profile per app.
+      Base64 App Store provisioning profile (a Mac App Store profile for macos-appkit). Empty asks
+      Apple for one now, for `app-id` against the imported certificate, through the App Store
+      Connect key below (`fastlane sigh`), so the caller stores no profile per app.
     required: false
     default: ""
   app-id:
@@ -121,24 +137,30 @@ runs:
       run: |
         set -euo pipefail
         [ -n "${DAY_BIN:-}" ] && [ -x "$DAY_BIN" ] || { echo "::error::sign-package needs DAY_BIN — run daybrite/actions/.github/actions/setup-day-cli first"; exit 1; }
-        [ -f "${{ inputs.package }}" ] || { echo "::error::no package at ${{ inputs.package }}"; exit 1; }
+        [ -e "${{ inputs.package }}" ] || { echo "::error::no package at ${{ inputs.package }}"; exit 1; }
         case "${{ inputs.target }}" in
-          ios-uikit|android-mdc|harmony-arkui) ;;
-          *) echo "::error::sign-package signs ios-uikit, android-mdc and harmony-arkui packages, not ${{ inputs.target }}"; exit 1 ;;
+          ios-uikit|macos-appkit|android-mdc|harmony-arkui) ;;
+          *) echo "::error::sign-package signs ios-uikit, macos-appkit, android-mdc and harmony-arkui packages, not ${{ inputs.target }}"; exit 1 ;;
         esac
 
     # The signed file's name: `<stem>-unsigned.<ext>` becomes `<stem>.<ext>`, the way the release
-    # job names its assets, so `day rebuild` still finds the provenance sidecars beside it.
+    # job names its assets, so `day rebuild` still finds the provenance sidecars beside it. A
+    # macOS bundle comes out as a separate .pkg, where `out` says or beside it.
     - name: Name the signed package
       id: name
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}
         RENAME: ${{ inputs.rename-unsigned }}
+        TARGET: ${{ inputs.target }}
+        OUT: ${{ inputs.out }}
       run: |
         set -euo pipefail
         SIGNED="$PACKAGE"
-        if [ "$RENAME" = true ]; then
+        if [ "${TARGET:-}" = macos-appkit ]; then
+          SIGNED="${OUT:-${PACKAGE%.app}.pkg}"
+          mkdir -p "$(dirname "$SIGNED")"
+        elif [ "$RENAME" = true ]; then
           ext="${PACKAGE##*.}"
           case "$PACKAGE" in
             *-unsigned."$ext") SIGNED="${PACKAGE%-unsigned.$ext}.$ext" ;;
@@ -228,12 +250,14 @@ runs:
         fi
     # --- Apple -----------------------------------------------------------------------------
     - name: Create an ephemeral signing keychain
-      if: inputs.target == 'ios-uikit'
+      if: inputs.target == 'ios-uikit' || inputs.target == 'macos-appkit'
       shell: bash
       env:
         CERT_P12: ${{ inputs.apple-cert-p12 }}
         CERT_PASSWORD: ${{ inputs.apple-cert-password }}
         IDENTITY: ${{ inputs.apple-identity }}
+        INSTALLER_IDENTITY: ${{ inputs.apple-installer-identity }}
+        TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
         [ -n "${CERT_P12:-}" ] || { echo "::error::no distribution certificate (apple-cert-p12) to sign with"; exit 1; }
@@ -251,7 +275,7 @@ runs:
           exit 1
         fi
         security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
-          -T /usr/bin/codesign -f pkcs12
+          -T /usr/bin/codesign -T /usr/bin/productbuild -f pkcs12
         rm -f "$RUNNER_TEMP/cert.p12"
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
         security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
@@ -269,15 +293,37 @@ runs:
           [ "$COUNT" = 1 ] || { echo "::error::expected exactly 1 identity in the certificate, found $COUNT; name one with apple-identity"; exit 1; }
           SIGN_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/^[[:space:]]*1\)/ {print $2; exit}')"
         fi
+        # A Mac App Store package is signed twice: the app with the distribution identity above,
+        # the installer with the installer identity, which is not a code-signing identity and so
+        # is not among those counted above. productbuild takes it by name.
+        INSTALLER_ID=""
+        if [ "$TARGET" = macos-appkit ]; then
+          security find-identity -v "$KEYCHAIN"
+          if [ -n "${INSTALLER_IDENTITY:-}" ]; then
+            security find-identity -v "$KEYCHAIN" | grep -qF "\"$INSTALLER_IDENTITY" || {
+              echo "::error::the certificate holds no installer identity \"$INSTALLER_IDENTITY\"; pass a name printed above as apple-installer-identity"
+              exit 1
+            }
+            INSTALLER_ID="$INSTALLER_IDENTITY"
+          else
+            INSTALLER_ID="$(security find-identity -v "$KEYCHAIN" | sed -n 's/.*"\(3rd Party Mac Developer Installer: [^"]*\)".*/\1/p' | head -1)"
+            [ -n "$INSTALLER_ID" ] || {
+              echo "::error::the certificate holds no Mac App Store installer identity (\"3rd Party Mac Developer Installer: …\", a Mac Installer Distribution certificate). Export it into the same .p12 as the Apple Distribution identity"
+              exit 1
+            }
+          fi
+        fi
         {
           echo "SIGN_KEYCHAIN=$KEYCHAIN"
           echo "SIGN_ID=$SIGN_ID"
+          echo "INSTALLER_ID=$INSTALLER_ID"
         } >> "$GITHUB_ENV"
 
     - name: Take or issue the App Store profile
-      if: inputs.target == 'ios-uikit'
+      if: inputs.target == 'ios-uikit' || inputs.target == 'macos-appkit'
       shell: bash
       env:
+        TARGET: ${{ inputs.target }}
         # fastlane reports usage to its own servers unless told not to.
         FASTLANE_OPT_OUT_USAGE: "1"
         PROFILE_B64: ${{ inputs.apple-profile-b64 }}
@@ -289,7 +335,13 @@ runs:
         ASC_KEY_PATH: ${{ inputs.asc-key-path }}
       run: |
         set -euo pipefail
-        DEST="$RUNNER_TEMP/appstore.mobileprovision"
+        # A Mac profile is a .provisionprofile, and sigh issues it for the macos platform.
+        if [ "$TARGET" = macos-appkit ]; then
+          NAME=appstore.provisionprofile; SIGH_PLATFORM=macos
+        else
+          NAME=appstore.mobileprovision; SIGH_PLATFORM=ios
+        fi
+        DEST="$RUNNER_TEMP/$NAME"
         umask 077
         if [ -n "${PROFILE_B64:-}" ]; then
           # A stored profile wins, for an app that needs a particular one.
@@ -315,15 +367,15 @@ runs:
             --api_key_path "$RUNNER_TEMP/asc-key.json" \
             --app_identifier "$APP_ID" \
             ${APPLE_TEAM:+--team_id "$APPLE_TEAM"} \
-            --platform ios \
+            --platform "$SIGH_PLATFORM" \
             --force \
             --output_path "$RUNNER_TEMP/profiles" \
-            --filename appstore.mobileprovision
-          mv "$RUNNER_TEMP/profiles/appstore.mobileprovision" "$DEST"
+            --filename "$NAME"
+          mv "$RUNNER_TEMP/profiles/$NAME" "$DEST"
           rm -f "$RUNNER_TEMP/asc-key.json" "$RUNNER_TEMP/asc-for-profile.p8"
         fi
         security cms -D -i "$DEST" | plutil -extract UUID raw -o - - >/dev/null \
-          || { echo "::error::the profile is not a .mobileprovision"; exit 1; }
+          || { echo "::error::the profile is not a $NAME"; exit 1; }
         # What the profile is, for reading against a later signing failure.
         security cms -D -i "$DEST" | plutil -p - | grep -E '"(Name|UUID|TeamIdentifier|ExpirationDate)"' || true
         echo "SIGN_PROFILE=$DEST" >> "$GITHUB_ENV"
@@ -350,6 +402,22 @@ runs:
         fi
         ls -1 "$(dirname "$SIGNED")"
 
+    # A Mac App Store package: the bundle is signed over the profile with the distribution
+    # identity, keeping the entitlements the build signed in, and wrapped by productbuild in an
+    # installer signed with the installer identity. The .app itself is left as it was.
+    - name: Sign the .app into a Mac App Store .pkg
+      if: inputs.target == 'macos-appkit'
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        SIGNED: ${{ steps.name.outputs.signed }}
+      run: |
+        set -euo pipefail
+        "$DAY_BIN" sign apply "$PACKAGE" --out "$SIGNED" \
+          --profile "$SIGN_PROFILE" --identity "$SIGN_ID" --installer-identity "$INSTALLER_ID"
+        [ -f "$SIGNED" ] || { echo "::error::day sign apply wrote no $SIGNED"; exit 1; }
+        pkgutil --check-signature "$SIGNED"
+
     - name: Report the signed package
       id: done
       shell: bash
@@ -360,5 +428,5 @@ runs:
       shell: bash
       run: |
         [ -n "${SIGN_KEYCHAIN:-}" ] && security delete-keychain "$SIGN_KEYCHAIN" 2>/dev/null || true
-        rm -f "$RUNNER_TEMP/appstore.mobileprovision" "$RUNNER_TEMP/cert.p12" \
+        rm -f "$RUNNER_TEMP/appstore.mobileprovision" "$RUNNER_TEMP/appstore.provisionprofile" "$RUNNER_TEMP/cert.p12" \
           "$RUNNER_TEMP/upload.keystore" "$RUNNER_TEMP/asc-key.json" "$RUNNER_TEMP/asc-for-profile.p8"
