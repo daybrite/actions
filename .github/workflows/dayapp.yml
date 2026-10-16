@@ -2136,6 +2136,60 @@ jobs:
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           Write-Host "desktop is now $($b.Width)x$($b.Height)"
 
+      # A hosted Windows runner has no audio endpoint, so Media Foundation cannot build an audio
+      # renderer: an audio-only source fails with MF_E_CANNOT_CREATE_SINK (0xC00D36FA), while a
+      # video with a soundtrack plays silently on its video branch alone (day-piece-media's
+      # demo, 2026-10-16). Install Scream, a signed virtual sound card, so the scripted app has
+      # a default playback device. Best-effort: without it the captures still happen, and only a
+      # script that asserts on audio playback notices.
+      - name: Provide an audio playback device (windows)
+        if: steps.scripts.outputs.found == 'true' && runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'Scream3.8.zip'
+          Invoke-WebRequest -Uri 'https://github.com/duncanthrax/scream/releases/download/3.8/Scream3.8.zip' -OutFile $zip
+          $sha = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($sha -ne 'b561a62770bbf8c587363b1bd8a5b69eae6ba72c89987245e4d6395087156351') { throw "Scream3.8.zip: unexpected sha256 $sha" }
+          $dir = Join-Path $env:RUNNER_TEMP 'scream'
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $driver = Join-Path $dir "Install\driver\$arch"
+          # Trust the driver's publisher first: a non-interactive session cannot answer the
+          # "install this device software?" prompt, and devcon fails instead of asking.
+          $signer = (Get-AuthenticodeSignature (Join-Path $driver 'scream.cat')).SignerCertificate
+          if ($null -eq $signer) { throw 'scream.cat carries no publisher signature' }
+          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'TrustedPublisher', 'LocalMachine'
+          $store.Open('ReadWrite'); $store.Add($signer); $store.Close()
+          foreach ($svc in 'AudioEndpointBuilder', 'Audiosrv') {
+            Set-Service -Name $svc -StartupType Automatic
+            Start-Service -Name $svc
+          }
+          & (Join-Path $dir 'Install\helpers\devcon-x64.exe') install (Join-Path $driver 'Scream.inf') '*Scream'
+          if ($LASTEXITCODE -ne 0) { throw "devcon install exited $LASTEXITCODE" }
+          Restart-Service -Name Audiosrv
+          $devices = @(Get-CimInstance Win32_SoundDevice | Select-Object -ExpandProperty Name)
+          if ($devices.Count -eq 0) { throw 'no sound device after installing Scream' }
+          Write-Host "sound devices: $($devices -join ', ')"
+
+      # Native WinUI faults can bypass Rust's panic hook and leave only a lost engine socket.
+      # Enable WER before launch; the hosted runner is discarded after the job. Keep the default
+      # directory so `day launch` can find the dump, and upload it before that runner disappears.
+      - name: Enable WinUI crash dumps
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'windows-winui'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDir = Join-Path $env:LOCALAPPDATA 'CrashDumps'
+          New-Item -ItemType Directory -Path $dumpDir -Force | Out-Null
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpType -PropertyType DWord -Value 2 -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpCount -PropertyType DWord -Value 3 -Force | Out-Null
+          "DAY_WINDOWS_CRASH_DUMPS=$dumpDir" >> $env:GITHUB_ENV
+
       - name: Run dayscripts (${{ matrix.target }})
         if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
         continue-on-error: ${{ inputs.tolerate-failures && matrix.tier == 'extra' }}
@@ -2442,6 +2496,14 @@ jobs:
           path: ${{ inputs.project-path }}/build/day${{ matrix.flavor != '' && format('/flavors/{0}', matrix.flavor) || '' }}/reports/dayscript/
           if-no-files-found: warn
           overwrite: true
+      - name: Upload WinUI crash dumps
+        if: always() && matrix.target == 'windows-winui' && env.DAY_WINDOWS_CRASH_DUMPS != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}crash-dumps-${{ matrix.target }}${{ matrix.flavor != '' && format('-{0}', matrix.flavor) || '' }}-${{ github.run_attempt }}
+          path: ${{ env.DAY_WINDOWS_CRASH_DUMPS }}/*.dmp
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload screenshots
         if: always()

@@ -769,6 +769,19 @@ artifact now carries the run attempt in its name, so each attempt deploys its ow
 by the uploader's internal retry is swept before deploying, where the caller's token allows it.
 Nothing to configure.
 
+WinUI script jobs enable Windows Error Reporting full dumps before launching the app. If a native
+crash produces a dump, the job uploads it as `<artifact-prefix>crash-dumps-windows-winui-<attempt>`
+(with the flavor in the name when applicable), retained for seven days. Open the `.dmp` in WinDbg
+or Visual Studio to inspect the native fault; a lost engine connection alone does not identify
+its cause. Startup hangs do not produce WER crash dumps.
+
+Windows script jobs also install a virtual sound card ([Scream](https://github.com/duncanthrax/scream),
+pinned by hash) before launching the app. A hosted Windows runner has no audio endpoint, so
+Media Foundation cannot create an audio renderer: an audio-only source fails with
+`MF_E_CANNOT_CREATE_SINK` (0xC00D36FA), while a video with a soundtrack plays silently. The step
+is best-effort; if it fails, the leg continues without audio and only a script that asserts on
+audio playback notices.
+
 ### Requirements
 
 - The project's `Cargo.toml` must resolve its `day` dependencies on a runner — a git dependency
