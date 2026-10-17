@@ -10,6 +10,59 @@ WORKFLOW = yaml.safe_load((Path(__file__).parents[1] / '.github/workflows/dayapp
 STEPS = WORKFLOW['jobs']['build']['steps']
 
 
+class DayRevisionTests(unittest.TestCase):
+    """Execute the dependency resolver with synthetic Cargo output; no network or Git writes."""
+
+    def resolve(self, requested='', resolved='a' * 40, cargo_exit='0'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cargo = root / 'cargo'
+            cargo.write_text('''#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$ARG_LOG"
+if [[ "$FIXTURE_CARGO_EXIT" != 0 ]]; then exit "$FIXTURE_CARGO_EXIT"; fi
+printf '[[package]]\\nname = "day"\\nversion = "0.0.0"\\nsource = "git+https://example.invalid/day#%s"\\n' "$FIXTURE_REVISION" > Cargo.lock
+''')
+            cargo.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH'],
+                       DAY_REVISION_IN=requested, FIXTURE_REVISION=resolved,
+                       FIXTURE_CARGO_EXIT=cargo_exit, ARG_LOG=str(root / 'args'),
+                       GITHUB_OUTPUT=str(root / 'output'), GITHUB_STEP_SUMMARY=str(root / 'summary'))
+            script = next(s['run'] for s in WORKFLOW['jobs']['preflight']['steps']
+                          if s.get('id') == 'day-dep')
+            result = subprocess.run(['bash', '-c', script], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            read = lambda name: (root / name).read_text() if (root / name).exists() else ''
+            return result, read('args'), read('output')
+
+    def test_default_resolves_tracked_tip(self):
+        result, args, output = self.resolve()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(args, 'update -p day\n')
+        self.assertEqual(output, 'rev=' + 'a' * 40 + '\n')
+
+    def test_caller_revision_is_used_and_reported(self):
+        revision = 'b' * 40
+        result, args, output = self.resolve(revision, revision)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(args, 'update -p day --precise ' + revision + '\n')
+        self.assertEqual(output, 'rev=' + revision + '\n')
+
+    def test_invalid_revision_never_reaches_cargo(self):
+        result, args, output = self.resolve('main')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((args, output), ('', ''))
+
+    def test_wrong_resolved_revision_is_not_published(self):
+        result, _, output = self.resolve('b' * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output, '')
+
+    def test_cargo_failure_is_not_published(self):
+        result, _, output = self.resolve(cargo_exit='7')
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(output, '')
+
+
 class ScriptSetupTests(unittest.TestCase):
     def run_fixture(self, fail=False, legacy=False, fast="true", launch_env="",
                     target="android-mdc", once="", grants="", help_flags=None):

@@ -92,6 +92,14 @@ on:
         description: Git URL of the day repository, for branch/commit installs.
         type: string
         default: https://github.com/daybrite/day.git
+      day-revision:
+        description: >-
+          Optional full Git commit for Day dependencies when update-day-deps is true. A caller
+          that resolves day/main once can share that revision with its library jobs and demo.
+          Empty resolves the tip tracked by the app. Set day-version to the same revision
+          to also pin the CLI, or leave day-version at main to use the resolved dependency revision.
+        type: string
+        default: ""
       day-verbose:
         description: >-
           Run the day CLI verbose (DAY_VERBOSE=1): every `day build`/`launch`/`pack`/`rebuild`
@@ -724,7 +732,8 @@ on:
       update-day-deps:
         description: >-
           Refresh the day crates in Cargo.lock to the tip of what the app's git dependency tracks,
-          instead of building the revision the committed lock pins. Off by default: an app wants
+          or to day-revision when the caller has already resolved that tip, instead of building
+          the revision the committed lock pins. Off by default: an app wants
           its lock honoured, which is what makes a build reproducible and what lets the checks
           above pass `--locked`. Turn it on for a repository whose job is to prove the CURRENT
           framework still builds — the reference app — where a lock pinned at whatever revision
@@ -955,9 +964,16 @@ jobs:
         id: day-dep
         if: inputs.setup-command == '' && inputs.update-day-deps
         working-directory: ${{ inputs.project-path }}
+        env:
+          DAY_REVISION_IN: ${{ inputs.day-revision }}
         run: |
           set -euo pipefail
-          cargo update -p day
+          if [[ -n "$DAY_REVISION_IN" ]]; then
+            [[ "$DAY_REVISION_IN" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::day-revision must be a full Git commit"; exit 1; }
+            cargo update -p day --precise "$DAY_REVISION_IN"
+          else
+            cargo update -p day
+          fi
           # Read the revision back out of the lock rather than asking git for the branch tip: the
           # lock is what the build actually uses, and it is the app's own Cargo.toml that decides
           # which repository and branch that is — this workflow does not get to assume.
@@ -971,6 +987,10 @@ jobs:
           sys.exit("no git-sourced `day` package in Cargo.lock — is this a Day app tracking day by git?")
           PY
           )
+          if [[ -n "$DAY_REVISION_IN" && "$REV" != "$DAY_REVISION_IN" ]]; then
+            echo "::error::Resolved Day revision $REV differs from requested $DAY_REVISION_IN"
+            exit 1
+          fi
           echo "rev=$REV" >> "$GITHUB_OUTPUT"
           echo "tracking day at $REV" >> "$GITHUB_STEP_SUMMARY"
 
@@ -1668,7 +1688,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -2570,7 +2590,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -2905,7 +2925,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3117,7 +3137,7 @@ jobs:
         continue-on-error: true
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3441,7 +3461,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3562,7 +3582,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3669,7 +3689,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3990,7 +4010,7 @@ jobs:
         continue-on-error: true
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version }}
+          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
