@@ -775,12 +775,11 @@ crash produces a dump, the job uploads it as `<artifact-prefix>crash-dumps-windo
 or Visual Studio to inspect the native fault; a lost engine connection alone does not identify
 its cause. Startup hangs do not produce WER crash dumps.
 
-Windows script jobs also install a virtual sound card ([Scream](https://github.com/duncanthrax/scream),
-pinned by hash) before launching the app. A hosted Windows runner has no audio endpoint, so
-Media Foundation cannot create an audio renderer: an audio-only source fails with
-`MF_E_CANNOT_CREATE_SINK` (0xC00D36FA), while a video with a soundtrack plays silently. The step
-is best-effort; if it fails, the leg continues without audio and only a script that asserts on
-audio playback notices.
+A hosted Windows runner has no audio endpoint, so Media Foundation cannot create an audio
+renderer there: an audio-only source fails with `MF_E_CANNOT_CREATE_SINK` (0xC00D36FA), while a
+video with a soundtrack plays silently. The workflow installs no virtual sound card: Scream's
+driver signature expired in 2023 and its install hangs the job on the current image. Gate steps
+that assert on audio-only playback with `skip_on: [windows-winui]`.
 
 ### Requirements
 
