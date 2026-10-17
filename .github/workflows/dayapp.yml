@@ -192,7 +192,7 @@ on:
           on several. Every leg of a named target installs them through setup-day-deps, with the
           runner's package manager: apt on the Ubuntu runners (linux, android, harmony, web),
           Homebrew on the macOS ones (macos-*, ios-uikit), Chocolatey for windows-winui and windows-xaml, and
-          MSYS2's MINGW64 packages for windows-qt and windows-gtk.
+          MSYS2's MINGW64 packages for windows-qt and UCRT64 packages for windows-gtk.
 
               target-packages: |
                 linux-gtk, linux-qt: gstreamer1.0-plugins-good gstreamer1.0-libav

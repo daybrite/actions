@@ -827,6 +827,9 @@ Everything that is not "make this target buildable" stays with the caller: check
 installing the CLI (`setup-day-cli`), emulators, signing material, and the build/pack/script
 commands themselves.
 
+Windows GTK uses MSYS2's UCRT64 environment; extra `packages` for `windows-gtk` must use the
+`mingw-w64-ucrt-x86_64-` prefix. Windows Qt uses MINGW64 and `mingw-w64-x86_64-` packages.
+
 ### `setup-day-cli`
 
 Installs the `day` CLI and exports `DAY_BIN` — from crates.io, a git ref, or an artifact this run
