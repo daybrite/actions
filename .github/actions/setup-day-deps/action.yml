@@ -24,7 +24,7 @@ inputs:
   target:
     description: >-
       The platform-toolkit combo to prepare for: macos-appkit, macos-gtk, macos-qt, ios-uikit,
-      linux-gtk, linux-qt, android-mdc, harmony-arkui, windows-winui, windows-xaml, windows-qt, windows-gtk,
+      linux-gtk, linux-qt, android-mdc, harmony-arkui, windows-winui, windows-qt, windows-gtk,
       web-dom. An unknown value fails loudly rather than installing nothing and failing later
       inside cargo.
     required: true
@@ -61,7 +61,7 @@ inputs:
       Extra packages this target needs beyond Day's own set, space-separated — an app's own
       needs, such as a media player's codecs. Installed after the toolkit's, with the runner's
       package manager and its defaults: apt on Linux (recommended packages included), Homebrew
-      on macOS, Chocolatey for windows-winui and windows-xaml, and MSYS2 packages
+      on macOS, Chocolatey for windows-winui, and MSYS2 packages
       (MINGW64 for windows-qt, UCRT64 for windows-gtk), beside the toolkit's own.
     required: false
     default: ""
@@ -74,7 +74,7 @@ runs:
       run: |
         case "${{ inputs.target }}" in
           macos-appkit | macos-gtk | macos-qt | ios-uikit | linux-gtk | linux-qt \
-            | android-mdc | harmony-arkui | windows-winui | windows-xaml | windows-qt | windows-gtk | web-dom) ;;
+            | android-mdc | harmony-arkui | windows-winui | windows-qt | windows-gtk | web-dom) ;;
           *)
             echo "::error::setup-day-deps: unknown target '${{ inputs.target }}'"
             exit 1 ;;
@@ -389,11 +389,11 @@ runs:
           echo "APPIMAGE_EXTRACT_AND_RUN=1"
         } >> "$GITHUB_ENV"
     - name: NSIS (windows pack)
-      if: inputs.pack == 'true' && (inputs.target == 'windows-winui' || inputs.target == 'windows-xaml')
+      if: inputs.pack == 'true' && inputs.target == 'windows-winui'
       shell: pwsh
       run: |
         # The Windows runner images ship no NSIS. Chocolatey installs it, but its feed answers
-        # 503 now and then (one did on 2026-09-30 and failed a whole windows-xaml leg), so the
+        # 503 now and then (one did on 2026-09-30 and failed a whole Windows leg), so the
         # install is retried, and when the feed stays down the same release comes straight from
         # SourceForge instead: pinned, checksummed (the sum Chocolatey's own package carries),
         # and installed silently with `/S`. Either way the outcome is judged by finding

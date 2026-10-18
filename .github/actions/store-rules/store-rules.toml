@@ -334,7 +334,7 @@ targets = ["linux-gtk", "linux-qt"]
 
 [microsoft-store]
 label = "the Microsoft Store"
-targets = ["windows-winui", "windows-xaml"]
+targets = ["windows-winui"]
 
 [appgallery]
 label = "AppGallery"

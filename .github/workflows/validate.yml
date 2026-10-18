@@ -57,8 +57,6 @@ jobs:
                 demo-app-linux-qt-x86_64.flatpak demo-app-linux-qt-x86_64.appimage \
                 demo-app-windows-winui.msix demo-app-windows-winui-setup.exe \
                 demo-app-windows-winui-setup.exe.sbom-cdx.json \
-                demo-app-windows-xaml.msix demo-app-windows-xaml-setup.exe \
-                demo-app-windows-xaml-setup.exe.sbom-cdx.json \
                 demo-app-android-mdc.aab demo-app-ios-uikit.ipa screenshots-macos-appkit.tar.xz
       - name: Generate them
         uses: ./.github/actions/launch-script
@@ -85,8 +83,7 @@ jobs:
             diff <(printf '%s\n' "$expected") <(printf '%s\n' "$table") || true
             exit 1
           fi
-          # Windows takes the per-user installer, never the .msix (which needs a trusted cert), and
-          # the WinUI one over the deprecated windows-xaml one when a release carries both.
+          # Windows takes the per-user installer, never the .msix (which needs a trusted cert).
           asset="$(sed -n 's/^\$Asset = "\(.*\)"$/\1/p' launch.ps1)"
           if [ "$asset" != "demo-app-windows-winui-setup.exe" ]; then
             echo "::error::launch.ps1 selected '$asset'"
@@ -104,7 +101,7 @@ jobs:
   build-scaffold:
     uses: ./.github/workflows/dayapp.yml
     with:
-      targets: windows-winui, windows-xaml, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
+      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
       # Exercise the device-profile fan-out: android-mdc becomes two parallel jobs, the second
       # packing nothing and uploading `screenshots-android-mdc-tablet`. Android carries it rather
       # than iOS because the fan-out logic is shared and ubuntu minutes are the cheap ones — the
@@ -119,5 +116,5 @@ jobs:
       project-path: ci-app
       setup-command: >-
         day new app ci-app
-        --toolkit windows-winui,windows-xaml,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-mdc,harmony-arkui,web-dom
+        --toolkit windows-winui,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-mdc,harmony-arkui,web-dom
         --appid dev.daybrite.ciapp --git --no-input

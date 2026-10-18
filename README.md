@@ -154,7 +154,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 
 | input | type | default | meaning |
 |---|---|---|---|
-| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-winui`, `windows-xaml` (deprecated), `linux-gtk`, `linux-qt`, `ios-uikit`, `android-mdc`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
+| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-winui`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-mdc`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
 | `day-version` | string | `main` | Day CLI to install: a branch name of the day repository, built from git (`main` by default), a 40-hex commit, `latest` (newest crates.io release), or `v1.2.3`/`1.2.3` (that release). |
 | `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
 | `day-revision` | string | — | With `update-day-deps: true`, resolve Day dependencies to this full Git commit, for callers sharing one revision across library and demo jobs. Empty follows the app's tracked branch. When dependencies are updated and `day-version` is `main`, the CLI uses the resolved dependency revision too. |
@@ -164,7 +164,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `release-flavor` | string | — | Attach this flavor's packages to the release as well as the base app's. A submission queue that rebuilds an app from its tag compares what it built against the release the maintainer published, which it can only do when that release carries the same flavor's packages. |
 | `store-flavor` | string | — | Which build the store-upload jobs publish on a tag: the base app when empty, or this flavor (which must also be in `flavors`). The jobs then take `flavor-<name>-dist-<target>` and stage that flavor's `store-<name>/` listing, so the submission carries its app id, version and copy. |
 | `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. Setting it marks the project as generated, which skips the preflight checks, `update-day-deps` and the pristine check; for what one target needs, use `target-packages` or `target-setup`. |
-| `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, Chocolatey for `windows-winui` and `windows-xaml`, and MSYS2 packages for `windows-qt` and `windows-gtk`. A line naming something that is not a target fails the run. |
+| `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, Chocolatey for `windows-winui`, and MSYS2 packages for `windows-qt` and `windows-gtk`. A line naming something that is not a target fails the run. |
 | `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `update-day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
 | `script-setup` | string | — | Bash commands sourced once from the project directory after device boot and before scripts. `DAY_SCRIPT_TARGET` identifies the target; `ANDROID_SERIAL` selects Android. Start local fixtures, configure reverse ports, and register an EXIT trap for cleanup. Store logs under `$RUNNER_TEMP`. |
 | `scripts` | string | `auto` | Dayscripts to run on each target, comma- or space-separated paths relative to the project. `auto` runs every `dayscript/*.yaml` (or `scripts/*.yaml`); `none` runs nothing. |
@@ -233,7 +233,6 @@ newest installed rather than pinning a major that the next image drops.
 | `android-mdc` | ubuntu-latest | scripts on a KVM emulator; packs `.apk` + `.aab` |
 | `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort under `tolerate-failures`); packs `.hap` |
 | `windows-winui` | windows-latest | installs the Windows App Runtime and caches the Windows App SDK packages; packs a self-contained `.msix` + NSIS installer |
-| `windows-xaml` | windows-latest | **deprecated** (system XAML, superseded by `windows-winui`); packs `.msix` + NSIS installer |
 | `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`), all of them in one launch — web storage lasts only as long as the launch; ships the built dist as a zip |
 | `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds and scripts; packaging is skipped because Day has no packer for these combinations |
 
@@ -816,8 +815,8 @@ than spelled out again in every workflow.
 ```yaml
 - uses: daybrite/actions/.github/actions/setup-day-deps@v1
   with:
-    target: linux-gtk   # required; any of the 13 combos
-    pack: true          # flatpak-builder + linuxdeploy (linux), NSIS (windows-winui, windows-xaml)
+    target: linux-gtk   # required; any of the 12 combos
+    pack: true          # flatpak-builder + linuxdeploy (linux), NSIS (windows-winui)
     extras: false       # walkthrough extras: web view dev libs, xvfb, imagemagick, CJK fonts
     java: false         # pin JDK 21 + Gradle for android/harmony (else the runner's own JDK)
     rust: true          # rustup target add this target's std

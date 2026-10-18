@@ -16,7 +16,7 @@
 # --- release facts (regenerated at release time; the values below are the template's defaults) ---
 $Repo = "daybrite/example"
 $Tag = "v0.0.0"
-$Asset = "example-windows-xaml-setup.exe"
+$Asset = "example-windows-winui-setup.exe"
 # --- end release facts ---
 
 $ErrorActionPreference = "Stop"
