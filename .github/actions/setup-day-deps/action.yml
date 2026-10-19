@@ -112,7 +112,7 @@ runs:
       run: |
         case "${{ inputs.target }}" in
           macos-qt) brew install qt pkg-config ;;
-          macos-gtk) brew install gtk4 libadwaita pkg-config ;;
+          macos-gtk) brew install gtk4 libadwaita librsvg pkg-config ;;
         esac
 
     - name: Toolkit deps (apt)
@@ -129,8 +129,8 @@ runs:
         # GDBusConnection and segfaults on the second dialog.
         BASE="pkg-config dbus"
         case "${{ inputs.target }}" in
-          linux-qt) PKGS="qt6-base-dev" ;;
-          linux-gtk) PKGS="libgtk-4-dev libadwaita-1-dev" ;;
+          linux-qt) PKGS="qt6-base-dev qt6-svg-dev" ;;
+          linux-gtk) PKGS="libgtk-4-dev libadwaita-1-dev librsvg2-dev" ;;
         esac
         if [ "$EXTRAS" = true ]; then
           # The web view's dev libs are a BUILD dependency of any app carrying day-piece-webview:
@@ -294,7 +294,7 @@ runs:
         update: true
         path-type: inherit
         install: >-
-          ${{ inputs.target == 'windows-gtk' && 'mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita' || 'mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-qt6-base' }}
+          ${{ inputs.target == 'windows-gtk' && 'mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-librsvg' || 'mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-svg' }}
           ${{ inputs.packages }}
     - name: Pin the MSYS2 mingw toolchain
       if: inputs.target == 'windows-qt' || inputs.target == 'windows-gtk'
