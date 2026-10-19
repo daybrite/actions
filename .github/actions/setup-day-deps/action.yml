@@ -271,7 +271,7 @@ runs:
         C="$HOME/ohos-clt/command-line-tools"
         if [ ! -f "$C/hvigor/bin/hvigorw.js" ]; then
           mkdir -p ~/ohos-clt && cd ~/ohos-clt
-          curl -fSL -o clt.zip "$CLT_URL"
+          curl -fSL --retry 5 --retry-all-errors -o clt.zip "$CLT_URL"
           unzip -q -o clt.zip && rm -f clt.zip
         fi
         # hvigor/ohpm are pure JS — run them with the runner's node rather than the CLT's bundled
@@ -363,7 +363,7 @@ runs:
         sudo apt-get install -y --no-install-recommends fuse3 libfuse2t64 || \
           sudo apt-get install -y --no-install-recommends fuse libfuse2 || true
         sudo apt-get install -y --no-install-recommends dpkg-dev
-        curl -fsSL --retry 3 -o "$RUNNER_TEMP/linuxdeploy" \
+        curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/linuxdeploy" \
           https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
         # The two plugins are NOT distributed the same way: qt ships an AppImage on a rolling
         # `continuous` release; gtk has no releases at all and is a shell script in its repository
@@ -373,12 +373,12 @@ runs:
         case "$TOOLKIT" in
           qt)
             PLUGIN="$RUNNER_TEMP/linuxdeploy-plugin-qt"
-            curl -fsSL --retry 3 -o "$PLUGIN" \
+            curl -fsSL --retry 5 --retry-all-errors -o "$PLUGIN" \
               "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
             ;;
           gtk)
             PLUGIN="$RUNNER_TEMP/linuxdeploy-plugin-gtk.sh"
-            curl -fsSL --retry 3 -o "$PLUGIN" \
+            curl -fsSL --retry 5 --retry-all-errors -o "$PLUGIN" \
               "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh"
             ;;
         esac
@@ -419,7 +419,7 @@ runs:
           $sha256 = 'db9a1038bbc0e53fef24f423fd609979bd578e942f1be1198db186d1c42652a3'
           $setup = Join-Path $env:RUNNER_TEMP "nsis-$version-setup.exe"
           Write-Host "Chocolatey failed three times; installing NSIS $version from SourceForge"
-          curl.exe -fsSL --retry 3 -o $setup "https://downloads.sourceforge.net/project/nsis/NSIS%203/$version/nsis-$version-setup.exe"
+          curl.exe -fsSL --retry 5 --retry-all-errors -o $setup "https://downloads.sourceforge.net/project/nsis/NSIS%203/$version/nsis-$version-setup.exe"
           if ($LASTEXITCODE -ne 0) { throw "NSIS $version download failed (curl exit $LASTEXITCODE)" }
           $got = (Get-FileHash -Path $setup -Algorithm SHA256).Hash.ToLower()
           if ($got -ne $sha256) { throw "nsis-$version-setup.exe: SHA-256 $got, expected $sha256" }

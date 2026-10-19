@@ -119,7 +119,7 @@ def prepare(cache):
         return hap
     with tempfile.TemporaryDirectory(prefix="arkweb-download-") as directory:
         archive = Path(directory) / "system-image-phone-x86.zip"
-        subprocess.run(["curl", "--fail", "--location", "--retry", "3",
+        subprocess.run(["curl", "--fail", "--location", "--retry", "5", "--retry-all-errors",
                         "--connect-timeout", "30", "--max-time", "900",
                         "--output", str(archive), ARCHIVE_URL], check=True)
         pending = cache / "ArkWebCore.hap.partial"

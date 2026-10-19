@@ -2337,7 +2337,7 @@ jobs:
           SHA=08d35399119ec9b87d564cd8bf024e8a189921f5bacf09da889b7b223848a488
           if [ ! -f "$TGZ" ]; then
             mkdir -p "$(dirname "$TGZ")"
-            curl -fL -o "$TGZ" \
+            curl -fL --retry 5 --retry-all-errors -o "$TGZ" \
               "https://github.com/harmony-contrib/ohos-qemu/releases/download/v20260919/openharmony-qemu-x86_64-x86_64_virt-phone.tar.gz"
           fi
           echo "$SHA  $TGZ" | sha256sum -c -
@@ -3994,7 +3994,7 @@ jobs:
           SITE_TOML="$GITHUB_WORKSPACE/app/${PROJECT_PATH:-.}/website/site.toml"
           grep -Eq '^[[:space:]]*optimize-png[[:space:]]*=[[:space:]]*(true|[0-6])' "$SITE_TOML" || exit 0
           name="oxipng-$OXIPNG_VERSION-x86_64-unknown-linux-musl"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/oxipng.tar.gz" \
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/oxipng.tar.gz" \
             "https://github.com/oxipng/oxipng/releases/download/v$OXIPNG_VERSION/$name.tar.gz"
           echo "$OXIPNG_SHA256  $RUNNER_TEMP/oxipng.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/oxipng.tar.gz" -C "$RUNNER_TEMP"
