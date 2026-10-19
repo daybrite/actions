@@ -829,6 +829,9 @@ commands themselves.
 
 Windows GTK uses MSYS2's UCRT64 environment; extra `packages` for `windows-gtk` must use the
 `mingw-w64-ucrt-x86_64-` prefix. Windows Qt uses MINGW64 and `mingw-w64-x86_64-` packages.
+Qt SVG and librsvg development libraries are installed for Qt and GTK targets even with
+`extras: false`; their native vector renderers require them to compile. Setup checks these
+libraries through `pkg-config` before the caller starts building.
 
 Windows WinUI packaging restores the pinned NSIS installer from GitHub Actions cache, keyed
 by OS, architecture, version and SHA-256. Every restored installer is checksum-verified;

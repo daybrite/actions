@@ -129,6 +129,7 @@ runs:
         # GDBusConnection and segfaults on the second dialog.
         BASE="pkg-config dbus"
         case "${{ inputs.target }}" in
+          # SVG renderers are build dependencies, including when extras is false.
           linux-qt) PKGS="qt6-base-dev qt6-svg-dev" ;;
           linux-gtk) PKGS="libgtk-4-dev libadwaita-1-dev librsvg2-dev" ;;
         esac
@@ -309,6 +310,20 @@ runs:
         echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$GCC" >> "$GITHUB_ENV"
         echo "CC=$GCC" >> "$GITHUB_ENV"
         echo "CXX=$(cygpath -m "$MINGW_PREFIX/bin/g++.exe")" >> "$GITHUB_ENV"
+
+    # Match the native renderers' build probes before spending time compiling Rust crates.
+    # This also catches an incomplete installation or a pkg-config from the wrong MSYS2 prefix.
+    - name: Verify SVG development libraries
+      if: endsWith(inputs.target, '-qt') || endsWith(inputs.target, '-gtk')
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        case "$TARGET" in
+          *-qt) pkg-config --cflags --libs Qt6Widgets Qt6Svg ;;
+          *-gtk) pkg-config --print-errors --atleast-version=2.52 librsvg-2.0 ;;
+        esac
 
     # --- Windows WinUI 3: the Windows App SDK -------------------------------------------------------
     # windows-winui builds against the Windows App SDK's NuGet packages (the build fetches them
