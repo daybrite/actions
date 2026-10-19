@@ -830,6 +830,12 @@ commands themselves.
 Windows GTK uses MSYS2's UCRT64 environment; extra `packages` for `windows-gtk` must use the
 `mingw-w64-ucrt-x86_64-` prefix. Windows Qt uses MINGW64 and `mingw-w64-x86_64-` packages.
 
+Windows WinUI packaging restores the pinned NSIS installer from GitHub Actions cache, keyed
+by OS, architecture, version and SHA-256. Every restored installer is checksum-verified;
+missing or corrupt bytes are downloaded from SourceForge with retries. A valid cache hit
+needs no Chocolatey or SourceForge request. The installer is saved after setup, before builds
+and tests, so a later failure does not lose it. New runners still install NSIS locally.
+
 ### `setup-day-cli`
 
 Installs the `day` CLI and exports `DAY_BIN` — from crates.io, a git ref, or an artifact this run
