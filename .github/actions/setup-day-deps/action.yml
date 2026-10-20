@@ -333,7 +333,7 @@ runs:
     # CLI pins (RUNTIME_VERSION in day's crates/day-toolchain/src/winappsdk.rs); keep them in step.
     - name: Cache the Windows App SDK packages (windows-winui)
       if: inputs.target == 'windows-winui'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~\AppData\Local\day\winappsdk
         key: winappsdk-2.5.1-${{ runner.arch }}
@@ -419,7 +419,7 @@ runs:
     - name: Restore the NSIS installer
       if: inputs.pack == 'true' && inputs.target == 'windows-winui'
       id: nsis-cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: ${{ steps.nsis-installer.outputs.path }}
         key: ${{ steps.nsis-installer.outputs.key }}
@@ -474,7 +474,7 @@ runs:
     # No restore-keys: an older version or different checksum is never a compatible fallback.
     - name: Save the NSIS installer
       if: inputs.pack == 'true' && inputs.target == 'windows-winui' && steps.nsis-cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: ${{ steps.nsis-installer.outputs.path }}
         key: ${{ steps.nsis-cache.outputs.cache-primary-key }}
