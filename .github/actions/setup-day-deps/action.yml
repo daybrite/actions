@@ -130,7 +130,15 @@ runs:
         BASE="pkg-config dbus"
         case "${{ inputs.target }}" in
           # SVG renderers are build dependencies, including when extras is false.
-          linux-qt) PKGS="qt6-base-dev qt6-svg-dev" ;;
+          linux-qt)
+            PKGS="qt6-base-dev qt6-svg-dev"
+            # Qt 6.9+ packaging (Ubuntu 25.04 and later, so `ubuntu-latest` since 26.04) moved the
+            # SVG icon engine and image format plugins out of libqt6svg6 into qt6-svg-plugins.
+            # linuxdeploy-plugin-qt refuses to pack without the icon engine ("Cannot deploy
+            # non-existing library file .../iconengines/libqsvgicon.so"). Older releases have no
+            # such package and still carry the plugins in libqt6svg6.
+            if apt-cache show qt6-svg-plugins >/dev/null 2>&1; then PKGS="$PKGS qt6-svg-plugins"; fi
+            ;;
           linux-gtk) PKGS="libgtk-4-dev libadwaita-1-dev librsvg2-dev" ;;
         esac
         if [ "$EXTRAS" = true ]; then
@@ -395,6 +403,12 @@ runs:
             PLUGIN="$RUNNER_TEMP/linuxdeploy-plugin-gtk.sh"
             curl -fsSL --retry 5 --retry-all-errors -o "$PLUGIN" \
               "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh"
+            # The plugin copies `<libdir>/gtk-4.0` (the loadable-module directory) into the
+            # AppDir unconditionally, under `set -e`. GTK 4.20 built the print backends into the
+            # library, so a 4.20+ libgtk-4-1 (Ubuntu 26.04, GTK 4.22) ships no such directory and
+            # the copy fails the whole pack. An empty directory is what that GTK has to offer.
+            GTK4_MODULES="$(pkg-config --variable=libdir gtk4)/gtk-4.0"
+            [ -d "$GTK4_MODULES" ] || sudo mkdir -p "$GTK4_MODULES"
             ;;
         esac
         chmod +x "$RUNNER_TEMP/linuxdeploy" "$PLUGIN"
