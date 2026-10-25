@@ -6,8 +6,9 @@ Reusable GitHub workflows for [Day](https://daybrite.dev) projects.
 
 Builds a conventional Day project for a set of platform-toolkit targets, runs its dayscripts
 (capturing screenshots), and packages it for distribution with `day pack`. A `preflight` job runs
-first and gates the whole matrix: `cargo fmt --all -- --check` by default, with clippy, check, and
-test available through the `preflight-checks` input — so a formatting slip fails one small ubuntu
+first and gates the whole matrix: it rejects retired Day crate names and imports, then runs
+`cargo fmt --all -- --check` by default, with clippy, check, and test available through the
+`preflight-checks` input — so a formatting slip fails one small ubuntu
 job before any build runner starts. On a semantic-version tag (`vX.Y.Z`), a final job attaches
 every package, one `screenshots.tar.xz` bundle, one per-target `screenshots-<target>.tar.xz` with the `gallery.json`
 index beside it — plus a `SHA256SUMS` manifest — to the GitHub release for that tag, and

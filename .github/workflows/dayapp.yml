@@ -4,8 +4,8 @@
 # for a set of platform-toolkit targets. The recipes are a subset of daybrite/day's own ci.yml
 # showcase pipeline, reduced to: install the day CLI, build the project, run its dayscripts
 # (capturing screenshots), and `day pack` a distributable. Everything waits on a `preflight` job
-# that runs cheap Rust first-pass checks (inputs.preflight-checks — `cargo fmt --all -- --check`
-# by default, clippy/check/test opt-in) so a formatting slip fails one ubuntu job, not every
+# that checks for retired Day crate names and runs cheap Rust first-pass checks
+# (inputs.preflight-checks — `cargo fmt --all -- --check` by default, clippy/check/test opt-in) so a formatting slip fails one ubuntu job, not every
 # runner in the matrix. On a semantic-version tag (vX.Y.Z), a
 # final job attaches every package and a per-target screenshot zip to the GitHub release. Packages
 # are packed with `--no-version-in-name` (version-less filenames like app-fair.aab); each asset
@@ -916,6 +916,12 @@ jobs:
       # A full checkout, not the old website/site.toml sparse one: the first-pass checks read the
       # whole workspace and the store-upload detection greps the repo's Fastfiles.
       - uses: actions/checkout@v7
+
+      # Retired Day crate names and Rust imports, in the caller's own sources. It needs no
+      # toolchain, so it runs first, and it is what used to be each repository's separate
+      # crate-names workflow.
+      - name: Check Day crate names
+        uses: daybrite/actions/.github/actions/check-crate-names@v1
 
       # Rust first-pass checks (inputs.preflight-checks). The entire matrix waits on this job, so
       # a formatting slip or a clippy lint fails the run in one ubuntu job instead of N runners
