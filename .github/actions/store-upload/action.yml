@@ -11,7 +11,7 @@ description: >-
 
 inputs:
   target:
-    description: The Day target the package was packed for (ios-uikit, android-mdc, macos-appkit).
+    description: The Day target the package was packed for (ios-uikit, android-material, macos-appkit).
     required: true
   package:
     description: The signed package to upload, an absolute path.
@@ -80,6 +80,20 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Normalize deprecated target input
+      id: canonical-target
+      shell: bash
+      env:
+        RAW_TARGET: ${{ inputs.target }}
+      run: |
+        case "$RAW_TARGET" in
+          mdc | android-mdc)
+            echo "::warning::$RAW_TARGET is deprecated; use android-material"
+            RAW_TARGET=android-material ;;
+          material) RAW_TARGET=android-material ;;
+        esac
+        printf 'target=%s\n' "$RAW_TARGET" >> "$GITHUB_OUTPUT"
+
     - name: Check the caller set up the day CLI
       shell: bash
       run: |
@@ -97,13 +111,13 @@ runs:
       shell: bash
       env:
         PP: ${{ inputs.project-path }}
-        TARGET: ${{ inputs.target }}
+        TARGET: ${{ steps.canonical-target.outputs.target }}
         FLAVOR: ${{ inputs.flavor }}
       run: |
         set -euo pipefail
         case "$TARGET" in
           ios-uikit) os=ios ;;
-          android-mdc) os=android ;;
+          android-material) os=android ;;
           macos-appkit) os=macos ;;
           *) os="${TARGET%%-*}" ;;
         esac
@@ -134,7 +148,7 @@ runs:
       working-directory: ${{ inputs.project-path }}
       env:
         INDEX: ${{ inputs.screenshots }}
-        TARGET: ${{ inputs.target }}
+        TARGET: ${{ steps.canonical-target.outputs.target }}
         OWN: ${{ steps.where.outputs.own }}
         FLAVOR_ARGS: ${{ steps.where.outputs.flavor_args }}
         DAY_STORE_RULES: ${{ inputs.rules }}
@@ -158,14 +172,14 @@ runs:
       working-directory: ${{ inputs.project-path }}
       env:
         INDEX: ${{ inputs.screenshots }}
-        TARGET: ${{ inputs.target }}
+        TARGET: ${{ steps.canonical-target.outputs.target }}
         FLAVOR_ARGS: ${{ steps.where.outputs.flavor_args }}
         ALLOW: ${{ inputs.allow-placeholders }}
         DAY_STORE_RULES: ${{ inputs.rules }}
       run: |
         set -euo pipefail
         case "$TARGET" in
-          ios-uikit|android-mdc|macos-appkit) ;;
+          ios-uikit|android-material|macos-appkit) ;;
           *) echo "::error::day store stage writes no lanes for $TARGET; give the app a fastlane/Fastfile with the lane"; exit 1 ;;
         esac
         [ -z "${DAY_STORE_RULES:-}" ] || [ -f "$DAY_STORE_RULES" ] || { echo "::error::rules: $DAY_STORE_RULES is not a file — the store-rules action's path output, or a file in the checkout"; exit 1; }
@@ -189,7 +203,7 @@ runs:
         # the same opt-out in their .env.default, and an app's own Fastfile is covered here.
         FASTLANE_OPT_OUT_USAGE: "1"
         LANE: ${{ inputs.lane }}
-        TARGET: ${{ inputs.target }}
+        TARGET: ${{ steps.canonical-target.outputs.target }}
         PACKAGE: ${{ inputs.package }}
         DAY_ASC_KEY_ID: ${{ inputs.asc-key-id }}
         DAY_ASC_ISSUER: ${{ inputs.asc-issuer }}
@@ -204,7 +218,7 @@ runs:
         # convention) read.
         case "$TARGET" in
           ios-uikit) export DAY_IPA="$PACKAGE" ;;
-          android-mdc) export DAY_AAB="$PACKAGE" ;;
+          android-material) export DAY_AAB="$PACKAGE" ;;
           macos-appkit) export DAY_PKG="$PACKAGE" DAY_PKG_OR_APP="$PACKAGE" ;;
         esac
         # The credentials, decoded where only this job can read them.

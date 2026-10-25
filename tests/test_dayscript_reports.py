@@ -70,10 +70,10 @@ class DayscriptReportTests(unittest.TestCase):
         self.assertIn('| — | — | — | — |', text)
 
     def test_build_failure_before_script_preparation_stays_visible_beside_successes(self):
-        manifest = dict(schema_version=1, kind='job', context={'target':'android-mdc'}, status='failure', scripts=[])
+        manifest = dict(schema_version=1, kind='job', context={'target':'android-material'}, status='failure', scripts=[])
         text = self.render([fixture(), manifest], build_result='failure')
         self.assertIn('Jobs without script reports', text)
-        self.assertIn('android-mdc | No scripts recorded; job result: failure', text)
+        self.assertIn('android-material | No scripts recorded; job result: failure', text)
 
     def test_untrusted_text_and_malformed_files_cannot_break_summary(self):
         report = fixture(error='<script>bad</script>\n[click](https://example.com)|oops')
@@ -100,13 +100,13 @@ class DayscriptReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             env = dict(os.environ, REPORT_DIR=root, REPORT_JOB_STATUS='failure', REPORT_RUN_ATTEMPT='2',
                        REPORT_PLANNED_SCRIPTS='dayscript/one.yaml dayscript/two.yaml',
-                       DAY_SCRIPT_REPORT_CONTEXT=json.dumps({'target':'android-mdc', 'profile':'pixel-fixture', 'setup':'not report metadata'}))
+                       DAY_SCRIPT_REPORT_CONTEXT=json.dumps({'target':'android-material', 'profile':'pixel-fixture', 'setup':'not report metadata'}))
             subprocess.run(['bash', '-c', step['run']], env=env, check=True, capture_output=True)
             report = json.loads((Path(root)/'job.json').read_text())
             self.assertEqual(report['status'], 'failure')
             self.assertEqual(report['run_attempt'], '2')
             self.assertEqual(report['scripts'], ['dayscript/one.yaml', 'dayscript/two.yaml'])
-            self.assertEqual(report['context'], {'target':'android-mdc', 'profile':'pixel-fixture'})
+            self.assertEqual(report['context'], {'target':'android-material', 'profile':'pixel-fixture'})
 
     def test_summary_is_default_on_and_upload_is_independent_of_success_and_switch(self):
         inputs = WORKFLOW[True]['workflow_call']['inputs']

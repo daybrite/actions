@@ -1,0 +1,12 @@
+# Copyright © The Daybrite Project
+# SPDX-License-Identifier: MPL-2.0
+
+name: Check Day crate names
+description: Reject retired Day package names and Rust imports in maintained sources.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        AUDIT_SCRIPT: ${{ github.action_path }}/check-crate-names.py
+      run: python3 "$AUDIT_SCRIPT" --root "$GITHUB_WORKSPACE"

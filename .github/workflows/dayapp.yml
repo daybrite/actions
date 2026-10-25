@@ -26,7 +26,7 @@
 #       uses: daybrite/actions/.github/workflows/dayapp.yml@v1
 #       secrets: inherit          # forwards optional DAY_* signing secrets
 #       with:
-#         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, web-dom
+#         targets: macos-appkit, linux-gtk, linux-qt, ios-uikit, android-material, web-dom
 #         deploy-web: true        # publish the web-dom build to the repo's GitHub Pages
 #
 # Signing: pack degrades to the dev tier (ad-hoc / unsigned device .ipa / dev keystore /
@@ -74,7 +74,7 @@ on:
         description: >-
           Platform-toolkit pairs to build, comma- or space-separated. Supported:
           macos-appkit, macos-gtk, macos-qt, ios-uikit, linux-gtk, linux-qt,
-          android-mdc, harmony-arkui, windows-winui, windows-qt,
+          android-material, harmony-arkui, windows-winui, windows-qt,
           windows-gtk, web-dom.
           "all" builds every target the project's Day.toml declares (`[app] targets`), so a
           `day project add-target` reaches CI without a second edit.
@@ -249,7 +249,7 @@ on:
 
               target-scripts: |
                 macos-appkit, windows-winui: dayscript/walkthrough.yaml dayscript/windows.yaml
-                android-mdc: dayscript/walkthrough.yaml dayscript/clipboard-roundtrip.yaml
+                android-material: dayscript/walkthrough.yaml dayscript/clipboard-roundtrip.yaml
                 web-dom: dayscript/walkthrough.yaml dayscript/speech.yaml
 
           What this is for: a script can be meaningful on one target and meaningless on another,
@@ -273,7 +273,7 @@ on:
           Simulator, which has none.
 
               grant-permissions: |
-                android-mdc: camera microphone
+                android-material: camera microphone
                 ios-uikit: microphone
 
           Per target by design: the same script may need the permission on one leg and assert
@@ -342,10 +342,10 @@ on:
         default: ""
       android-abis:
         description: >-
-          Android ABIs to build into the android-mdc package (APK/AAB), comma- or
+          Android ABIs to build into the android-material package (APK/AAB), comma- or
           space-separated. Each ABI adds its own lib/<abi>/ slice, and its rustup target is
           installed automatically. Supported: arm64-v8a, armeabi-v7a, x86, x86_64. Applies only to
-          the android-mdc target; ignored by every other target.
+          the android-material target; ignored by every other target.
         type: string
         default: arm64-v8a x86_64
       day-source:
@@ -475,7 +475,7 @@ on:
         default: ""
       android-profiles:
         description: >-
-          The same for `android-mdc`, as AVD device profiles from `avdmanager list device`
+          The same for `android-material`, as AVD device profiles from `avdmanager list device`
           (`medium_phone`, `medium_tablet`) — passed to the emulator action verbatim, so these are
           exact ids rather than prefixes. `=<slug>` and the first-is-primary rule work as they do
           for ios-profiles. Unset = the default pair, a phone and a tablet (see
@@ -485,7 +485,7 @@ on:
         default: ""
       android-devices:
         description: >-
-          Device profiles for `android-mdc`, one per LINE, in the same shape as `ios-devices`:
+          Device profiles for `android-material`, one per LINE, in the same shape as `ios-devices`:
           `device=…, os=…, orientation=…, density=…, slug=…, optional=…`. Each line becomes its own
           parallel job with its own screenshot artifact and gallery column.
 
@@ -1097,7 +1097,7 @@ jobs:
           MACOS_RUNNER=xcode-27
           echo "macos_runner=$MACOS_RUNNER" >> "$GITHUB_OUTPUT"
           # Map the requested Android ABIs (inputs.android-abis) to their rustup targets, so the
-          # android-mdc leg installs exactly what `day pack` cross-compiles into the package.
+          # android-material leg installs exactly what `day pack` cross-compiles into the package.
           # x86_64-linux-android is always kept on top for the x86_64 emulator screenshot leg,
           # regardless of which ABIs ship in the package.
           ABIS="${ANDROID_ABIS_IN:-arm64-v8a x86_64}"
@@ -1128,6 +1128,45 @@ jobs:
             ) || exit 1
             echo "::notice::targets: all → ${TARGETS_IN} (from ${PROJECT_PATH:-.}/Day.toml)"
           fi
+          # Normalize deprecated names once, before matrix/override/artifact selection.
+          normalized_inputs=$(TARGETS_IN="$TARGETS_IN" python3 - <<'PYEOF'
+          import json, os, re, sys
+          aliases = {"mdc": "android-material", "android-mdc": "android-material", "material": "android-material"}
+          warned = False
+          def canonical(name):
+              global warned
+              if name in ("mdc", "android-mdc") and not warned:
+                  print("::warning::mdc and android-mdc are deprecated; use material and android-material", file=sys.stderr)
+                  warned = True
+              return aliases.get(name, name)
+          result = {"TARGETS_IN": ", ".join(dict.fromkeys(canonical(t) for t in re.split(r"[,\s]+", os.environ["TARGETS_IN"].strip()) if t))}
+          for key in ("TARGET_PACKAGES_IN", "TARGET_SETUP_IN", "TARGET_SCRIPTS_IN", "GRANTS_IN"):
+              lines, spellings = [], {}
+              for line in os.environ.get(key, "").splitlines():
+                  if not line.strip() or line.lstrip().startswith("#"):
+                      lines.append(line)
+                      continue
+                  names, sep, value = line.partition(":")
+                  if not sep:
+                      sys.exit(f"::error::{key}: expected '<targets>: …'")
+                  normalized = []
+                  for name in re.split(r"[,\s]+", names.strip()):
+                      target = canonical(name)
+                      previous = spellings.setdefault(target, name)
+                      if previous != name:
+                          sys.exit(f"::error::{key}: {previous} and {name} name the same target; use only {target}")
+                      if target not in normalized:
+                          normalized.append(target)
+                  lines.append(", ".join(normalized) + ":" + value)
+              result[key] = "\n".join(lines)
+          print(json.dumps(result))
+          PYEOF
+          ) || exit 1
+          TARGETS_IN=$(jq -r '.TARGETS_IN' <<< "$normalized_inputs")
+          TARGET_PACKAGES_IN=$(jq -r '.TARGET_PACKAGES_IN' <<< "$normalized_inputs")
+          TARGET_SETUP_IN=$(jq -r '.TARGET_SETUP_IN' <<< "$normalized_inputs")
+          TARGET_SCRIPTS_IN=$(jq -r '.TARGET_SCRIPTS_IN' <<< "$normalized_inputs")
+          GRANTS_IN=$(jq -r '.GRANTS_IN' <<< "$normalized_inputs")
           echo "targets=${TARGETS_IN}" | tee -a "$GITHUB_OUTPUT"
           rows=()
           for t in ${TARGETS_IN//,/ }; do
@@ -1141,14 +1180,14 @@ jobs:
               ios-uikit)      row='{"target":"ios-uikit","os":"'"$MACOS_RUNNER"'","toolkit":"uikit","rust_targets":"aarch64-apple-ios-sim,aarch64-apple-ios","tier":"primary"}' ;;
               linux-gtk)      row='{"target":"linux-gtk","os":"ubuntu-latest","toolkit":"gtk","rust_targets":"","tier":"primary"}' ;;
               linux-qt)       row='{"target":"linux-qt","os":"ubuntu-latest","toolkit":"qt","rust_targets":"","tier":"primary"}' ;;
-              android-mdc) row="{\"target\":\"android-mdc\",\"os\":\"ubuntu-latest\",\"toolkit\":\"android\",\"rust_targets\":\"$android_rust\",\"tier\":\"primary\"}" ;;
+              android-material) row="{\"target\":\"android-material\",\"os\":\"ubuntu-latest\",\"toolkit\":\"material\",\"rust_targets\":\"$android_rust\",\"tier\":\"primary\"}" ;;
               harmony-arkui)     row='{"target":"harmony-arkui","os":"ubuntu-latest","toolkit":"harmonyos","rust_targets":"aarch64-unknown-linux-ohos,x86_64-unknown-linux-ohos","tier":"primary"}' ;;
               windows-winui)  row='{"target":"windows-winui","os":"windows-latest","toolkit":"winui","rust_targets":"","tier":"primary"}' ;;
               web-dom)        row='{"target":"web-dom","os":"ubuntu-latest","toolkit":"dom","rust_targets":"wasm32-unknown-unknown","tier":"primary"}' ;;
               windows-qt)     row='{"target":"windows-qt","os":"windows-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
               windows-gtk)    row='{"target":"windows-gtk","os":"windows-latest","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
               *)
-                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-mdc harmony-arkui windows-winui windows-qt windows-gtk web-dom"
+                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-material harmony-arkui windows-winui windows-qt windows-gtk web-dom"
                 exit 1 ;;
             esac
             rows+=("$row")
@@ -1187,7 +1226,7 @@ jobs:
           # store stage` scales it up to clear it, as the store rules allow for Play's tablet
           # kinds. Said here so a run that turns the input on knows what it will send.
           if [ "${STORE_SCREENSHOTS_IN:-false}" = true ] && [ -z "$(echo "$ANDROID_D$ANDROID_P" | tr -d '[:space:]')" ] \
-             && printf '%s' "${TARGETS_IN:-}" | tr ', ' '\n\n' | grep -qx android-mdc; then
+             && printf '%s' "${TARGETS_IN:-}" | tr ', ' '\n\n' | grep -qx android-material; then
             echo "::notice::store-screenshots is on with the default Android profiles: the tablet capture (1280x800) is scaled up x2 for Google Play's tablet slots; name android-devices for a profile captured at a store size"
           fi
           # Per-target additions (inputs.target-packages / target-setup), one `<targets>: <value>`
@@ -1195,7 +1234,7 @@ jobs:
           # read and a name that is not a target, so a typo fails here instead of quietly
           # installing nothing. A real target this call does not build is only noted, which lets
           # one list serve calls with different target sets.
-          SUPPORTED="macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-mdc harmony-arkui windows-winui windows-qt windows-gtk web-dom"
+          SUPPORTED="macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-material harmony-arkui windows-winui windows-qt windows-gtk web-dom"
           check_per_target() {
             local input="$1" line names name
             while IFS= read -r line; do
@@ -1221,6 +1260,7 @@ jobs:
           }
           check_per_target target-packages "${TARGET_PACKAGES_IN:-}"
           check_per_target target-setup "${TARGET_SETUP_IN:-}"
+          check_per_target target-scripts "${TARGET_SCRIPTS_IN:-}"
           check_per_target grant-permissions "${GRANTS_IN:-}"
           matrix=$(printf '%s' "$matrix" | jq -c \
             --arg ios "$IOS_P" --arg android "$ANDROID_P" --arg iosdev "$IOS_D" \
@@ -1296,7 +1336,7 @@ jobs:
                   slug: "iphone", optional: false},
                  {device: "iPad Pro 13-inch", os: "", orientation: "landscape", density: "",
                   slug: "ipad", optional: false}]
-              elif $t == "android-mdc" then
+              elif $t == "android-material" then
                 # These slugs stay literal (`phone`, not `phone-36`): they are the artifact names
                 # and gallery columns every app that names no devices already publishes under.
                 [{device: "medium_phone",  os: "36", orientation: "portrait",  density: "",
@@ -1316,7 +1356,7 @@ jobs:
                 | (if $r.target == "ios-uikit" then
                      (if ($iosdev | ascii_downcase | test("[a-z]")) then devices($iosdev)
                       else profiles($ios) end)
-                   elif $r.target == "android-mdc" then
+                   elif $r.target == "android-material" then
                      # API level down to digits: a caller may write 36, API 36 or android-36, and
                      # the level reaches a CACHE PATH as well as the CLI. The CLI reads all three,
                      # but `system-images/android-API 36` caches nothing.
@@ -1396,6 +1436,12 @@ jobs:
           for name in os.environ.get("FLAVORS", "").replace(",", " ").split():
               data = tomllib.loads((root / f"Day-{name}.toml").read_text())
               targets = data.get("app", {}).get("targets")
+              aliases = {"android-mdc": "android-material", "mdc": "android-material", "material": "android-material"}
+              if isinstance(targets, list):
+                  if any(target in ("mdc", "android-mdc") for target in targets):
+                      import sys
+                      print("::warning::deprecated Android toolkit spelling in flavor configuration; use android-material", file=sys.stderr)
+                  targets = list(dict.fromkeys(aliases.get(target, target) for target in targets))
               out[name] = targets if isinstance(targets, list) else None
           print(json.dumps(out))
           PYEOF
@@ -1467,7 +1513,7 @@ jobs:
               { include: [ .include[]
                            | select(.primary and .flavor == ""
                                     and ((.target == "ios-uikit" and $ios)
-                                         or (.target == "android-mdc" and $android)
+                                         or (.target == "android-material" and $android)
                                          or (.target == "harmony-arkui" and $ohos)))
                            | { target: .target, os: (if .target == "ios-uikit" then $mac else "ubuntu-latest" end) } ] }')
           fi
@@ -1808,7 +1854,7 @@ jobs:
             # DAY_ANDROID_ABI is authoritative for `day pack`: it packs a lib/<abi>/ slice for every
             # listed ABI (inputs.android-abis, default both arm64-v8a and x86_64), whatever devices
             # are attached. The preflight job's matrix installed the matching rustup targets.
-            android-mdc) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
+            android-material) export DAY_ANDROID_ABI="${DAY_ANDROID_ABI:-${ANDROID_ABIS_IN:-arm64-v8a x86_64}}" ;;
             harmony-arkui) export DAY_OHOS_ARCH="${DAY_OHOS_ARCH:-arm64}" ;;
           esac
           # --no-version-in-name → version-less artifact names (app-fair.aab, not app-fair-1.0.0.aab),
@@ -2180,13 +2226,13 @@ jobs:
           "DAY_WINDOWS_CRASH_DUMPS=$dumpDir" >> $env:GITHUB_ENV
 
       - name: Run dayscripts (${{ matrix.target }})
-        if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-mdc' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
+        if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-material' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
         continue-on-error: ${{ inputs.tolerate-failures && matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       - name: Enable KVM group perms (android / harmony emulator)
         # Make /dev/kvm world-accessible so the emulators can open it (`day devices boot -t harmony-arkui` auto-selects `-accel kvm` when /dev/kvm exists).
-        if: steps.scripts.outputs.found == 'true' && (matrix.target == 'android-mdc' || matrix.target == 'harmony-arkui')
+        if: steps.scripts.outputs.found == 'true' && (matrix.target == 'android-material' || matrix.target == 'harmony-arkui')
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -2203,17 +2249,17 @@ jobs:
       # several hundred megabytes and cached nothing. Publishing it through $GITHUB_ENV is what
       # puts it in that context for the steps that follow.
       - name: Expose ANDROID_HOME to later expressions
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-material'
         run: echo "ANDROID_HOME=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}" >> "$GITHUB_ENV"
       - name: Cache the Android system image
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-material'
         uses: actions/cache@v6
         with:
           path: ${{ env.ANDROID_HOME }}/system-images/android-${{ matrix.device_os || '36' }}
           key: android-sysimg-${{ matrix.device_os || '36' }}-x86_64-google_apis
       - name: Set up and boot the emulator (day devices)
         id: androidemu
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-material'
         env:
           PROFILE: ${{ matrix.profile }}
           DEVICE_OS: ${{ matrix.device_os }}
@@ -2231,7 +2277,7 @@ jobs:
           # breaks the run — which is exactly what happened when sdkmanager's download bars landed
           # there and the whole blob was passed to `--device`. Naming it needs no such trust.
           AVD="day-ci-$(printf %s "$PROFILE" | tr -cs '[:alnum:]' '-')"
-          $DAY_BIN devices setup --target android-mdc --name "$AVD" \
+          $DAY_BIN devices setup --target android-material --name "$AVD" \
             --device "$PROFILE" --os "${DEVICE_OS:-36}" --arch x86_64 \
             ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"} \
             ${DEVICE_DENSITY:+--density "$DEVICE_DENSITY"}
@@ -2255,7 +2301,7 @@ jobs:
             [ -n "$d" ] && [ -d "$d" ] && { echo "  $d:"; ls -1 "$d" | sed 's/^/    /'; }
           done
           echo "--- day's own view ---"
-          $DAY_BIN devices list --target android-mdc 2>&1 | head -20 || true
+          $DAY_BIN devices list --target android-material 2>&1 | head -20 || true
           echo "::endgroup::"
           # `--wait` blocks on sys.boot_completed rather than on adbd answering, and the serial
           # comes back on stdout so the walkthrough drives exactly the device this booted.
@@ -2264,7 +2310,7 @@ jobs:
           # heartbeat every 15s, and the emulator's own log tail if it exits or times out. Set the
           # caller's `day-verbose: true` (DAY_VERBOSE reaches here from the job env) for a line per
           # poll instead — worth doing when a boot hangs rather than fails.
-          SERIAL="$($DAY_BIN devices boot --target android-mdc --device "$AVD" --wait --headless \
+          SERIAL="$($DAY_BIN devices boot --target android-material --device "$AVD" --wait --headless \
             ${DEVICE_ORIENTATION:+--orientation "$DEVICE_ORIENTATION"})"
           # Set and verify this even when the caller pins an older Day CLI. Error
           # dialogs must not cover gallery captures; crashes still appear in logcat.
@@ -2275,10 +2321,10 @@ jobs:
           "$ADB" -s "$SERIAL" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS
           echo "serial=$SERIAL" >> "$GITHUB_OUTPUT"
       - name: Run dayscripts (android emulator · ${{ matrix.profile }})
-        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-mdc'
+        if: steps.scripts.outputs.found == 'true' && matrix.target == 'android-material'
         # NOT best-effort. This was `continue-on-error: true` for a known intermittent
         # app-start flake, and the cost was that every REAL walkthrough failure on Android went
-        # unreported too: Day-Tradr's phone-route breakage failed android-mdc and ios-uikit
+        # unreported too: Day-Tradr's phone-route breakage failed android-material and ios-uikit
         # identically for weeks, and only ios-uikit ever turned the build red — which made a
         # deterministic bug look like an iOS-only flake. A green tick has to mean the
         # walkthrough passed. The app-start flake is handled where it belongs, by the CLI's own
@@ -2395,7 +2441,7 @@ jobs:
             echo "DAY_WEB_DRIVER=node $DRIVER"
             echo "DAY_WEB_DRIVER_PLAYWRIGHT=$RUNNER_TEMP/webdriver"
             # Chromium, not WebKit: Playwright's Linux WebKit (the WPE port) ships no OPFS,
-            # which day-part-fs needs (docs/fs.md).
+            # which day-part-filesystem needs (docs/fs.md).
             echo "DAY_WEB_DRIVER_BROWSER=chromium"
           } >> "$GITHUB_ENV"
           echo "ready=true" >> "$GITHUB_OUTPUT"
@@ -2511,8 +2557,8 @@ jobs:
       # in "the device stopped answering" leaves no crash to find — the guest froze, and every adb
       # call after that returns nothing — so what the emulator wrote is the one record of why.
       # The CLI prints its tail into the job log; the whole file goes here.
-      - name: Upload the emulator log (android-mdc)
-        if: failure() && matrix.target == 'android-mdc'
+      - name: Upload the emulator log (android-material)
+        if: failure() && matrix.target == 'android-material'
         uses: actions/upload-artifact@v7
         with:
           name: emulator-log-${{ matrix.target }}-${{ matrix.profile }}${{ matrix.flavor != '' && format('-{0}', matrix.flavor) || '' }}
@@ -2885,13 +2931,13 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           HAS_APPLE: ${{ matrix.target == 'ios-uikit' && secrets.DAY_APPLE_CERT_P12 != '' && secrets.DAY_APPLE_CERT_PASSWORD != '' && secrets.DAY_IOS_PROFILE_B64 != '' }}
-          HAS_ANDROID: ${{ matrix.target == 'android-mdc' && secrets.DAY_ANDROID_KEYSTORE_B64 != '' && secrets.DAY_ANDROID_KEY_ALIAS != '' && secrets.DAY_KS_PASS != '' && secrets.DAY_KEY_PASS != '' }}
+          HAS_ANDROID: ${{ matrix.target == 'android-material' && secrets.DAY_ANDROID_KEYSTORE_B64 != '' && secrets.DAY_ANDROID_KEY_ALIAS != '' && secrets.DAY_KS_PASS != '' && secrets.DAY_KEY_PASS != '' }}
           HAS_OHOS: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_KEYSTORE_B64 != '' && secrets.DAY_OHOS_CERT_B64 != '' && secrets.DAY_OHOS_PROFILE_B64 != '' && secrets.DAY_OHOS_KEY_ALIAS != '' && secrets.DAY_OHOS_KS_PASS != '' && secrets.DAY_OHOS_KEY_PASS != '' }}
         run: |
           set -euo pipefail
           case "$TARGET" in
             ios-uikit)     complete=$HAS_APPLE;   need="DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64" ;;
-            android-mdc)   complete=$HAS_ANDROID; need="DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS" ;;
+            android-material)   complete=$HAS_ANDROID; need="DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS" ;;
             harmony-arkui) complete=$HAS_OHOS;    need="DAY_OHOS_KEYSTORE_B64, DAY_OHOS_CERT_B64, DAY_OHOS_PROFILE_B64, DAY_OHOS_KEY_ALIAS, DAY_OHOS_KS_PASS and DAY_OHOS_KEY_PASS" ;;
             *) echo "::error::sign: no signer for $TARGET"; exit 1 ;;
           esac
@@ -2912,12 +2958,12 @@ jobs:
         run: |
           set -euo pipefail
           case "$TARGET" in
-            ios-uikit) ext=ipa ;; android-mdc) ext=aab ;; harmony-arkui) ext=hap ;;
+            ios-uikit) ext=ipa ;; android-material) ext=aab ;; harmony-arkui) ext=hap ;;
           esac
           PKG="$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name "*-unsigned.$ext" | head -1)"
           [ -n "$PKG" ] || { echo "::error::no *-unsigned.$ext in dist-$TARGET; the build leg packs every store package unsigned for this job to sign"; exit 1; }
           echo "PKG=$PKG" >> "$GITHUB_ENV"
-          if [ "$TARGET" = android-mdc ]; then
+          if [ "$TARGET" = android-material ]; then
             echo "ALSO=$(find "$RUNNER_TEMP/dist" -maxdepth 1 -name '*-unsigned.apk' | head -1)" >> "$GITHUB_ENV"
           fi
       - name: Set up the day CLI
@@ -2951,10 +2997,10 @@ jobs:
           apple-cert-p12: ${{ matrix.target == 'ios-uikit' && secrets.DAY_APPLE_CERT_P12 || '' }}
           apple-cert-password: ${{ matrix.target == 'ios-uikit' && secrets.DAY_APPLE_CERT_PASSWORD || '' }}
           apple-profile-b64: ${{ matrix.target == 'ios-uikit' && secrets.DAY_IOS_PROFILE_B64 || '' }}
-          keystore-b64: ${{ matrix.target == 'android-mdc' && secrets.DAY_ANDROID_KEYSTORE_B64 || '' }}
-          key-alias: ${{ matrix.target == 'android-mdc' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
-          keystore-password: ${{ matrix.target == 'android-mdc' && secrets.DAY_KS_PASS || '' }}
-          key-password: ${{ matrix.target == 'android-mdc' && secrets.DAY_KEY_PASS || '' }}
+          keystore-b64: ${{ matrix.target == 'android-material' && secrets.DAY_ANDROID_KEYSTORE_B64 || '' }}
+          key-alias: ${{ matrix.target == 'android-material' && secrets.DAY_ANDROID_KEY_ALIAS || '' }}
+          keystore-password: ${{ matrix.target == 'android-material' && secrets.DAY_KS_PASS || '' }}
+          key-password: ${{ matrix.target == 'android-material' && secrets.DAY_KEY_PASS || '' }}
           ohos-keystore-b64: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_KEYSTORE_B64 || '' }}
           ohos-cert-b64: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_CERT_B64 || '' }}
           ohos-profile-b64: ${{ matrix.target == 'harmony-arkui' && secrets.DAY_OHOS_PROFILE_B64 || '' }}
@@ -3056,7 +3102,7 @@ jobs:
           mkdir -p assets
           # actions/download-artifact extracts a SINGLE pattern match FLAT into `path` — only
           # multiple matches get `<path>/<artifact-name>/` subdirectories. A one-target app (e.g.
-          # an android-mdc-only release) therefore lands its files directly in dist-in/ and
+          # an android-material-only release) therefore lands its files directly in dist-in/ and
           # shots-in/, and the per-target loops below would find nothing. Normalize the flat shape
           # into the per-artifact layout first; in flat mode the one matched artifact belongs to
           # the workflow's (single) target, so name the synthesized dir after it.
@@ -3196,7 +3242,7 @@ jobs:
                               | select(((.value.screenshots // {}) | length) > 0
                                        or ([(.value.stores // {})[] | (.screenshots // {}) | length] | add // 0) > 0)
                               | .key' assets/storefront.json); do
-            case "$t" in ios-uikit|android-mdc) ;; *) continue ;; esac
+            case "$t" in ios-uikit|android-material) ;; *) continue ;; esac
             "$DAY_BIN" --project "app/${PROJECT_PATH:-.}" store screenshots assets/gallery.json --target "$t" || failed=1
           done
           if [ "$failed" != 0 ]; then
@@ -3411,10 +3457,10 @@ jobs:
             fi
           }
           case " $SIGN_TARGETS " in *" ios-uikit "*) ios_signed=true ;; *) ios_signed=false ;; esac
-          case " $SIGN_TARGETS " in *" android-mdc "*) android_signed=true ;; *) android_signed=false ;; esac
+          case " $SIGN_TARGETS " in *" android-material "*) android_signed=true ;; *) android_signed=false ;; esac
           macos_signed="$HAS_MAS"
           signer upload_ios "$ios_signed" "set DAY_APPLE_CERT_P12, DAY_APPLE_CERT_PASSWORD and DAY_IOS_PROFILE_B64 for the sign (ios-uikit) row"
-          signer upload_play "$android_signed" "set DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS for the sign (android-mdc) row"
+          signer upload_play "$android_signed" "set DAY_ANDROID_KEYSTORE_B64, DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS for the sign (android-material) row"
           signer upload_macos "$macos_signed" "set DAY_MAS_CERT_P12 (the Apple Distribution and Mac Installer Distribution identities in one .p12) and DAY_MAS_CERT_PASSWORD; the upload job signs the Mac App Store .pkg from them"
 
   # the sign job republishes the signed .ipa under the same dist-ios-uikit name, so having it in
@@ -3664,16 +3710,16 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-android-mdc', inputs.store-flavor) || 'dist-android-mdc' }}
+          name: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-dist-android-material', inputs.store-flavor) || 'dist-android-material' }}
           path: dist
       - name: Find the .aab
         id: package
         run: |
           set -euo pipefail
           AAB="$(find dist -type f -name '*.aab' | head -1)"
-          [ -n "$AAB" ] || { echo "::error::no .aab in the downloaded dist artifact — is android-mdc in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
+          [ -n "$AAB" ] || { echo "::error::no .aab in the downloaded dist artifact — is android-material in inputs.targets (and in the flavor, when store-flavor is set)?"; exit 1; }
           case "$AAB" in
-            *-unsigned.aab) echo "::error::the .aab is unsigned: no sign row ran for android-mdc because DAY_ANDROID_KEYSTORE_B64 is not set. Set it with DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS, then re-run the tag"; exit 1 ;;
+            *-unsigned.aab) echo "::error::the .aab is unsigned: no sign row ran for android-material because DAY_ANDROID_KEYSTORE_B64 is not set. Set it with DAY_ANDROID_KEY_ALIAS, DAY_KS_PASS and DAY_KEY_PASS, then re-run the tag"; exit 1 ;;
           esac
           # And never the CLI's dev keystore, which Play refuses; the signer's certificate says
           # which key it was.
@@ -3692,15 +3738,15 @@ jobs:
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
       # With inputs.store-screenshots, the listing's screenshots are the captures this run's
-      # listing declares (store/storefront.toml [storefront]), from the screenshots-android-mdc
+      # listing declares (store/storefront.toml [storefront]), from the screenshots-android-material
       # artifacts the build legs uploaded (`<target>/<device>/<variant>/<shot>.png` plus the
       # target's own gallery.json). `day screenshot index` merges them into the index the
       # store-upload action holds to the store's rules and stages the listing with. No site is
       # involved: the artifact is the tagged version's own captures.
-      # One artifact per device profile: the first profile's is `screenshots-android-mdc`, the
-      # others' `screenshots-android-mdc-<slug>`, each holding `android-mdc/<slug>/<variant>/…` and
+      # One artifact per device profile: the first profile's is `screenshots-android-material`, the
+      # others' `screenshots-android-material-<slug>`, each holding `android-material/<slug>/<variant>/…` and
       # its own index. They are NOT merged by the download: `merge-multiple` extracts artifacts
-      # concurrently, and two indexes at one path (`android-mdc/gallery.json`, from a CLI
+      # concurrently, and two indexes at one path (`android-material/gallery.json`, from a CLI
       # that wrote one per target) collided into a garbled file, after which every capture lost
       # its metadata and the listing came out unmarked (Day-Showcase, 2026-09-24). Each artifact
       # lands in its own directory, the index reads them as separate roots, and only the
@@ -3709,13 +3755,13 @@ jobs:
         if: ${{ inputs.store-screenshots }}
         uses: actions/download-artifact@v8
         with:
-          pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-android-mdc*', inputs.store-flavor) || 'screenshots-android-mdc*' }}
+          pattern: ${{ inputs.artifact-prefix }}${{ inputs.store-flavor != '' && format('flavor-{0}-screenshots-android-material*', inputs.store-flavor) || 'screenshots-android-material*' }}
           path: shots-in
       - name: Index this run's screenshots
         id: shots
         if: ${{ inputs.store-screenshots }}
         env:
-          TARGET: android-mdc
+          TARGET: android-material
           PROJECT_PATH: ${{ inputs.project-path }}
         run: |
           set -euo pipefail
@@ -3748,7 +3794,7 @@ jobs:
       - name: Upload to Google Play
         uses: daybrite/actions/.github/actions/store-upload@v1
         with:
-          target: android-mdc
+          target: android-material
           package: ${{ steps.package.outputs.path }}
           lane: ${{ inputs.play-upload-lane }}
           project-path: ${{ inputs.project-path }}

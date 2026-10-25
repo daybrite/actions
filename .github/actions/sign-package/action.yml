@@ -12,7 +12,7 @@ description: >-
   (`setup-day-deps`), whose hap-sign-tool does the signing.
 inputs:
   target:
-    description: The Day target the package was packed for, ios-uikit, macos-appkit, android-mdc or harmony-arkui.
+    description: The Day target the package was packed for, ios-uikit, macos-appkit, android-material or harmony-arkui.
     required: true
   package:
     description: The package to sign, an absolute path (for macos-appkit, the built .app).
@@ -139,8 +139,8 @@ runs:
         [ -n "${DAY_BIN:-}" ] && [ -x "$DAY_BIN" ] || { echo "::error::sign-package needs DAY_BIN — run daybrite/actions/.github/actions/setup-day-cli first"; exit 1; }
         [ -e "${{ inputs.package }}" ] || { echo "::error::no package at ${{ inputs.package }}"; exit 1; }
         case "${{ inputs.target }}" in
-          ios-uikit|macos-appkit|android-mdc|harmony-arkui) ;;
-          *) echo "::error::sign-package signs ios-uikit, macos-appkit, android-mdc and harmony-arkui packages, not ${{ inputs.target }}"; exit 1 ;;
+          ios-uikit|macos-appkit|android-material|harmony-arkui) ;;
+          *) echo "::error::sign-package signs ios-uikit, macos-appkit, android-material and harmony-arkui packages, not ${{ inputs.target }}"; exit 1 ;;
         esac
 
     # The signed file's name: `<stem>-unsigned.<ext>` becomes `<stem>.<ext>`, the way the release
@@ -170,7 +170,7 @@ runs:
 
     # --- Android ---------------------------------------------------------------------------
     - name: Sign the Android package
-      if: inputs.target == 'android-mdc'
+      if: inputs.target == 'android-material'
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}

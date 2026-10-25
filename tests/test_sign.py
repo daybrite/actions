@@ -18,7 +18,7 @@ WORKFLOW = ROOT / ".github/workflows/dayapp.yml"
 JOBS = yaml.safe_load(WORKFLOW.read_text())["jobs"]
 ACTION = yaml.safe_load((ROOT / ".github/actions/sign-package/action.yml").read_text())
 SIGN_PACKAGE = "daybrite/actions/.github/actions/sign-package@v1"
-STORE_TARGETS = ("ios-uikit", "android-mdc", "harmony-arkui")
+STORE_TARGETS = ("ios-uikit", "android-material", "harmony-arkui")
 
 
 def steps(job):
@@ -70,7 +70,7 @@ class ShapeTests(unittest.TestCase):
         run = plan["run"]
         self.assertIn('if [ "$rel" = true ] && [ "$promotion" != true ]; then', run)
         self.assertIn('(.target == "ios-uikit" and $ios)', run)
-        self.assertIn('(.target == "android-mdc" and $android)', run)
+        self.assertIn('(.target == "android-material" and $android)', run)
         self.assertIn('(.target == "harmony-arkui" and $ohos)', run)
         self.assertLess(run.index('echo "promotion=$promotion"'), run.index("sign_matrix="))
 
@@ -149,8 +149,8 @@ class ShapeTests(unittest.TestCase):
         # Every secret is gated on the row's target, so an Android row never receives an Apple
         # certificate and the other way round.
         gates = {"apple-cert-p12": "ios-uikit", "apple-cert-password": "ios-uikit", "apple-profile-b64": "ios-uikit",
-                 "keystore-b64": "android-mdc", "key-alias": "android-mdc", "keystore-password": "android-mdc",
-                 "key-password": "android-mdc", "ohos-keystore-b64": "harmony-arkui", "ohos-cert-b64": "harmony-arkui",
+                 "keystore-b64": "android-material", "key-alias": "android-material", "keystore-password": "android-material",
+                 "key-password": "android-material", "ohos-keystore-b64": "harmony-arkui", "ohos-cert-b64": "harmony-arkui",
                  "ohos-profile-b64": "harmony-arkui", "ohos-key-alias": "harmony-arkui",
                  "ohos-keystore-password": "harmony-arkui", "ohos-key-password": "harmony-arkui"}
         for key, target in gates.items():
@@ -173,7 +173,7 @@ class ShapeTests(unittest.TestCase):
                     "ohos-keystore-password", "ohos-key-password", "apple-installer-identity", "out"):
             self.assertIn(key, ACTION["inputs"], key)
         check = ACTION["runs"]["steps"][0]["run"]
-        self.assertIn("ios-uikit|macos-appkit|android-mdc|harmony-arkui)", check)
+        self.assertIn("ios-uikit|macos-appkit|android-material|harmony-arkui)", check)
         self.assertEqual(str(action_step("Sign the HarmonyOS package")["if"]), "inputs.target == 'harmony-arkui'")
 
     def test_a_mac_bundle_is_signed_into_a_store_package_with_both_identities(self):
@@ -296,9 +296,9 @@ class SignStepTests(unittest.TestCase):
         self.assertTrue(self.ipa.exists(), "the unsigned package is kept when signing fails")
 
     def test_the_android_package_is_signed_with_the_keystore_and_its_apks_best_effort(self):
-        aab = self.root / "dist/app-android-mdc.aab"
+        aab = self.root / "dist/app-android-material.aab"
         aab.write_bytes(b"aab")
-        apk = self.root / "dist/app-android-mdc.apk"
+        apk = self.root / "dist/app-android-material.apk"
         apk.write_bytes(b"apk")
         (self.root / "bin/day").write_text(
             '#!/bin/sh\necho "$@" >> "$RUNNER_TEMP/day-calls"\n'

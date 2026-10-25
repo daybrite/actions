@@ -165,12 +165,12 @@ class PlanTests(unittest.TestCase):
     def test_store_screenshots_takes_the_default_android_profiles(self):
         """The default tablet is captured halved and `day store stage` scales it up for Google
         Play, so a run that uploads this run's captures goes through with a notice saying so."""
-        result, _ = self.plan(TARGETS_IN="ios-uikit, android-mdc", STORE_SCREENSHOTS_IN="true")
+        result, _ = self.plan(TARGETS_IN="ios-uikit, android-material", STORE_SCREENSHOTS_IN="true")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("::notice::store-screenshots is on with the default Android profiles", result.stdout)
         self.assertIn("scaled up x2", result.stdout)
         # Named profiles say nothing; no Android target says nothing.
-        result, _ = self.plan(TARGETS_IN="ios-uikit, android-mdc", STORE_SCREENSHOTS_IN="true",
+        result, _ = self.plan(TARGETS_IN="ios-uikit, android-material", STORE_SCREENSHOTS_IN="true",
                               ANDROID_DEVICES_IN="device=pixel, os=36, slug=phone\ndevice=medium_tablet, os=36, slug=tablet")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn("::notice::store-screenshots", result.stdout)
@@ -221,14 +221,14 @@ class PlanTests(unittest.TestCase):
     def test_targets_all_reads_the_manifest(self):
         """`all` resolves to Day.toml's [app] targets, once, so every later check and the
         release job see one concrete list; without a manifest to read it is an error."""
-        (self.root / "Day.toml").write_text('[app]\nid = "dev.example.app"\ntargets = ["android-mdc", "web-dom"]\n')
+        (self.root / "Day.toml").write_text('[app]\nid = "dev.example.app"\ntargets = ["android-material", "web-dom"]\n')
         result, values = self.plan(TARGETS_IN="all")
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertEqual(values["targets"], "android-mdc, web-dom")
+        self.assertEqual(values["targets"], "android-material, web-dom")
         self.assertEqual([r["target"] for r in json.loads(values["pack_matrix"])["include"]],
-                         ["android-mdc", "web-dom"])
+                         ["android-material", "web-dom"])
         result, values = self.plan(TARGETS_IN=" all ")
-        self.assertEqual(values["targets"], "android-mdc, web-dom")
+        self.assertEqual(values["targets"], "android-material, web-dom")
         # A named list passes through as the output too.
         _, values = self.plan(TARGETS_IN="web-dom")
         self.assertEqual(values["targets"], "web-dom")
@@ -244,14 +244,14 @@ class PlanTests(unittest.TestCase):
         """One sign row per store target whose keystore or certificate is set, and none
         otherwise: the build leg packs unsigned exactly what a row will sign, so an app without
         Android material keeps its dev-signed, installable .apk."""
-        targets = "ios-uikit, android-mdc, harmony-arkui, web-dom"
+        targets = "ios-uikit, android-material, harmony-arkui, web-dom"
         _, values = self.plan(TARGETS_IN=targets,
                               HAS_IOS_MATERIAL="true", HAS_ANDROID_MATERIAL="false", HAS_OHOS_MATERIAL="false")
         self.assertEqual(values["sign_targets"], "ios-uikit")
         self.assertEqual(json.loads(values["sign_matrix"]), {"include": [{"target": "ios-uikit", "os": "xcode-27"}]})
         _, values = self.plan(TARGETS_IN=targets,
                               HAS_IOS_MATERIAL="true", HAS_ANDROID_MATERIAL="true", HAS_OHOS_MATERIAL="true")
-        self.assertEqual(values["sign_targets"], "ios-uikit android-mdc harmony-arkui")
+        self.assertEqual(values["sign_targets"], "ios-uikit android-material harmony-arkui")
         self.assertEqual([r["os"] for r in json.loads(values["sign_matrix"])["include"]],
                          ["xcode-27", "ubuntu-latest", "ubuntu-latest"])
         # No material, no rows — and the same on a branch or a promotion with every secret set.

@@ -65,7 +65,7 @@ printf '[[package]]\\nname = "day"\\nversion = "0.0.0"\\nsource = "git+https://e
 
 class ScriptSetupTests(unittest.TestCase):
     def run_fixture(self, fail=False, legacy=False, fast="true", launch_env="",
-                    target="android-mdc", once="", grants="", help_flags=None):
+                    target="android-material", once="", grants="", help_flags=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cli = root / 'day'
@@ -118,7 +118,7 @@ trap 'echo cleanup >> "$EVENT_LOG"' EXIT
 
     def test_grants_reach_every_launch_when_the_cli_knows_the_flag(self):
         # One --grant per name, on the per-variant and the once-only runners alike.
-        for target, once in [("android-mdc", ""), ("ios-uikit", "two.yaml")]:
+        for target, once in [("android-material", ""), ("ios-uikit", "two.yaml")]:
             with self.subTest(target=target, once=once):
                 launches = self.run_fixture(target=target, once=once,
                                             grants="camera, microphone",
@@ -137,8 +137,8 @@ trap 'echo cleanup >> "$EVENT_LOG"' EXIT
 
     def test_fast_policy_reaches_every_launch_and_explicit_env_wins(self):
         # Run the actual generated shell for modern, legacy, web and once-only paths.
-        for legacy, target, once in [(False, "android-mdc", ""),
-                                     (True, "android-mdc", ""),
+        for legacy, target, once in [(False, "android-material", ""),
+                                     (True, "android-material", ""),
                                      (False, "harmony-arkui", "two.yaml"),
                                      (False, "web-dom", ""),
                                      (False, "web-dom", "two.yaml")]:

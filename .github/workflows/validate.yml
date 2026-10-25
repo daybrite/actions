@@ -57,7 +57,7 @@ jobs:
                 demo-app-linux-qt-x86_64.flatpak demo-app-linux-qt-x86_64.appimage \
                 demo-app-windows-winui.msix demo-app-windows-winui-setup.exe \
                 demo-app-windows-winui-setup.exe.sbom-cdx.json \
-                demo-app-android-mdc.aab demo-app-ios-uikit.ipa screenshots-macos-appkit.tar.xz
+                demo-app-android-material.aab demo-app-ios-uikit.ipa screenshots-macos-appkit.tar.xz
       - name: Generate them
         uses: ./.github/actions/launch-script
         with:
@@ -92,7 +92,7 @@ jobs:
           [ -x launch.sh ] || { echo "::error::launch.sh is not executable"; exit 1; }
           # --help runs the whole option-parsing path without downloading anything.
           ./launch.sh --help
-          if ./launch.sh --target android-mdc; then
+          if ./launch.sh --target android-material; then
             echo "::error::launch.sh should refuse a target it has no build for"
             exit 1
           fi
@@ -101,9 +101,9 @@ jobs:
   build-scaffold:
     uses: ./.github/workflows/dayapp.yml
     with:
-      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
-      # Exercise the device-profile fan-out: android-mdc becomes two parallel jobs, the second
-      # packing nothing and uploading `screenshots-android-mdc-tablet`. Android carries it rather
+      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-material, harmony-arkui, web-dom
+      # Exercise the device-profile fan-out: android-material becomes two parallel jobs, the second
+      # packing nothing and uploading `screenshots-android-material-tablet`. Android carries it rather
       # than iOS because the fan-out logic is shared and ubuntu minutes are the cheap ones — the
       # iOS half of the path (prefix-matching a simulator) runs on every single-profile build too.
       android-profiles: medium_phone, medium_tablet=tablet
@@ -116,5 +116,5 @@ jobs:
       project-path: ci-app
       setup-command: >-
         day new app ci-app
-        --toolkit windows-winui,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-mdc,harmony-arkui,web-dom
+        --toolkit windows-winui,macos-appkit,linux-gtk,linux-qt,ios-uikit,android-material,harmony-arkui,web-dom
         --appid dev.daybrite.ciapp --git --no-input

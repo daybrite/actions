@@ -21,7 +21,7 @@ ACTION = yaml.safe_load((ROOT / ".github/actions/store-upload/action.yml").read_
 STORE_UPLOAD = "daybrite/actions/.github/actions/store-upload@v1"
 DOWNLOAD = "Download this run's screenshots"
 INDEX = "Index this run's screenshots"
-TARGETS = (("appstore-ios", "ios-uikit", "Upload to the App Store"), ("playstore-android", "android-mdc", "Upload to Google Play"))
+TARGETS = (("appstore-ios", "ios-uikit", "Upload to the App Store"), ("playstore-android", "android-material", "Upload to Google Play"))
 
 
 def steps(job):
@@ -239,7 +239,7 @@ class UploadActionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, "a refused set fails the upload")
 
     def test_staging_takes_the_index_and_the_placeholder_switch(self):
-        for target in ("ios-uikit", "android-mdc"):
+        for target in ("ios-uikit", "android-material"):
             _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET=target, INDEX="/w/shots/gallery.json", FLAVOR_ARGS="", ALLOW="false")
             self.assertEqual(calls, [f"store stage --target {target} --screenshots /w/shots/gallery.json"])
             _, calls = self.run_step("Stage the listing", cwd=self.project, TARGET=target, INDEX="", FLAVOR_ARGS="--flavor x", ALLOW="true")

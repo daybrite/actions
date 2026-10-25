@@ -24,7 +24,7 @@ inputs:
   target:
     description: >-
       The platform-toolkit combo to prepare for: macos-appkit, macos-gtk, macos-qt, ios-uikit,
-      linux-gtk, linux-qt, android-mdc, harmony-arkui, windows-winui, windows-qt, windows-gtk,
+      linux-gtk, linux-qt, android-material, harmony-arkui, windows-winui, windows-qt, windows-gtk,
       web-dom. An unknown value fails loudly rather than installing nothing and failing later
       inside cargo.
     required: true
@@ -69,14 +69,28 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Normalize deprecated target input
+      id: canonical-target
+      shell: bash
+      env:
+        RAW_TARGET: ${{ inputs.target }}
+      run: |
+        case "$RAW_TARGET" in
+          mdc | android-mdc)
+            echo "::warning::$RAW_TARGET is deprecated; use android-material"
+            RAW_TARGET=android-material ;;
+          material) RAW_TARGET=android-material ;;
+        esac
+        printf 'target=%s\n' "$RAW_TARGET" >> "$GITHUB_OUTPUT"
+
     - name: Validate the target
       shell: bash
       run: |
-        case "${{ inputs.target }}" in
+        case "${{ steps.canonical-target.outputs.target }}" in
           macos-appkit | macos-gtk | macos-qt | ios-uikit | linux-gtk | linux-qt \
-            | android-mdc | harmony-arkui | windows-winui | windows-qt | windows-gtk | web-dom) ;;
+            | android-material | harmony-arkui | windows-winui | windows-qt | windows-gtk | web-dom) ;;
           *)
-            echo "::error::setup-day-deps: unknown target '${{ inputs.target }}'"
+            echo "::error::setup-day-deps: unknown target '${{ steps.canonical-target.outputs.target }}'"
             exit 1 ;;
         esac
 
@@ -88,9 +102,9 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        case "${{ inputs.target }}" in
+        case "${{ steps.canonical-target.outputs.target }}" in
           ios-uikit) T="aarch64-apple-ios-sim aarch64-apple-ios" ;;
-          android-mdc) T="aarch64-linux-android x86_64-linux-android" ;;
+          android-material) T="aarch64-linux-android x86_64-linux-android" ;;
           harmony-arkui) T="aarch64-unknown-linux-ohos x86_64-unknown-linux-ohos" ;;
           web-dom) T="wasm32-unknown-unknown" ;;
           *) T="" ;;
@@ -100,7 +114,7 @@ runs:
 
     # --- toolkit dev libraries ------------------------------------------------------------------
     - name: Toolkit deps (brew)
-      if: runner.os == 'macOS' && (inputs.target == 'macos-gtk' || inputs.target == 'macos-qt')
+      if: runner.os == 'macOS' && (steps.canonical-target.outputs.target == 'macos-gtk' || steps.canonical-target.outputs.target == 'macos-qt')
       shell: bash
       env:
         # Set here rather than asked of every caller: the runner images ship third-party taps
@@ -110,13 +124,13 @@ runs:
         HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         HOMEBREW_NO_AUTO_UPDATE: "1"
       run: |
-        case "${{ inputs.target }}" in
+        case "${{ steps.canonical-target.outputs.target }}" in
           macos-qt) brew install qt pkg-config ;;
           macos-gtk) brew install gtk4 libadwaita librsvg pkg-config ;;
         esac
 
     - name: Toolkit deps (apt)
-      if: inputs.target == 'linux-gtk' || inputs.target == 'linux-qt'
+      if: steps.canonical-target.outputs.target == 'linux-gtk' || steps.canonical-target.outputs.target == 'linux-qt'
       shell: bash
       env:
         EXTRAS: ${{ inputs.extras }}
@@ -128,7 +142,7 @@ runs:
         # (it ships in this package). Without a bus GTK reaches the portal through a NULL
         # GDBusConnection and segfaults on the second dialog.
         BASE="pkg-config dbus"
-        case "${{ inputs.target }}" in
+        case "${{ steps.canonical-target.outputs.target }}" in
           # SVG renderers are build dependencies, including when extras is false.
           linux-qt)
             PKGS="qt6-base-dev qt6-svg-dev"
@@ -152,7 +166,7 @@ runs:
           # the library day-part-sound loads at run time to reach the sound server: without it
           # the part reports no engine, where a desktop reports one. A runner has no sound server,
           # so nothing plays either way; the walkthrough's readouts are what it checks.
-          case "${{ inputs.target }}" in
+          case "${{ steps.canonical-target.outputs.target }}" in
             linux-qt) PKGS="$PKGS qt6-webengine-dev" ;;
             linux-gtk) PKGS="$PKGS libwebkitgtk-6.0-dev" ;;
           esac
@@ -166,11 +180,11 @@ runs:
     # zh-CN captures as tofu without CJK fonts (imagemagick is the same capture-validation
     # tooling the linux legs carry).
     - name: Walkthrough deps (harmony emulator / web driver)
-      if: inputs.extras == 'true' && (inputs.target == 'harmony-arkui' || inputs.target == 'web-dom')
+      if: inputs.extras == 'true' && (steps.canonical-target.outputs.target == 'harmony-arkui' || steps.canonical-target.outputs.target == 'web-dom')
       shell: bash
       run: |
         set -euo pipefail
-        case "${{ inputs.target }}" in
+        case "${{ steps.canonical-target.outputs.target }}" in
           harmony-arkui) PKGS="qemu-system-x86 qemu-utils" ;;
           web-dom) PKGS="fonts-noto-cjk imagemagick" ;;
         esac
@@ -182,7 +196,7 @@ runs:
     # After the toolkit's, so a package can extend what those installed. windows-qt and
     # windows-gtk take theirs through MSYS2 below, where their toolkit comes from.
     - name: Extra packages
-      if: inputs.packages != '' && inputs.target != 'windows-qt' && inputs.target != 'windows-gtk'
+      if: inputs.packages != '' && steps.canonical-target.outputs.target != 'windows-qt' && steps.canonical-target.outputs.target != 'windows-gtk'
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
@@ -205,23 +219,23 @@ runs:
 
     # --- Android --------------------------------------------------------------------------------
     - name: JDK 21 (android / harmony)
-      if: inputs.java == 'true' && (inputs.target == 'android-mdc' || inputs.target == 'harmony-arkui')
+      if: inputs.java == 'true' && (steps.canonical-target.outputs.target == 'android-material' || steps.canonical-target.outputs.target == 'harmony-arkui')
       uses: actions/setup-java@v5
       with:
         distribution: temurin
         java-version: "21"
     - name: Gradle (android)
-      if: inputs.java == 'true' && inputs.target == 'android-mdc'
+      if: inputs.java == 'true' && steps.canonical-target.outputs.target == 'android-material'
       uses: gradle/actions/setup-gradle@v6
       with:
         gradle-version: 9.6.1
         add-job-summary: never
     - name: Android NDK env
-      if: inputs.target == 'android-mdc'
+      if: steps.canonical-target.outputs.target == 'android-material'
       shell: bash
       run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
     - name: cargo-ndk (android)
-      if: inputs.target == 'android-mdc'
+      if: steps.canonical-target.outputs.target == 'android-material'
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-ndk
@@ -235,18 +249,18 @@ runs:
     # its flags still move between releases (install-action falls back to cargo-binstall's prebuilt
     # binary for it).
     - name: cargo-ohos (harmony)
-      if: inputs.target == 'harmony-arkui'
+      if: steps.canonical-target.outputs.target == 'harmony-arkui'
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-ohos@0.3.4
     - name: OHOS SDK
-      if: inputs.target == 'harmony-arkui'
+      if: steps.canonical-target.outputs.target == 'harmony-arkui'
       uses: openharmony-rs/setup-ohos-sdk@v1
       id: ohos-sdk
       with:
         version: 5.1.0
     - name: OHOS toolchain env
-      if: inputs.target == 'harmony-arkui'
+      if: steps.canonical-target.outputs.target == 'harmony-arkui'
       shell: bash
       run: |
         set -euo pipefail
@@ -265,13 +279,13 @@ runs:
         ln -sfn "$OH" "$BASE/18"
         echo "OHOS_BASE_SDK_HOME=$BASE" >> "$GITHUB_ENV"
     - name: Cache the OpenHarmony command-line-tools (hvigor / ohpm)
-      if: inputs.target == 'harmony-arkui'
+      if: steps.canonical-target.outputs.target == 'harmony-arkui'
       uses: actions/cache@v6
       with:
         path: ~/ohos-clt
         key: ohos-clt-5.1.0.840
     - name: Install hvigor/ohpm (node wrappers)
-      if: inputs.target == 'harmony-arkui'
+      if: steps.canonical-target.outputs.target == 'harmony-arkui'
       shell: bash
       env:
         CLT_URL: https://repo.huaweicloud.com/harmonyos/ohpm/5.1.0/commandline-tools-linux-x64-5.1.0.840.zip
@@ -296,17 +310,17 @@ runs:
     # GTK4 and libadwaita dropped MINGW64 in October 2026. GTK's compiler and libraries
     # must all come from UCRT64; the pin step below follows that shell's MINGW_PREFIX.
     - name: MSYS2 (windows qt/gtk)
-      if: inputs.target == 'windows-qt' || inputs.target == 'windows-gtk'
+      if: steps.canonical-target.outputs.target == 'windows-qt' || steps.canonical-target.outputs.target == 'windows-gtk'
       uses: msys2/setup-msys2@v2
       with:
-        msystem: ${{ inputs.target == 'windows-gtk' && 'UCRT64' || 'MINGW64' }}
+        msystem: ${{ steps.canonical-target.outputs.target == 'windows-gtk' && 'UCRT64' || 'MINGW64' }}
         update: true
         path-type: inherit
         install: >-
-          ${{ inputs.target == 'windows-gtk' && 'mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-librsvg' || 'mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-svg' }}
+          ${{ steps.canonical-target.outputs.target == 'windows-gtk' && 'mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-librsvg' || 'mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-svg' }}
           ${{ inputs.packages }}
     - name: Pin the MSYS2 mingw toolchain
-      if: inputs.target == 'windows-qt' || inputs.target == 'windows-gtk'
+      if: steps.canonical-target.outputs.target == 'windows-qt' || steps.canonical-target.outputs.target == 'windows-gtk'
       # MSVC cannot link MSYS2's import libraries, and the C++ shim is built from pkg-config's
       # flags, which an aqtinstall Qt does not ship — hence the GNU toolchain and MSYS2's bin.
       shell: msys2 {0}
@@ -322,10 +336,10 @@ runs:
     # Match the native renderers' build probes before spending time compiling Rust crates.
     # This also catches an incomplete installation or a pkg-config from the wrong MSYS2 prefix.
     - name: Verify SVG development libraries
-      if: endsWith(inputs.target, '-qt') || endsWith(inputs.target, '-gtk')
+      if: endsWith(steps.canonical-target.outputs.target, '-qt') || endsWith(steps.canonical-target.outputs.target, '-gtk')
       shell: bash
       env:
-        TARGET: ${{ inputs.target }}
+        TARGET: ${{ steps.canonical-target.outputs.target }}
       run: |
         set -euo pipefail
         case "$TARGET" in
@@ -340,13 +354,13 @@ runs:
     # A packed app is self-contained and needs neither. WINAPPSDK_RELEASE is the release the day
     # CLI pins (RUNTIME_VERSION in day's crates/day-toolchain/src/winappsdk.rs); keep them in step.
     - name: Cache the Windows App SDK packages (windows-winui)
-      if: inputs.target == 'windows-winui'
+      if: steps.canonical-target.outputs.target == 'windows-winui'
       uses: actions/cache@v6
       with:
         path: ~\AppData\Local\day\winappsdk
         key: winappsdk-2.5.1-${{ runner.arch }}
     - name: Windows App Runtime (windows-winui)
-      if: inputs.target == 'windows-winui'
+      if: steps.canonical-target.outputs.target == 'windows-winui'
       shell: pwsh
       env:
         WINAPPSDK_RELEASE: "2.5.1"
@@ -367,17 +381,17 @@ runs:
 
     # --- packaging tools (inputs.pack) ----------------------------------------------------------
     - name: Flatpak tooling (linux pack)
-      if: inputs.pack == 'true' && (inputs.target == 'linux-gtk' || inputs.target == 'linux-qt')
+      if: inputs.pack == 'true' && (steps.canonical-target.outputs.target == 'linux-gtk' || steps.canonical-target.outputs.target == 'linux-qt')
       shell: bash
       run: |
         set -euo pipefail
         sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
         flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
     - name: linuxdeploy tooling (linux pack)
-      if: inputs.pack == 'true' && (inputs.target == 'linux-gtk' || inputs.target == 'linux-qt')
+      if: inputs.pack == 'true' && (steps.canonical-target.outputs.target == 'linux-gtk' || steps.canonical-target.outputs.target == 'linux-qt')
       shell: bash
       env:
-        TOOLKIT: ${{ inputs.target == 'linux-qt' && 'qt' || 'gtk' }}
+        TOOLKIT: ${{ steps.canonical-target.outputs.target == 'linux-qt' && 'qt' || 'gtk' }}
       run: |
         set -euo pipefail
         # appimagetool needs FUSE, which a runner does not have; APPIMAGE_EXTRACT_AND_RUN is the
@@ -418,7 +432,7 @@ runs:
           echo "APPIMAGE_EXTRACT_AND_RUN=1"
         } >> "$GITHUB_ENV"
     - name: Configure the NSIS installer cache
-      if: inputs.pack == 'true' && inputs.target == 'windows-winui'
+      if: inputs.pack == 'true' && steps.canonical-target.outputs.target == 'windows-winui'
       id: nsis-installer
       shell: pwsh
       env:
@@ -431,14 +445,14 @@ runs:
         "sha256=$env:NSIS_SHA256" >> $env:GITHUB_OUTPUT
         "key=nsis-installer-v1-$env:RUNNER_OS-$env:RUNNER_ARCH-$env:NSIS_VERSION-$env:NSIS_SHA256" >> $env:GITHUB_OUTPUT
     - name: Restore the NSIS installer
-      if: inputs.pack == 'true' && inputs.target == 'windows-winui'
+      if: inputs.pack == 'true' && steps.canonical-target.outputs.target == 'windows-winui'
       id: nsis-cache
       uses: actions/cache/restore@v6
       with:
         path: ${{ steps.nsis-installer.outputs.path }}
         key: ${{ steps.nsis-installer.outputs.key }}
     - name: NSIS (windows pack)
-      if: inputs.pack == 'true' && inputs.target == 'windows-winui'
+      if: inputs.pack == 'true' && steps.canonical-target.outputs.target == 'windows-winui'
       shell: pwsh
       env:
         NSIS_INSTALLER: ${{ steps.nsis-installer.outputs.path }}
@@ -487,7 +501,7 @@ runs:
     # Save now, before compilation/tests: their failure must not discard a verified installer.
     # No restore-keys: an older version or different checksum is never a compatible fallback.
     - name: Save the NSIS installer
-      if: inputs.pack == 'true' && inputs.target == 'windows-winui' && steps.nsis-cache.outputs.cache-hit != 'true'
+      if: inputs.pack == 'true' && steps.canonical-target.outputs.target == 'windows-winui' && steps.nsis-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
         path: ${{ steps.nsis-installer.outputs.path }}

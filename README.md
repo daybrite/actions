@@ -14,11 +14,11 @@ index beside it — plus a `SHA256SUMS` manifest — to the GitHub release for t
 [store-upload jobs](#store-uploads) can hand the packed artifacts to the app's own fastlane lanes.
 
 Release assets are packed with `day pack --no-version-in-name`, so their filenames carry no
-version, and each is tagged with its platform-toolkit combo — `app-fair-android-mdc.aab`,
+version, and each is tagged with its platform-toolkit combo — `app-fair-android-material.aab`,
 `app-fair-linux-gtk-x86_64.appimage`, `app-fair-windows-winui-setup.exe`, `app-fair-harmony-arkui.hap`.
 Each is therefore reachable at a stable "latest release" URL —
 `https://github.com/<owner>/<repo>/releases/latest/download/<name>` (e.g.
-`.../releases/latest/download/app-fair-android-mdc.aab`) — that always redirects to the newest
+`.../releases/latest/download/app-fair-android-material.aab`) — that always redirects to the newest
 tagged release.
 
 Each package's provenance travels beside it, named after the package so a release directory
@@ -141,7 +141,7 @@ jobs:
       contents: write # release-asset upload on tag builds
     secrets: inherit
     with:
-      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-mdc, harmony-arkui, web-dom
+      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-material, harmony-arkui, web-dom
       scripts: dayscript/walkthrough.yaml
       locales: all   # every locale the app ships; or name them, `en fr`
       # preflight-checks: fmt clippy   # opt into clippy before the matrix (fmt alone is the default)
@@ -154,7 +154,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 
 | input | type | default | meaning |
 |---|---|---|---|
-| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-winui`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-mdc`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
+| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-winui`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-material`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
 | `day-version` | string | `main` | Day CLI to install: a branch name of the day repository, built from git (`main` by default), a 40-hex commit, `latest` (newest crates.io release), or `v1.2.3`/`1.2.3` (that release). |
 | `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
 | `day-revision` | string | — | With `update-day-deps: true`, resolve Day dependencies to this full Git commit, for callers sharing one revision across library and demo jobs. Empty follows the app's tracked branch. When dependencies are updated and `day-version` is `main`, the CLI uses the resolved dependency revision too. |
@@ -168,12 +168,12 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `update-day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
 | `script-setup` | string | — | Bash commands sourced once from the project directory after device boot and before scripts. `DAY_SCRIPT_TARGET` identifies the target; `ANDROID_SERIAL` selects Android. Start local fixtures, configure reverse ports, and register an EXIT trap for cleanup. Store logs under `$RUNNER_TEMP`. |
 | `scripts` | string | `auto` | Dayscripts to run on each target, comma- or space-separated paths relative to the project. `auto` runs every `dayscript/*.yaml` (or `scripts/*.yaml`); `none` runs nothing. |
-| `grant-permissions` | string | — | Portable permissions to mark granted on the device before each scripted launch, one line per rule as `<targets>: <permissions>` (`android-mdc: camera microphone`). Each launch on a named target gets `--grant` per permission (`pm grant` on the Android emulator, `simctl privacy grant` on the iOS Simulator); the CLI refuses a grant the target has no tool for (HarmonyOS, macOS, web-dom, the camera on the simulator). Per target because one script may need the permission on one leg and assert the undecided state on another. |
+| `grant-permissions` | string | — | Portable permissions to mark granted on the device before each scripted launch, one line per rule as `<targets>: <permissions>` (`android-material: camera microphone`). Each launch on a named target gets `--grant` per permission (`pm grant` on the Android emulator, `simctl privacy grant` on the iOS Simulator); the CLI refuses a grant the target has no tool for (HarmonyOS, macOS, web-dom, the camera on the simulator). Per target because one script may need the permission on one leg and assert the undecided state on another. |
 | `fast-scripts` | boolean | `True` | Request fast functional walkthroughs using `DAY_TEST_FAST=1`. Supported runtimes finish decorative motion immediately; literal pauses, media, physics and I/O retain real timing. Set `false` for animation coverage. Explicit `DAY_TEST_FAST` in `launch-env` takes precedence. Older runtimes keep normal behavior; full acceleration requires an updated app and CLI. |
 | `launch-env` | string | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`; values must not contain spaces. |
 | `capture-size` | string | — | Pixel size of the desktop-class screenshots (the desktop toolkits and web-dom), passed to every scripted launch as `--capture-size`: `2560x1600`, `2880x1800@2`, or `window` for the app's own `[window]` size. Empty leaves it to the app's Day.toml `[screenshots]` table, whose default is 2560x1600 at 2x, a size the Mac App Store accepts. |
 | `locales` | string | — | Locales to run each dayscript under, comma- or space-separated (`en fr ar zh-CN`), or `all` for every locale the app ships — its `resource/locales/<tag>/` catalogs, default locale first, so adding a language to the app adds it to the walkthrough. Each locale captures its own screenshot variant. |
-| `android-abis` | string | `arm64-v8a x86_64` | Android ABIs packed into the `android-mdc` APK and AAB, comma- or space-separated; each adds its own `lib/<abi>/`. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
+| `android-abis` | string | `arm64-v8a x86_64` | Android ABIs packed into the `android-material` APK and AAB, comma- or space-separated; each adds its own `lib/<abi>/`. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 | `day-source` | string | `install` | Where the day CLI comes from: `install` builds it with cargo per `day-version`; `artifact` downloads the `day-<os>-<arch>` artifact an earlier job in the same run uploaded. |
 | `day-cache` | boolean | `True` | Cache a day CLI built from git (a branch, tag or commit in `day-version`), keyed on the commit that ref resolves to, so a leg whose commit is already built restores the CLI instead of compiling it. A crates.io release is not cached. `false` builds the CLI on every leg. |
 | `tolerate-failures` | boolean | `False` | Let the best-effort work fail without failing the run: dayscripts on `macos-gtk`, `macos-qt`, `windows-qt` and `windows-gtk` (these combinations have no packer), the HarmonyOS emulator's boot and walkthrough, and the web-dom browser install. Off, any of them failing fails its leg, which holds back the release and the website deploys until [a re-run of the failed jobs](#re-running-failed-legs) passes. `optional=true` device rows are tolerated either way. |
@@ -182,7 +182,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `ios-profiles` | string | — | The older device-only form of `ios-devices`, comma-separated name prefixes with optional `=<slug>`. Setting both is an error. |
 | `ios-devices` | string | phone + tablet | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…`. Each becomes its own parallel job, screenshot artifact and gallery column; the first one packs. `device` is a name prefix in which `*` matches anything, so `iPhone * Pro Max` is the largest iPhone the runner image has. Unset runs `iPhone * Pro Max` portrait and `iPad Pro 13-inch` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
 | `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `medium_phone` or `Nexus 7 2013`, comma-separated. |
-| `android-devices` | string | phone + tablet | Device profiles for `android-mdc`, one per line in the same shape as `ios-devices`, plus a `density` field; `os` is the API level. Unset runs `medium_phone` portrait and `medium_tablet` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
+| `android-devices` | string | phone + tablet | Device profiles for `android-material`, one per line in the same shape as `ios-devices`, plus a `density` field; `os` is the API level. Unset runs `medium_phone` portrait and `medium_tablet` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
 | `harmony-devices` | string | phone + tablet | Device profiles for `harmony-arkui`, one per line as `device=…, orientation=…, slug=…`, where `device` is a PANEL of the one Oniro image: `phone` (360x720), `tablet` (1280x800) or `WxH`. Unset runs the phone in portrait and the tablet in landscape. |
 | `app-id` | string | — | The app's bundle id. When set, the Linux legs verify that the packed flatpak installs and reports that id, and the macOS legs that the `.app` carries it. |
 | `lint` | boolean | `True` | Run `day lint` before building: fluent coverage, ids, routes, and the store listing. |
@@ -230,7 +230,7 @@ newest installed rather than pinning a major that the next image drops.
 | `macos-appkit` | xcode-27 | packs a `.dmg` |
 | `ios-uikit` | xcode-27 | Simulator scripts; packs an unsigned device `.ipa` for sideloading/self-signing (a signed `.ipa` with signing secrets) |
 | `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` **and** a `.appimage`, and the release check installs the one and runs the other |
-| `android-mdc` | ubuntu-latest | scripts on a KVM emulator; packs `.apk` + `.aab` |
+| `android-material` | ubuntu-latest | scripts on a KVM emulator; packs `.apk` + `.aab` |
 | `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort under `tolerate-failures`); packs `.hap` |
 | `windows-winui` | windows-latest | installs the Windows App Runtime and caches the Windows App SDK packages; packs a self-contained `.msix` + NSIS installer |
 | `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`), all of them in one launch — web storage lasts only as long as the launch; ships the built dist as a zip |
@@ -240,7 +240,7 @@ newest installed rather than pinning a major that the next image drops.
 
 **Every mobile target runs on a phone and a tablet by default**, with no configuration in the
 calling workflow. `ios-uikit` runs `iPhone * Pro Max` in portrait and `iPad Pro 13-inch` in
-landscape; `android-mdc` runs `medium_phone` in portrait and `medium_tablet` in landscape;
+landscape; `android-material` runs `medium_phone` in portrait and `medium_tablet` in landscape;
 Harmony walkthroughs automatically install a checksum-verified x86_64 ArkWeb runtime,
 apply the Oniro renderer/GPU compatibility fixes, and reboot before launching the app.
 The extracted runtime is cached; callers need no WebView-specific setup. This enables
@@ -250,7 +250,7 @@ bundled WebViews used by Showcase, Lottie, News, and other apps. See the
 `harmony-arkui` runs its one Oniro image on a `phone` panel (360x720) in portrait and a `tablet`
 panel (1280x800) in landscape. Each is its own parallel job, its own screenshot artifact and its
 own gallery column, and captures land under `<target>/<slug>/<variant>/` — `ios-uikit/iphone/`,
-`ios-uikit/ipad/`, `android-mdc/phone/`, `android-mdc/tablet/`, `harmony-arkui/phone/`,
+`ios-uikit/ipad/`, `android-material/phone/`, `android-material/tablet/`, `harmony-arkui/phone/`,
 `harmony-arkui/tablet/`. Those are the two device classes a store listing asks for and the two an
 adaptive UI has to be looked at on. The iOS panels are ones the App Store accepts as screenshots;
 the Android tablet capture is not one Play takes — see [Store-sized Android
@@ -263,14 +263,14 @@ which is how an app runs on one device:
 
 ```yaml
 with:
-  targets: ios-uikit, android-mdc
+  targets: ios-uikit, android-material
   ios-devices: |
     device=iPhone, orientation=portrait
   android-devices: |
     device=medium_phone, os=36, orientation=portrait
 ```
 
-Two jobs, `ios-uikit · iPhone` and `android-mdc · medium_phone`, each capturing to
+Two jobs, `ios-uikit · iPhone` and `android-material · medium_phone`, each capturing to
 `<target>/<variant>/` with no device level, since neither target runs on more than one device.
 
 `ios-devices` names each device by device, OS and orientation. One profile per **line**; the comma
@@ -312,7 +312,7 @@ sdkmanager "cmdline-tools;12.0"
 
 ```yaml
 with:
-  targets: android-mdc
+  targets: android-material
   android-devices: |
     device=medium_phone,  os=36, orientation=portrait,  slug=phone
     device=medium_tablet, os=36, orientation=landscape, slug=tablet
@@ -410,13 +410,13 @@ build and script run, not the first device's:
 
 ```yaml
 with:
-  targets: macos-appkit, ios-uikit, android-mdc
+  targets: macos-appkit, ios-uikit, android-material
   ios-profiles: "iPhone 16, iPad Pro=ipad"
   android-profiles: "medium_phone, medium_tablet=tablet"
 ```
 
 That is five jobs: `macos-appkit`, `ios-uikit · iPhone 16`, `ios-uikit · iPad Pro`,
-`android-mdc · medium_phone`, `android-mdc · medium_tablet`.
+`android-material · medium_phone`, `android-material · medium_tablet`.
 
 - **iOS profiles are prefixes**, matched against the simulators the runner image has: `iPhone`
   takes the first iPhone, `iPad Pro` the first iPad Pro. Exact names age out with each Xcode image,
@@ -442,7 +442,7 @@ job that was already the slowest in the matrix. Profiles do the same work as par
   android-profiles: "medium_phone, medium_tablet=tablet"
 ```
 
-which uploads the same `screenshots-ios-uikit-ipad` and `screenshots-android-mdc-tablet` the old
+which uploads the same `screenshots-ios-uikit-ipad` and `screenshots-android-material-tablet` the old
 input did. Passing `tablet-walkthroughs` now fails the run — GitHub rejects an input a reusable
 workflow does not define — so a caller still setting it has to change one of these two lines.
 
@@ -456,7 +456,7 @@ covers the file.
 
 ```yaml
 with:
-  targets: macos-appkit,ios-uikit,android-mdc,web-dom
+  targets: macos-appkit,ios-uikit,android-material,web-dom
   flavors: custom
 ```
 
@@ -481,7 +481,7 @@ flavor, the three upload jobs take that flavor's packages and stage its `store-<
 
 ```yaml
 with:
-  targets: ios-uikit,android-mdc
+  targets: ios-uikit,android-material
   flavors: appfair
   store-flavor: appfair
 ```
@@ -602,7 +602,7 @@ running a lane from the app's own fastlane config:
 |---|---|---|---|
 | `appstore-ios` | App Store Connect | `dist-ios-uikit` (the `.ipa`) | `DAY_IPA` |
 | `appstore-macos` | Mac App Store | `app-macos-appkit` (the unsigned `.app`, which the job signs into a `.pkg`) | `DAY_PKG` (and `DAY_PKG_OR_APP`) |
-| `playstore-android` | Google Play | `dist-android-mdc` (the `.aab`) | `DAY_AAB` |
+| `playstore-android` | Google Play | `dist-android-material` (the `.aab`) | `DAY_AAB` |
 
 The `upload-*` and `*-upload-lane` inputs that drive them are in [Inputs](#inputs).
 
@@ -663,7 +663,7 @@ kind (the [store listings](https://daybrite.dev/docs/store#screenshots) doc has 
 iphone = ["home", { name = "editor", theme = "dark" }]
 ipad = ["home", "editor"]
 
-[storefront.android-mdc.google-play-store.screenshots]
+[storefront.android-material.google-play-store.screenshots]
 default = ["home", "editor"]
 ```
 
@@ -737,7 +737,7 @@ jobs:
       id-token: write # deploy-pages OIDC token
     secrets: inherit
     with:
-      targets: macos-appkit, ios-uikit, android-mdc, web-dom
+      targets: macos-appkit, ios-uikit, android-material, web-dom
       deploy-web: true
       # web-deploy-tag-pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'   # publish only on version tags instead
 ```
@@ -898,7 +898,7 @@ the CLI first.
 ```yaml
 - uses: daybrite/actions/.github/actions/store-upload@v1
   with:
-    target: android-mdc
+    target: android-material
     package: ${{ steps.sign.outputs.package }}
     lane: android upload
     project-path: .                      # the app's checkout
@@ -1075,3 +1075,12 @@ the maintained `sign-updates` action and its cryptography dependency; it never b
 app or its helper with the key present. The release waits for this job, attaches the `.json` and
 `.json.sig` files, and drops unsigned templates. Missing/mismatched keys fail release publication.
 Existing callers remain unchanged unless they opt in.
+
+## Android target naming
+
+Use `android-material` for the Android target and `material` for its toolkit and Cargo
+feature. The tooling temporarily accepts `android-mdc` and `mdc`, warns that they are
+deprecated, and writes canonical target names. Mixed spellings in target lists select one
+target; conflicting override keys are rejected. These aliases do not apply to Rust package
+names, imports, or Cargo features. They will be removed in the next announced breaking
+tooling release after one release of overlap.
