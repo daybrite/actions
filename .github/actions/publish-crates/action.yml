@@ -1,0 +1,120 @@
+# Copyright © The Daybrite Project
+# SPDX-License-Identifier: MPL-2.0
+
+name: Publish crates to crates.io
+description: >-
+  Publish every publishable member of a cargo workspace to crates.io through Trusted Publishing,
+  in dependency order and within crates.io's rate limits, skipping versions crates.io already has.
+
+# crates.io takes 30 new versions at once and then one a minute, and a Trusted Publishing token
+# lasts 30 minutes, so a large workspace cannot go up in one `cargo publish --workspace`: that
+# uploads as fast as it can and stops at the first refusal. crates-io.py (next to this file) waits
+# out each refusal instead, and this action gives it three tokens of up to 25 uploads each, which
+# covers 75 crates. Each crate's trusted publisher must name the repository, the workflow file that
+# runs this (for a caller of dayapp.yml, the CALLER's file, such as ci.yml), and the job's
+# environment. The job needs `permissions: id-token: write`.
+
+inputs:
+  path:
+    description: >-
+      The workspaces to publish, relative to the repository root, space-separated and in order:
+      a package kept beside the workspace rather than in it (a piece's `gallery/`) comes after
+      the workspace it depends on.
+    required: false
+    default: "."
+  verify:
+    description: >-
+      Build every package from its archive (`cargo package --workspace`) before uploading any,
+      so a package that cannot build from what it ships fails here rather than half way through
+      the release. Off by default: the archive is built on this runner's platform only, and a
+      crate whose default features need another platform's libraries cannot build here.
+      `cargo package --workspace --no-verify` runs either way, which checks every manifest.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Check the packages
+      shell: bash
+      env:
+        VERIFY: ${{ inputs.verify }}
+        PATHS: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        # The first workspace only: a later one depends on crates this run has not published yet,
+        # which `cargo package` cannot resolve until it has, and `cargo publish` checks it then.
+        set -- $PATHS
+        cd "$1"
+        # `--locked` below needs a lock; a library repository commonly commits none.
+        [ -f Cargo.lock ] || cargo generate-lockfile
+        if [ "$VERIFY" = true ]; then
+          cargo package --workspace --locked
+        else
+          cargo package --workspace --locked --no-verify
+        fi
+        rm -rf target/package
+
+    - id: auth1
+      uses: rust-lang/crates-io-auth-action@v1
+    - id: run1
+      shell: bash
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth1.outputs.token }}
+        SCRIPT: ${{ github.action_path }}/crates-io.py
+        PATHS: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        ROOTS=()
+        for dir in $PATHS; do ROOTS+=(--root "$dir"); done
+        python3 "$SCRIPT" "${ROOTS[@]}" publish --max 25
+
+    - id: auth2
+      if: steps.run1.outputs.remaining != '0'
+      uses: rust-lang/crates-io-auth-action@v1
+    - id: run2
+      if: steps.run1.outputs.remaining != '0'
+      shell: bash
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth2.outputs.token }}
+        SCRIPT: ${{ github.action_path }}/crates-io.py
+        PATHS: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        ROOTS=()
+        for dir in $PATHS; do ROOTS+=(--root "$dir"); done
+        python3 "$SCRIPT" "${ROOTS[@]}" publish --max 25
+
+    - id: auth3
+      if: steps.run1.outputs.remaining != '0' && steps.run2.outputs.remaining != '0'
+      uses: rust-lang/crates-io-auth-action@v1
+    - id: run3
+      if: steps.run1.outputs.remaining != '0' && steps.run2.outputs.remaining != '0'
+      shell: bash
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth3.outputs.token }}
+        SCRIPT: ${{ github.action_path }}/crates-io.py
+        PATHS: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        ROOTS=()
+        for dir in $PATHS; do ROOTS+=(--root "$dir"); done
+        python3 "$SCRIPT" "${ROOTS[@]}" publish --max 25
+
+    # Asked of crates.io afresh rather than read from the last run's count, so a crate that went
+    # up but was reported as failed still counts as published.
+    - name: Check every crate is published
+      id: check
+      shell: bash
+      env:
+        SCRIPT: ${{ github.action_path }}/crates-io.py
+        PATHS: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        ROOTS=()
+        for dir in $PATHS; do ROOTS+=(--root "$dir"); done
+        python3 "$SCRIPT" "${ROOTS[@]}" publish --dry-run | tee "$RUNNER_TEMP/crates-left.txt"
+        if grep -q 'would publish' "$RUNNER_TEMP/crates-left.txt"; then
+          echo "::error::crates remain unpublished (above); re-run this job to finish the release"
+          exit 1
+        fi

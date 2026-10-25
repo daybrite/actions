@@ -1,0 +1,216 @@
+# Copyright © The Daybrite Project
+# SPDX-License-Identifier: MPL-2.0
+
+name: Resolve the Day dependencies
+description: >-
+  Point a cargo project's Day dependencies at the day this run builds against: the newest
+  release on crates.io, or the head of every Day repository's default branch through
+  `day patch --main`. Needs a Rust toolchain on the runner.
+
+# The one place this decision is made. dayapp.yml's preflight runs it once for the whole matrix
+# and ships the result to the legs; a repository's own jobs (a piece's host tests, a part's
+# cross-target clippy) run it as a step before their cargo commands, so they build against the
+# same day as the demo does.
+#
+# Every Day crate a project depends on comes from crates.io by version. "published" moves each
+# `day-*` crate the lock takes from crates.io to the newest version its requirement accepts.
+# "main" writes the project's `.cargo/config.toml` with `day patch --git <day>@<commit> --main
+# --check`: day at the resolved commit, every other Day repository the graph reaches at the head
+# of its default branch, and a check that nothing from them still resolves from crates.io.
+
+inputs:
+  day-deps:
+    description: >-
+      "published", "main", "locked" (leave the manifest and lock alone), a 40-hex day commit
+      (main, with day pinned to it), or "auto" (default): "published" for a scheduled run, a
+      version tag and a manual run, "main" for anything else.
+    required: false
+    default: auto
+  path:
+    description: The cargo project (the directory with its Cargo.toml), relative to the workspace.
+    required: false
+    default: "."
+  day-version:
+    description: >-
+      The day CLI the caller installs for its build, reported as the `cli` output: "auto"
+      (default) matches it to the day resolved here; anything else is passed through.
+    required: false
+    default: auto
+  day-git:
+    description: Git URL of the day repository.
+    required: false
+    default: https://github.com/daybrite/day.git
+  cache:
+    description: Cache the day CLI this action builds for `day patch` (setup-day-cli's `cache`).
+    required: false
+    default: 'true'
+
+outputs:
+  mode:
+    description: What `day-deps` resolved to for this run, "published", "main" or "locked".
+    value: ${{ steps.pick.outputs.mode }}
+  rev:
+    description: The day commit a "main" run builds against; empty otherwise.
+    value: ${{ steps.pick.outputs.rev }}
+  version:
+    description: The day release a "published" run resolved (`0.6.1`); empty otherwise.
+    value: ${{ steps.published.outputs.version }}
+  cli:
+    description: >-
+      The day CLI to install for the build, as setup-day-cli's `version`: the release binary
+      (`v0.6.1`) under "published", the day commit under "main", `main` under "locked", unless
+      `day-version` named one.
+    value: ${{ steps.pick.outputs.cli || steps.published.outputs.cli }}
+
+runs:
+  using: composite
+  steps:
+    - name: Pick the day to build against
+      id: pick
+      shell: bash
+      env:
+        DEPS_IN: ${{ inputs.day-deps }}
+        VERSION_IN: ${{ inputs.day-version }}
+        DAY_GIT: ${{ inputs.day-git }}
+        EVENT: ${{ github.event_name }}
+        REF: ${{ github.ref }}
+      run: |
+        set -euo pipefail
+        REV=""
+        case "$DEPS_IN" in
+          auto)
+            case "$EVENT" in
+              schedule|workflow_dispatch) MODE=published ;;
+              push) if [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+ ]]; then MODE=published; else MODE=main; fi ;;
+              *) MODE=main ;;
+            esac ;;
+          published|main|locked) MODE="$DEPS_IN" ;;
+          *)
+            [[ "$DEPS_IN" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::day-deps must be auto, published, main, locked, or a full 40-hex day commit (got '$DEPS_IN')"; exit 1; }
+            MODE=main
+            REV="$DEPS_IN" ;;
+        esac
+        if [ "$MODE" = main ] && [ -z "$REV" ]; then
+          REV="$(git ls-remote "$DAY_GIT" refs/heads/main | cut -f1)"
+          [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve main of $DAY_GIT"; exit 1; }
+        fi
+        # Under "published" the CLI is the release the lock resolves, decided once it exists.
+        CLI="$VERSION_IN"
+        if [ "$VERSION_IN" = auto ]; then
+          case "$MODE" in
+            main) CLI="$REV" ;;
+            locked) CLI=main ;;
+            published) CLI="" ;;
+          esac
+        fi
+        {
+          echo "mode=$MODE"
+          echo "rev=$REV"
+          echo "cli=$CLI"
+        } >> "$GITHUB_OUTPUT"
+        echo "day-deps $DEPS_IN on $EVENT → $MODE${REV:+ at $REV}"
+
+    # A lock this checkout can actually resolve, before anything that depends on one.
+    #
+    # `--locked` refuses to CREATE a lock, so a repository that commits none fails there. A
+    # committed lock can be just as unusable: `day patch --local` points the day dependencies at a
+    # checkout on the developer's machine, and cargo then REWRITES Cargo.lock to record those
+    # paths. Commit that and the lock describes a machine nobody else has. Both dead ends have the
+    # same cure: `cargo metadata --locked` is precisely the question "does this lock describe this
+    # checkout, without changing it?", and a no means throw it away and resolve from the manifest.
+    # A healthy lock is left exactly as committed.
+    #
+    # Under "main" the fresh lock is left to `day patch` below, which resolves under its table: a
+    # graph that asks for a day release crates.io does not have yet resolves only there.
+    - name: Prepare Cargo.lock
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        MODE: ${{ steps.pick.outputs.mode }}
+      run: |
+        set -euo pipefail
+        if cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
+          echo "Cargo.lock resolves this checkout as committed"
+        else
+          echo "::notice::Cargo.lock is missing or does not describe this checkout — resolving a fresh one"
+          rm -f Cargo.lock
+          [ "$MODE" = main ] || cargo generate-lockfile
+        fi
+
+    # "published": the newest day release the project's requirements accept. Every day crate (and
+    # every external Day piece or part, `day-*`) the lock takes from crates.io moves to its newest
+    # compatible version; nothing else in the lock does. The release's CLI goes with it, read back
+    # out of the lock rather than asked of crates.io, since the lock is what builds.
+    - name: Update to the newest day release
+      id: published
+      if: steps.pick.outputs.mode == 'published'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        CLI_IN: ${{ steps.pick.outputs.cli }}
+      run: |
+        set -euo pipefail
+        day_crates() {
+          python3 - <<'PY'
+        import pathlib, tomllib
+        lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text())
+        for p in lock.get("package", []):
+            if p["name"].startswith("day-") and p.get("source", "").startswith(("registry+", "sparse+")):
+                print(f'{p["name"]}@{p["version"]}')
+        PY
+        }
+        SPECS=()
+        while IFS= read -r spec; do SPECS+=("$spec"); done < <(day_crates)
+        if [ "${#SPECS[@]}" -eq 0 ]; then
+          echo "::error::Cargo.lock takes no day crate from crates.io — a project that depends on day from git builds with day-deps: locked"
+          exit 1
+        fi
+        ARGS=()
+        for spec in "${SPECS[@]}"; do ARGS+=(-p "$spec"); done
+        cargo update "${ARGS[@]}"
+        VERSION="$(day_crates | sed -n 's/^day-core@//p' | sort -V | tail -1)"
+        [ -n "$VERSION" ] || { echo "::error::no day-core from crates.io in Cargo.lock"; exit 1; }
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "cli=${CLI_IN:-v$VERSION}" >> "$GITHUB_OUTPUT"
+        echo "building against day $VERSION from crates.io" >> "$GITHUB_STEP_SUMMARY"
+
+    # "main": `day patch` needs a CLI that knows `--main`. The newest release's binary takes
+    # seconds to install, which matters on the cross-target legs of a piece's own CI, where every
+    # push to day would otherwise build the CLI from source once per runner image; a release that
+    # predates the flag falls back to the CLI of the commit being patched to (cached per commit).
+    # Only the table comes from it: a caller builds with whatever CLI it installs itself.
+    - name: Set up a day CLI for day patch
+      if: steps.pick.outputs.mode == 'main'
+      uses: daybrite/actions/.github/actions/setup-day-cli@v1
+      with:
+        version: latest
+        git: ${{ inputs.day-git }}
+    - name: Check that it knows day patch --main
+      id: can-patch
+      if: steps.pick.outputs.mode == 'main'
+      shell: bash
+      run: |
+        if "$DAY_BIN" patch --help 2>/dev/null | grep -q -- '--main'; then
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "The newest release's CLI predates day patch --main; building the CLI of the commit instead."
+        fi
+    - name: Set up the day CLI of the commit (for day patch)
+      if: steps.pick.outputs.mode == 'main' && steps.can-patch.outputs.ok != 'true'
+      uses: daybrite/actions/.github/actions/setup-day-cli@v1
+      with:
+        version: ${{ steps.pick.outputs.rev }}
+        git: ${{ inputs.day-git }}
+        cache: ${{ inputs.cache }}
+    - name: Patch to main
+      if: steps.pick.outputs.mode == 'main'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        DAY_GIT: ${{ inputs.day-git }}
+        REV: ${{ steps.pick.outputs.rev }}
+      run: |
+        set -euo pipefail
+        "$DAY_BIN" patch --git "$DAY_GIT@$REV" --main --check
+        cat .cargo/config.toml
+        echo "building against day main at $REV, and every other Day repository at the head of its default branch" >> "$GITHUB_STEP_SUMMARY"

@@ -9,9 +9,10 @@
 # skipped — this repo doesn't tag app releases, and deploy-web is off (it publishes to a live
 # Pages site, which a validation run must not do).
 #
-# day-version is left at its default, "main", so the CLI and the scaffold's git framework
-# dependency come from the same tree. ("latest" would pair the released CLI's template with the
-# framework's main branch, which can skew between releases.)
+# day-version is left at its default, which for a generated project installs "main", and the
+# scaffold takes day from git (`--git`), so the CLI and the framework come from the same tree.
+# ("latest" would pair the released CLI's template with the framework's main branch, which can
+# skew between releases.)
 name: validate
 
 on:

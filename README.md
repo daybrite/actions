@@ -138,7 +138,15 @@ on:
   push:
     branches: ["**"]
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * *"   # nightly, against the newest day release
   workflow_dispatch:
+    inputs:
+      day-main:
+        description: Build against day's main branch instead of the newest release
+        type: boolean
+        default: false
 permissions:
   contents: read    # the repository's own jobs, if any, run its code read-only
 jobs:
@@ -148,6 +156,7 @@ jobs:
       contents: write # release-asset upload on tag builds
     secrets: inherit
     with:
+      day-deps: ${{ inputs.day-main && 'main' || 'auto' }}
       targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-material, harmony-arkui, web-dom
       scripts: dayscript/walkthrough.yaml
       locales: all   # every locale the app ships; or name them, `en fr`
@@ -162,9 +171,9 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | input | type | default | meaning |
 |---|---|---|---|
 | `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-winui`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-material`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
-| `day-version` | string | `main` | Day CLI to install: a branch name of the day repository, built from git (`main` by default), a 40-hex commit, `latest` (newest crates.io release), or `v1.2.3`/`1.2.3` (that release). |
+| `day-deps` | string | `auto` | Which day the project's Day dependencies resolve to; see [Which day a run builds against](#which-day-a-run-builds-against). `published`, `main`, `locked`, a full 40-hex day commit, or `auto`, which picks `published` for a scheduled run, a version tag and a manual run, and `main` for everything else. |
+| `day-version` | string | `auto` | Day CLI to install. `auto` matches it to `day-deps`: the release binary of the published version the lock resolved, a build of the day commit under `main`, or `main` for a `locked` project. Otherwise a branch name of the day repository (built from git), a 40-hex commit, `latest` (the newest release's binary), or `v1.2.3`/`1.2.3` (that release's binary). |
 | `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
-| `day-revision` | string | — | With `update-day-deps: true`, resolve Day dependencies to this full Git commit, for callers sharing one revision across library and demo jobs. Empty follows the app's tracked branch. When dependencies are updated and `day-version` is `main`, the CLI uses the resolved dependency revision too. |
 | `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |
 | `project-path` | string | `.` | Directory of the Day project within the repository. |
 | `flavors` | string | — | [Build flavors](#build-flavors) to add to the matrix, comma- or space-separated. Each name is a `Day-<name>.toml` beside the project's `Day.toml`, and each gets a leg per target built with `DAY_FLAVOR=<name>`. The base app always builds. A flavor leg uploads `flavor-<name>-dist-<target>` and `flavor-<name>-screenshots-<target>`; release assets, notarization, store uploads and Pages stay with the base app. |
@@ -208,7 +217,8 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. A [project website](#project-website-daysite) also deploys on every `vX.Y.Z` tag when this is empty, since a new release changes what its release channel shows. |
 | `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
 | `preflight-exclude` | string | — | Directories the preflight checks leave alone, relative to the repository root (`crates`, `vendor/third-party`), comma-, space- or newline-separated. Workspace members under one are left out: `fmt` then names the remaining members with `-p` instead of `--all` (which also formats path dependencies), and clippy/check/test add `--exclude`. For a Day project added to a repository whose other crates it depends on by path but does not maintain. |
-| `update-day-deps` | boolean | `False` | Refresh the day crates in `Cargo.lock` to the tip of what the app's git dependency tracks, instead of building the locked revision. The lock is resolved once, in preflight, and handed to every leg, so the committed lock is never what a leg builds with; one the checkout cannot resolve is replaced. |
+| `publish-crates` | boolean | `False` | On a semantic-version tag, once every build leg passed, publish the repository's workspace crates to crates.io through Trusted Publishing, with the [`publish-crates`](#publish-crates) action. For a piece's or part's repository, whose demo is the project this workflow builds. |
+| `publish-crates-paths` | string | `.` | With `publish-crates`, the workspaces to publish, relative to the repository root, space-separated and in order: `.`, then any package kept beside it rather than in it (a piece's `gallery`, which depends on the piece). |
 | `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has lanes for it, either a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios` or a `store/storefront.toml` listing that `day store stage` turns into lanes, and the App Store Connect key secrets `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and `DAY_ASC_KEY_B64` are set. `"true"`/`"false"` override. |
 | `upload-macos` | string | — | Sign the built `macos-appkit` bundle into a Mac App Store `.pkg` and upload it on semantic-version tags through `macos-upload-lane`. Empty auto-detects: on when the listing names `mac-app-store` (or a `fastlane/Fastfile` has `platform :mac`), `macos-appkit` is among the targets, and the App Store Connect key and `DAY_MAS_CERT_P12`/`DAY_MAS_CERT_PASSWORD` secrets are set; `"true"`/`"false"` override. |
 | `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/storefront.toml` listing that `day store stage` turns into lanes, when `DAY_PLAY_JSON_KEY` is set; `"true"`/`"false"` override. |
@@ -216,6 +226,32 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
 | `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. The staged lanes are `android validate`, `android upload` (internal track, draft), and `android release` (production track, completed, which is Play's submission). |
 | `store-screenshots` | boolean | `False` | Replace the App Store and Google Play listings' screenshots on each upload with the captures `store/storefront.toml` `[storefront…screenshots]` declares for each store and device kind, taken from this run's own `screenshots-<target>` artifact and checked against each store's rules first. See [Store screenshots](#store-screenshots). |
+
+### Which day a run builds against
+
+Every Day crate an app, piece or part depends on comes from crates.io by version
+(`day = { package = "day-app", version = "0.6" }`), which is what someone who builds it gets. CI
+builds against two days, picked by `day-deps: auto` from the event:
+
+| event | day-deps | what the run builds against |
+|---|---|---|
+| scheduled run, `vX.Y.Z` tag, manual run | `published` | the newest release the requirements accept: preflight runs `cargo update` on every `day-*` crate the lock takes from crates.io, and the legs install that release's CLI binary |
+| push to any branch, pull request, anything else | `main` | the head of every Day repository's default branch: preflight runs `day patch --git <day>@<commit> --main --check`, which takes day at the resolved commit and every external piece or part at its own head, and the legs install the CLI built from that day commit |
+
+Preflight resolves this once and ships the lock (and under `main` the `.cargo/config.toml` patch
+table) to every leg, so a push to day during the run cannot give two legs two frameworks.
+`locked` builds exactly what the manifest and lock say, for a project that pins day from git.
+
+A `main` run fails when a patch goes unused instead of building the release quietly: `day patch
+--check` names the crate. That happens when the requirement does not accept the version on main
+(day's main moved to the next minor before the app raised its requirement) or when a checkout is
+behind the newest release.
+
+For the choice on a manual run, declare a `workflow_dispatch` boolean in the calling workflow and
+pass `day-deps: ${{ inputs.day-main && 'main' || 'auto' }}`, as the example above does. On any
+other event the input is empty, so `auto` decides. A repository's own jobs that run cargo
+themselves (a piece's host tests, say) make the same choice with the
+[`day-deps`](#day-deps) action.
 
 ### Targets and runners
 
@@ -849,8 +885,9 @@ and tests, so a later failure does not lose it. New runners still install NSIS l
 
 ### `setup-day-cli`
 
-Installs the `day` CLI and exports `DAY_BIN` — from crates.io, a git ref, or an artifact this run
-built (`day-source: artifact`, how daybrite/day tests the CLI it just compiled). Source installs
+Installs the `day` CLI and exports `DAY_BIN` — a release's binary (`latest` or a version, checked
+against the release's `SHA256SUMS`), a build from a git ref, or an artifact this run built
+(`day-source: artifact`, how daybrite/day tests the CLI it just compiled). Source installs
 never reuse a build directory: a cached one once handed `--branch main` a stale binary labeled
 with the new commit. With `cache` on (the default), a git install instead caches the finished
 binary under a key naming the commit it was built from, `day-cli-<runner image>-<arch>-<commit>`.
@@ -862,6 +899,61 @@ Two outputs say what was installed. `cargo-root` is the directory cargo installe
 git install, `?rev=<commit>#<short>` for a cached one. `commit` is the full commit a cached
 install was built from. A check that the CLI is a build of `main` reads the record from
 `cargo-root`, since the cache does not install into `~/.cargo`.
+
+### `day-deps`
+
+Resolves a cargo project's Day dependencies to the day the run builds against, the decision
+`dayapp.yml`'s preflight makes for its legs: under `published`, every `day-*` crate the lock takes
+from crates.io moves to its newest compatible release; under `main`, it writes the project's
+`.cargo/config.toml` with `day patch --git <day>@<commit> --main --check`, run by the newest
+release's CLI when it knows `--main`, or else by one built from that commit (cached). `day-deps: auto` picks by the event the same way. Run it after the Rust
+toolchain is installed and before the job's own cargo commands:
+
+```yaml
+host:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: daybrite/actions/.github/actions/day-deps@v1
+      with:
+        day-deps: ${{ inputs.day-main && 'main' || 'auto' }}
+    - run: cargo test
+```
+
+Its outputs say what it chose: `mode`, `rev` (the day commit under `main`), `version` (the
+release under `published`), and `cli` (the matching `setup-day-cli` version).
+
+### `publish-crates`
+
+Publishes every publishable member of a cargo workspace to crates.io: each crate whose `publish`
+is not `false`, at its manifest version, in dependency order, skipping versions crates.io already
+has, so a re-run finishes an interrupted release. crates.io accepts 30 new versions at once and
+then one a minute, and a Trusted Publishing token lasts 30 minutes, so the action authenticates
+three times with up to 25 uploads each and waits out any rate-limit refusal. It ends by asking
+crates.io whether anything is still missing.
+
+```yaml
+publish:
+  runs-on: ubuntu-latest
+  environment: release
+  permissions:
+    id-token: write
+  steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: daybrite/actions/.github/actions/publish-crates@v1
+```
+
+Each crate's trusted publisher on crates.io names the repository, the workflow file that runs the
+job (for `dayapp.yml`'s `publish-crates`, the calling workflow, such as `ci.yml`) and the
+environment `release`. Trusted Publishing can only be configured for a crate that exists, so a new
+crate is reserved first with an empty 0.0.1 placeholder, from a checkout logged in with
+`cargo login`:
+
+```sh
+python3 ../actions/.github/actions/publish-crates/crates-io.py --root . reserve --only <crate>
+```
 
 ### `sign-package`
 
@@ -922,7 +1014,8 @@ queue runs in its signing stage, so the two pipelines sign and upload one way.
 
 `validate.yml` runs on every push and pull request: it scaffolds a fresh app with `day new app`
 and drives it through the reusable workflow for all 7 primary platform-toolkit pairs, with
-`day-version` at its default, `main`, so the CLI and the framework come from the same tree. (It exercises
+`day-version` at its default (`main` for a generated project) and the scaffold's day from git, so
+the CLI and the framework come from the same tree. (It exercises
 `dayapp`'s build/pack path; the web deploy publishes to a live Pages site and so isn't part
 of the validation run.)
 

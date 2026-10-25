@@ -28,14 +28,15 @@ inputs:
 
       Defaults to `Cargo.lock`, because the workflow that calls this WRITES it: `Prepare
       Cargo.lock` resolves one when the committed lock cannot describe the checkout, and
-      `update-day-deps` then moves the day crates with `cargo update -p day-core`. A repository that
-      commits no lock (the reference app tracks day's main, so a lock would pin nothing) gets one
-      created by the first cargo command either way. Failing here would be this workflow objecting
-      to its own edit, which is why the file went unnoticed until a packing job hit it.
+      `day-deps` then moves the day crates to the newest release, or to day's main through a
+      `day patch` table (which dayapp.yml adds to this list). A repository that commits no lock
+      gets one created by the first cargo command either way. Failing here would be this workflow
+      objecting to its own edit, which is why the file went unnoticed until a packing job hit it.
 
-      Excluding it does not weaken the guarantee it exists for: which day revision the artifact was
-      built from is pinned by the preflight and replayed with `--precise` in the build and validate
-      legs, so the rebuild resolves the same graph rather than merely the same file.
+      Excluding it does not weaken the guarantee it exists for: which day the artifact was built
+      from is resolved once by the preflight and shipped to the build and validate legs as the
+      lock (and patch table) they all build with, so the rebuild resolves the same graph rather
+      than merely the same file.
     required: false
     default: "Cargo.lock"
 

@@ -1,14 +1,15 @@
 name: Set up the day CLI
 description: >-
-  Put a `day` CLI on the runner and export DAY_BIN, from crates.io, from git, or from an artifact
-  this run already built.
+  Put a `day` CLI on the runner and export DAY_BIN: a release's binary, a build from git, or an
+  artifact this run already built.
 
 inputs:
   version:
     description: >-
       A branch of the day repository (default `main`, built from git), a 40-hex commit, `latest`
-      (newest crates.io release), or a semver (`v1.2.3` / `1.2.3`). Ignored when `source` is
-      `artifact`.
+      (the newest release), or a semver (`v1.2.3` / `1.2.3`). A release is the binary its GitHub
+      release ships, checked against the release's SHA256SUMS: what `day-installer.sh` installs
+      for a user, in seconds. Ignored when `source` is `artifact`.
     required: false
     default: main
   git:
@@ -28,8 +29,8 @@ inputs:
       Cache a CLI built from git, keyed on the exact commit the branch, tag or commit in `version`
       resolves to: `day-cli-<runner image>-<arch>-<commit>`. A leg whose commit already has a
       cached build restores it instead of compiling; a new commit builds and saves it. Releases
-      from crates.io (`latest`, a semver) and `source: artifact` are not cached. `false` builds
-      every time.
+      (`latest`, a semver), which download a binary, and `source: artifact` are not cached.
+      `false` builds every time.
     required: false
     default: 'true'
 
@@ -39,7 +40,7 @@ outputs:
       The directory cargo installed the CLI into, for `cargo install --list --root <it>`, whose
       `day-cli` line records where the build came from: `?branch=main#<short>` for an uncached git
       install, `?rev=<commit>#<short>` for a cached one, which builds the resolved commit. Empty for
-      `source: artifact`.
+      a release binary and for `source: artifact`.
     value: ${{ steps.cached.outputs.cargo-root || steps.install.outputs.cargo-root }}
   commit:
     description: >-
@@ -98,7 +99,7 @@ runs:
         V="${VERSION_IN:-main}"
         REV=""
         if [ "$V" = latest ] || [[ "$V" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-          echo "A crates.io release ($V) is not cached."
+          echo "A release ($V) downloads its binary; nothing to cache."
           exit 0
         elif [[ "$V" =~ ^[0-9a-fA-F]{40}$ ]]; then
           REV="$(printf '%s' "$V" | tr 'A-F' 'a-f')"
@@ -182,10 +183,55 @@ runs:
       run: |
         set -euo pipefail
         V="${VERSION_IN:-main}"
-        if [ "$V" = latest ]; then
-          cargo install day-cli --locked
-        elif [[ "$V" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-          cargo install day-cli --locked --version "${V#v}"
+        if [ "$V" = latest ] || [[ "$V" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          # The release's own binary for this runner, verified against the release's checksums.
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            macOS-ARM64)   T=aarch64-apple-darwin;      EXT=tar.gz ;;
+            macOS-X64)     T=x86_64-apple-darwin;       EXT=tar.gz ;;
+            Linux-ARM64)   T=aarch64-unknown-linux-gnu; EXT=tar.gz ;;
+            Linux-X64)     T=x86_64-unknown-linux-gnu;  EXT=tar.gz ;;
+            Windows-ARM64) T=aarch64-pc-windows-msvc;   EXT=zip ;;
+            Windows-X64)   T=x86_64-pc-windows-msvc;    EXT=zip ;;
+            *) echo "::error::no day release binary for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
+          esac
+          REPO="${GIT_URL#https://github.com/}"
+          REPO="${REPO%.git}"
+          if [ "$V" = latest ]; then
+            BASE="https://github.com/$REPO/releases/latest/download"
+          else
+            BASE="https://github.com/$REPO/releases/download/v${V#v}"
+          fi
+          ASSET="day-$T.$EXT"
+          DIR="$RUNNER_TEMP/day-cli-release"
+          rm -rf "$DIR"
+          mkdir -p "$DIR"
+          curl -fsSL --retry 3 -o "$DIR/$ASSET" "$BASE/$ASSET"
+          curl -fsSL --retry 3 -o "$DIR/SHA256SUMS" "$BASE/SHA256SUMS"
+          WANT="$(awk -v f="$ASSET" '$2 == f || $2 == "*" f { print $1 }' "$DIR/SHA256SUMS")"
+          if command -v sha256sum >/dev/null; then
+            GOT="$(sha256sum "$DIR/$ASSET" | cut -d' ' -f1)"
+          else
+            GOT="$(shasum -a 256 "$DIR/$ASSET" | cut -d' ' -f1)"
+          fi
+          if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
+            echo "::error::$ASSET does not match the release's SHA256SUMS (want '${WANT:-none}', got $GOT)"
+            exit 1
+          fi
+          if [ "$EXT" = zip ]; then
+            unzip -q "$DIR/$ASSET" -d "$DIR/bin"
+            BIN="$DIR/bin/day.exe"
+            printf '%s\n' "$RUNNER_TEMP\\day-cli-release\\bin" >> "$GITHUB_PATH"
+          else
+            mkdir -p "$DIR/bin"
+            tar -xzf "$DIR/$ASSET" -C "$DIR/bin"
+            BIN="$DIR/bin/day"
+            echo "$DIR/bin" >> "$GITHUB_PATH"
+          fi
+          chmod +x "$BIN" 2>/dev/null || true
+          echo "DAY_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "cargo-root=" >> "$GITHUB_OUTPUT"
+          "$BIN" version
+          exit 0
         elif [[ "$V" =~ ^[0-9a-fA-F]{40}$ ]]; then
           cargo install day-cli --locked --git "$GIT_URL" --rev "$V"
         else

@@ -10,57 +10,134 @@ WORKFLOW = yaml.safe_load((Path(__file__).parents[1] / '.github/workflows/dayapp
 STEPS = WORKFLOW['jobs']['build']['steps']
 
 
-class DayRevisionTests(unittest.TestCase):
-    """Execute the dependency resolver with synthetic Cargo output; no network or Git writes."""
+DAY_DEPS = yaml.safe_load((Path(__file__).parents[1] / '.github/actions/day-deps/action.yml').read_text())
 
-    def resolve(self, requested='', resolved='a' * 40, cargo_exit='0'):
+
+def preflight_step(step_id):
+    return next(s['run'] for s in WORKFLOW['jobs']['preflight']['steps'] if s.get('id') == step_id)
+
+
+def day_deps_step(step_id):
+    return next(s['run'] for s in DAY_DEPS['runs']['steps'] if s.get('id') == step_id)
+
+
+class DayDepsTests(unittest.TestCase):
+    """Execute the day-deps resolver with a synthetic git; no network."""
+
+    def pick(self, deps='auto', event='push', ref='refs/heads/main', version='auto'):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            git = root / 'git'
+            git.write_text('#!/usr/bin/env bash\nprintf "%s\\trefs/heads/main\\n" "$FIXTURE_TIP"\n')
+            git.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH'],
+                       DEPS_IN=deps, VERSION_IN=version, DAY_GIT='https://example.invalid/day.git',
+                       EVENT=event, REF=ref, FIXTURE_TIP='c' * 40,
+                       GITHUB_OUTPUT=str(root / 'output'))
+            result = subprocess.run(['bash', '-c', day_deps_step('pick')], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            out = (root / 'output').read_text() if (root / 'output').exists() else ''
+            return result, dict(line.split('=', 1) for line in out.splitlines())
+
+    def test_a_push_builds_against_main_with_its_cli(self):
+        result, out = self.pick()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out, {'mode': 'main', 'rev': 'c' * 40, 'cli': 'c' * 40})
+
+    def test_schedule_tag_and_dispatch_build_against_the_release(self):
+        for event, ref in [('schedule', 'refs/heads/main'), ('push', 'refs/tags/v1.2.3'),
+                           ('workflow_dispatch', 'refs/heads/main')]:
+            result, out = self.pick(event=event, ref=ref)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # The release's CLI is decided once the lock names the version.
+            self.assertEqual(out, {'mode': 'published', 'rev': '', 'cli': ''}, event)
+
+    def test_a_pull_request_builds_against_main(self):
+        result, out = self.pick(event='pull_request', ref='refs/pull/1/merge')
+        self.assertEqual(out['mode'], 'main')
+
+    def test_a_commit_pins_day_and_its_cli(self):
+        result, out = self.pick(deps='b' * 40, event='schedule')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out, {'mode': 'main', 'rev': 'b' * 40, 'cli': 'b' * 40})
+
+    def test_locked_keeps_the_lock_and_installs_main(self):
+        result, out = self.pick(deps='locked')
+        self.assertEqual(out, {'mode': 'locked', 'rev': '', 'cli': 'main'})
+
+    def test_an_explicit_cli_wins(self):
+        result, out = self.pick(version='v0.6.0')
+        self.assertEqual(out['cli'], 'v0.6.0')
+
+    def test_a_generated_project_installs_main_unless_told(self):
+        for version, want in [('auto', 'main'), ('v0.6.0', 'v0.6.0')]:
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / 'output'
+                env = dict(os.environ, VERSION_IN=version, GITHUB_OUTPUT=str(output))
+                subprocess.run(['bash', '-c', preflight_step('generated')], env=env, check=True)
+                self.assertEqual(output.read_text(), f'cli={want}\n')
+
+    def test_nonsense_is_refused(self):
+        result, out = self.pick(deps='mian')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(out, {})
+
+
+PUBLISHED_LOCK = '''version = 4
+
+[[package]]
+name = "day-core"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "day-piece-charts"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "day-rise"
+version = "0.5.0"
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+'''
+
+
+class PublishedDepsTests(unittest.TestCase):
+    """Execute the newest-release updater with a synthetic cargo."""
+
+    def update(self, lock, cli=''):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Cargo.lock').write_text(lock)
             cargo = root / 'cargo'
-            cargo.write_text('''#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$ARG_LOG"
-if [[ "$FIXTURE_CARGO_EXIT" != 0 ]]; then exit "$FIXTURE_CARGO_EXIT"; fi
-printf '[[package]]\\nname = "day-core"\\nversion = "0.0.0"\\nsource = "git+https://example.invalid/day#%s"\\n' "$FIXTURE_REVISION" > Cargo.lock
-''')
+            cargo.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$ARG_LOG"\n')
             cargo.chmod(0o755)
             env = dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH'],
-                       DAY_REVISION_IN=requested, FIXTURE_REVISION=resolved,
-                       FIXTURE_CARGO_EXIT=cargo_exit, ARG_LOG=str(root / 'args'),
+                       CLI_IN=cli, ARG_LOG=str(root / 'args'),
                        GITHUB_OUTPUT=str(root / 'output'), GITHUB_STEP_SUMMARY=str(root / 'summary'))
-            script = next(s['run'] for s in WORKFLOW['jobs']['preflight']['steps']
-                          if s.get('id') == 'day-dep')
-            result = subprocess.run(['bash', '-c', script], cwd=root, env=env,
+            result = subprocess.run(['bash', '-c', day_deps_step('published')], cwd=root, env=env,
                                     capture_output=True, text=True)
             read = lambda name: (root / name).read_text() if (root / name).exists() else ''
             return result, read('args'), read('output')
 
-    def test_default_resolves_tracked_tip(self):
-        result, args, output = self.resolve()
+    def test_only_day_crates_move_and_the_release_cli_follows(self):
+        result, args, output = self.update(PUBLISHED_LOCK)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(args, 'update -p day-core\n')
-        self.assertEqual(output, 'rev=' + 'a' * 40 + '\n')
+        self.assertEqual(args, 'update -p day-core@0.6.1 -p day-piece-charts@0.4.2\n')
+        self.assertEqual(output, 'version=0.6.1\ncli=v0.6.1\n')
 
-    def test_caller_revision_is_used_and_reported(self):
-        revision = 'b' * 40
-        result, args, output = self.resolve(revision, revision)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(args, 'update -p day-core --precise ' + revision + '\n')
-        self.assertEqual(output, 'rev=' + revision + '\n')
+    def test_an_explicit_cli_is_kept(self):
+        result, _, output = self.update(PUBLISHED_LOCK, cli='main')
+        self.assertIn('cli=main\n', output)
 
-    def test_invalid_revision_never_reaches_cargo(self):
-        result, args, output = self.resolve('main')
+    def test_a_lock_without_published_day_crates_is_refused(self):
+        result, args, output = self.update('version = 4\n')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((args, output), ('', ''))
-
-    def test_wrong_resolved_revision_is_not_published(self):
-        result, _, output = self.resolve('b' * 40)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(output, '')
-
-    def test_cargo_failure_is_not_published(self):
-        result, _, output = self.resolve(cargo_exit='7')
-        self.assertEqual(result.returncode, 7)
-        self.assertEqual(output, '')
 
 
 class ScriptSetupTests(unittest.TestCase):

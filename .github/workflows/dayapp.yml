@@ -80,26 +80,35 @@ on:
           `day project add-target` reaches CI without a second edit.
         type: string
         required: true
+      day-deps:
+        description: >-
+          Which day the project's Day dependencies resolve to. "published": the newest release
+          on crates.io its version requirements accept (the lock's day crates are updated to
+          it). "main": the head of each Day repository's default branch, through `day patch
+          --main` (a full 40-hex day commit instead pins day itself to that commit). "locked":
+          exactly what the manifest and Cargo.lock say, for a project that takes day from git at
+          a pinned revision. "auto" (default) picks by the event: a scheduled run and a version
+          tag build against "published", what someone who builds the app gets; a push to any
+          branch, a pull request, and anything else build against "main", so a change there
+          that breaks the app shows up before it is released; a manual run takes "published",
+          and a caller that wants a choice there declares a `workflow_dispatch` boolean of its
+          own and passes "main" when it is ticked (see the README). The day revision (or
+          release) is resolved once, in preflight, and every leg builds the same one.
+        type: string
+        default: auto
       day-version:
         description: >-
-          Which day CLI to install: a branch name of the day repository, built from git (the
-          default, "main", so an app builds with the CLI its git dependency on day tracks), a
-          40-hex commit, "latest" (newest crates.io release), or a semantic version ("v1.2.3" or
-          "1.2.3", from crates.io).
+          Which day CLI to install. "auto" (default) matches the CLI to the day the run builds
+          against: the release binary of the published version the lock resolved, or a build of
+          the day commit under "main", or `main` for a "locked" project. Otherwise a branch name
+          of the day repository (built from git), a 40-hex commit, "latest" (the newest release
+          binary), or a semantic version ("v1.2.3" or "1.2.3", that release's binary).
         type: string
-        default: main
+        default: auto
       day-git:
         description: Git URL of the day repository, for branch/commit installs.
         type: string
         default: https://github.com/daybrite/day.git
-      day-revision:
-        description: >-
-          Optional full Git commit for Day dependencies when update-day-deps is true. A caller
-          that resolves day/main once can share that revision with its library jobs and demo.
-          Empty resolves the tip tracked by the app. Set day-version to the same revision
-          to also pin the CLI, or leave day-version at main to use the resolved dependency revision.
-        type: string
-        default: ""
       day-verbose:
         description: >-
           Run the day CLI verbose (DAY_VERBOSE=1): every `day build`/`launch`/`pack`/`rebuild`
@@ -165,7 +174,7 @@ on:
           Optional shell command run at the repository root after the day CLI is installed and
           before anything else (e.g. `day new app …` to scaffold the project under test).
           Setting it marks the project as GENERATED, which skips the preflight checks,
-          `update-day-deps` and the pristine check. For what one target needs on a checked-out
+          `day-deps` and the pristine check. For what one target needs on a checked-out
           project, use `target-packages` and `target-setup` instead.
         type: string
         default: ""
@@ -221,7 +230,7 @@ on:
                 linux-qt: echo "QT_MEDIA_BACKEND=gstreamer" >> "$GITHUB_ENV"
 
           Unlike `setup-command`, neither this nor `target-packages` marks the project as
-          generated: the preflight checks, `update-day-deps` and the pristine check all still
+          generated: the preflight checks, `day-deps` and the pristine check all still
           apply, so anything a command downloads or writes belongs under `$RUNNER_TEMP`.
         type: string
         default: ""
@@ -729,24 +738,26 @@ on:
         type: string
         required: false
         default: ""
-      update-day-deps:
+      publish-crates:
         description: >-
-          Refresh the day crates in Cargo.lock to the tip of what the app's git dependency tracks,
-          or to day-revision when the caller has already resolved that tip, instead of building
-          the revision the committed lock pins. Off by default: an app wants
-          its lock honoured, which is what makes a build reproducible and what lets the checks
-          above pass `--locked`. Turn it on for a repository whose job is to prove the CURRENT
-          framework still builds — the reference app — where a lock pinned at whatever revision
-          it was generated against would silently stop testing day at all.
-          The lock is resolved ONCE, in preflight, and handed to every build and validate leg as
-          an artifact, so no leg reads the committed lock at all: a lock that cannot be resolved
-          (one `day patch --local` rewrote, say) is replaced, not built. Resolving per job instead
-          would let a push land mid-run and give `validate-rebuild` two different framework
-          revisions to compare, which fails as an unreproducible build when nothing is actually
-          wrong.
+          On a semantic-version tag, publish the repository's workspace crates to crates.io,
+          after every build leg passed: each member whose `publish` is not false, at its
+          manifest version, in dependency order, skipping a version crates.io already has (so a
+          re-run finishes what an interrupted one started), through crates.io Trusted
+          Publishing. Configure each crate's trusted publisher as this repository, the CALLING
+          workflow's file name, and the environment `release`. A crate name crates.io has never
+          seen must be published once by hand first (see the README).
         type: boolean
         required: false
         default: false
+      publish-crates-paths:
+        description: >-
+          With publish-crates, the workspaces to publish, relative to the repository root,
+          space-separated and in order: "." (default), then any package the repository keeps
+          beside it rather than in it, such as a piece's `gallery`, which depends on the piece.
+        type: string
+        required: false
+        default: "."
       upload-ios:
         description: >-
           Upload the packed .ipa to App Store Connect on semantic-version tags, via the app's own
@@ -909,9 +920,16 @@ jobs:
       # The plan's Pages decisions, after the check that github-pages admits a tag.
       deploy_web: ${{ steps.pages.outputs.deploy_web }}
       website: ${{ steps.pages.outputs.website }}
-      # The day revision every leg builds against, under inputs.update-day-deps. Empty when the
-      # input is off, which is the signal each leg reads to leave the committed lock alone.
-      day-rev: ${{ steps.day-dep.outputs.rev }}
+      # What inputs.day-deps resolved to for this run: published, main, or locked (always locked
+      # for a setup-command caller, whose project does not exist yet).
+      day-deps: ${{ steps.deps.outputs.mode || 'locked' }}
+      # The day commit a "main" run builds against; empty otherwise.
+      day-rev: ${{ steps.deps.outputs.rev }}
+      # The day CLI every leg installs (setup-day-cli's `version`), from inputs.day-version.
+      day-cli: ${{ steps.deps.outputs.cli || steps.generated.outputs.cli }}
+      # 'true' when preflight resolved the lock (and, under main, the patch table) the legs
+      # build with, shipped as the day-lock artifact; empty when the committed lock stands.
+      day-lock: ${{ steps.ship.outputs.shipped }}
     steps:
       # A full checkout, not the old website/site.toml sparse one: the first-pass checks read the
       # whole workspace and the store-upload detection greps the repo's Fastfiles.
@@ -928,7 +946,7 @@ jobs:
       # deep into their builds — that is the point of a preflight. Skipped for setup-command
       # callers: their project is generated later, so there is no source here to check.
       - uses: dtolnay/rust-toolchain@stable
-        if: inputs.setup-command == '' && (inputs.preflight-checks != '' || inputs.update-day-deps)
+        if: inputs.setup-command == ''
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -936,84 +954,59 @@ jobs:
         with:
           workspaces: ${{ inputs.project-path }}
 
-      # A lock this checkout can actually resolve, before anything that depends on one.
-      #
-      # `--locked` below refuses to CREATE a lock, so a repository that commits none fails there.
-      # A committed lock can be just as unusable: `day patch --local` points the day dependencies
-      # at a checkout on the developer's machine, and cargo then REWRITES Cargo.lock to record
-      # those paths. Commit that and the lock describes a machine nobody else has — every day
-      # crate loses its `source`, so there is no day package from git to update and no revision
-      # to read back. Both dead ends have the same cure, so neither is worth distinguishing:
-      # `cargo metadata --locked` is precisely the question "does this lock describe this
-      # checkout, without changing it?", and a no means throw it away and resolve from the
-      # manifest. A healthy lock is left exactly as committed, which is what keeps `--locked`
-      # meaningful for the repositories that do pin.
-      - name: Prepare Cargo.lock
-        if: inputs.setup-command == '' && (inputs.preflight-checks != '' || inputs.update-day-deps)
-        working-directory: ${{ inputs.project-path }}
-        run: |
-          set -euo pipefail
-          if cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
-            echo "Cargo.lock resolves this checkout as committed"
-          else
-            echo "::notice::Cargo.lock is missing or does not describe this checkout — resolving a fresh one"
-            rm -f Cargo.lock
-            cargo generate-lockfile
-          fi
-
-      # Track the branch instead of the lock (inputs.update-day-deps). Must come BEFORE the checks
-      # below: they pass `--locked`, which fails outright on a lock that needs updating.
-      #
-      # Every day crate comes from one git source with no revision pinned in Cargo.toml, so they
-      # share a single locked revision and `-p day-core` moves all of them together. day-core, not
-      # the umbrella: every app reaches it, whatever key or package name (`day-app`) it gives the
-      # umbrella.
-      - name: Resolve the day revision to track
-        id: day-dep
-        if: inputs.setup-command == '' && inputs.update-day-deps
-        working-directory: ${{ inputs.project-path }}
+      # Which day this run builds against (inputs.day-deps), resolved once for every leg: the
+      # newest release, or the head of every Day repository's default branch through
+      # `day patch --main` (see the day-deps action). It also prepares a lock the checkout can
+      # resolve, which the checks below need: `--locked` refuses to create one.
+      - name: Resolve the Day dependencies
+        id: deps
+        if: inputs.setup-command == ''
+        uses: daybrite/actions/.github/actions/day-deps@v1
+        with:
+          day-deps: ${{ inputs.day-deps }}
+          path: ${{ inputs.project-path }}
+          day-version: ${{ inputs.day-version }}
+          day-git: ${{ inputs.day-git }}
+          cache: ${{ inputs.day-cache }}
+      # A setup-command caller generates its project later, so there are no dependencies to
+      # resolve here: the scaffold depends on whatever the CLI that writes it was built from, and
+      # only the CLI is decided.
+      - name: Pick the day CLI (generated project)
+        id: generated
+        if: inputs.setup-command != ''
         env:
-          DAY_REVISION_IN: ${{ inputs.day-revision }}
+          VERSION_IN: ${{ inputs.day-version }}
         run: |
           set -euo pipefail
-          if [[ -n "$DAY_REVISION_IN" ]]; then
-            [[ "$DAY_REVISION_IN" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::day-revision must be a full Git commit"; exit 1; }
-            cargo update -p day-core --precise "$DAY_REVISION_IN"
-          else
-            cargo update -p day-core
-          fi
-          # Read the revision back out of the lock rather than asking git for the branch tip: the
-          # lock is what the build actually uses, and it is the app's own Cargo.toml that decides
-          # which repository and branch that is — this workflow does not get to assume.
-          REV=$(python3 - <<'PY'
-          import re, pathlib, sys
-          for blk in pathlib.Path("Cargo.lock").read_text().split("[[package]]"):
-              if re.search(r'^name = "day-core"$', blk, re.M):
-                  m = re.search(r'^source = "git\+[^"]*#(\w+)"', blk, re.M)
-                  if m:
-                      print(m.group(1)); sys.exit(0)
-          sys.exit("no git-sourced `day-core` package in Cargo.lock — is this a Day app tracking day by git?")
-          PY
-          )
-          if [[ -n "$DAY_REVISION_IN" && "$REV" != "$DAY_REVISION_IN" ]]; then
-            echo "::error::Resolved Day revision $REV differs from requested $DAY_REVISION_IN"
-            exit 1
-          fi
-          echo "rev=$REV" >> "$GITHUB_OUTPUT"
-          echo "tracking day at $REV" >> "$GITHUB_STEP_SUMMARY"
+          CLI="$VERSION_IN"
+          [ "$CLI" != auto ] || CLI=main
+          echo "cli=$CLI" >> "$GITHUB_OUTPUT"
 
-      # The lock every leg builds with. Each leg checks the repository out afresh, so the lock
-      # prepared above would otherwise stay here: a leg would start from the COMMITTED lock and
-      # repeat the resolution, and a committed lock that `Prepare Cargo.lock` had to throw away
-      # would fail it (`cargo update -p day-core` finds no git-sourced `day-core` in a lock
-      # `day patch --local` rewrote). Shipping the file instead means the legs never read the committed
-      # lock, and all of them build the same resolution of every crate, not only day.
+      # The lock (and, under main, the patch table) every leg builds with. Each leg checks the
+      # repository out afresh, so what was resolved above would otherwise stay here: a leg would
+      # start from the COMMITTED lock and repeat the resolution, and with it, a push that lands
+      # mid-run would give two legs (and `validate-rebuild` its comparison) two different
+      # framework revisions. Shipping the files instead means every leg builds the same
+      # resolution of every crate, not only day.
       - name: Upload the lock the legs build with
-        if: inputs.setup-command == '' && inputs.update-day-deps
-        uses: actions/upload-artifact@v7
+        id: ship
+        if: inputs.setup-command == '' && steps.deps.outputs.mode != 'locked'
+        env:
+          PROJECT: ${{ inputs.project-path }}
+        run: |
+          set -euo pipefail
+          DIR="$RUNNER_TEMP/day-lock"
+          mkdir -p "$DIR/.cargo"
+          cp "$PROJECT/Cargo.lock" "$DIR/"
+          [ ! -f "$PROJECT/.cargo/config.toml" ] || cp "$PROJECT/.cargo/config.toml" "$DIR/.cargo/"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "shipped=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        if: steps.ship.outputs.shipped == 'true'
         with:
           name: ${{ inputs.artifact-prefix }}day-lock
-          path: ${{ inputs.project-path }}/Cargo.lock
+          path: ${{ steps.ship.outputs.dir }}
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
@@ -1725,12 +1718,12 @@ jobs:
           targets: ${{ matrix.rust_targets }}
       - uses: Swatinem/rust-cache@v2
 
-      # The lock preflight resolved (inputs.update-day-deps), over the committed one: every leg
-      # of the matrix then compiles the SAME framework revision even if someone pushes to day
-      # while the run is in flight, and a committed lock the checkout cannot resolve is never
-      # read. Empty output = the input is off, and the committed lock stands.
+      # The lock (and patch table) preflight resolved (inputs.day-deps), over the committed lock:
+      # every leg of the matrix then compiles the SAME framework revision even if someone pushes
+      # to day while the run is in flight, and a committed lock the checkout cannot resolve is
+      # never read. Empty output = a "locked" run, and the committed lock stands.
       - name: Use the lock preflight resolved
-        if: needs.preflight.outputs.day-rev != ''
+        if: needs.preflight.outputs.day-lock == 'true'
         uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.artifact-prefix }}day-lock
@@ -1740,7 +1733,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -1836,11 +1829,14 @@ jobs:
         uses: daybrite/actions/.github/actions/assert-pristine@v1
         with:
           # The project directory, so the action's default `Cargo.lock` ignore names THIS
-          # project's lock — the one `Prepare Cargo.lock` and `update-day-deps` rewrite — even
+          # project's lock — the one `Prepare Cargo.lock` and `day-deps` rewrite — even
           # when the project lives in a subdirectory of its repository (a piece's `demo/`).
           # The whole repository is still checked: git status reports every path from any
           # directory.
           path: ${{ inputs.project-path }}
+          # And the patch table a "main" run builds under, which preflight wrote and every leg
+          # downloaded: the scaffold's .gitignore lists it, but a repository may not.
+          ignore: Cargo.lock .cargo/config.toml
           # A `setup-command` caller scaffolds the project into the workspace, so the tree is
           # untracked BY DESIGN and no commit describes what gets packed. Skipping says that out
           # loud rather than failing on a condition the caller cannot fix.
@@ -2680,7 +2676,7 @@ jobs:
       # of the job: `day rebuild` compares its output against the artifact built above, so a
       # different revision of any crate would read as an unreproducible build.
       - name: Use the lock preflight resolved
-        if: needs.preflight.outputs.day-rev != ''
+        if: needs.preflight.outputs.day-lock == 'true'
         uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.artifact-prefix }}day-lock
@@ -2689,7 +2685,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3024,7 +3020,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3102,6 +3098,32 @@ jobs:
           name: signed-update-metadata
           path: signed-updates/
           if-no-files-found: error
+
+  # The repository's crates on crates.io (inputs.publish-crates), on a version tag once every
+  # build leg passed: a piece's or part's library, published from the commit whose demo just built
+  # on every target. Its own job, so the release-assets job's environment and grants stay
+  # separate, and so a crates.io refusal can be re-run on its own.
+  crates:
+    name: publish crates
+    needs: [preflight, build]
+    if: >-
+      ${{ !cancelled()
+          && inputs.publish-crates
+          && needs.preflight.outputs.release == 'true'
+          && needs.preflight.outputs.promotion != 'true'
+          && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    # Each crate's trusted publisher names this environment.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # the crates.io Trusted Publishing token
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: daybrite/actions/.github/actions/publish-crates@v1
+        with:
+          path: ${{ inputs.publish-crates-paths }}
 
   release:
     name: release assets
@@ -3236,7 +3258,7 @@ jobs:
         continue-on-error: true
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3560,7 +3582,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3681,7 +3703,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -3788,7 +3810,7 @@ jobs:
       - name: Set up the day CLI
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
@@ -4109,7 +4131,7 @@ jobs:
         continue-on-error: true
         uses: daybrite/actions/.github/actions/setup-day-cli@v1
         with:
-          version: ${{ inputs.day-version == 'main' && needs.preflight.outputs.day-rev || inputs.day-version }}
+          version: ${{ needs.preflight.outputs.day-cli }}
           git: ${{ inputs.day-git }}
           source: ${{ inputs.day-source }}
           cache: ${{ inputs.day-cache }}
