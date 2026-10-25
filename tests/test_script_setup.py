@@ -20,7 +20,7 @@ class DayRevisionTests(unittest.TestCase):
             cargo.write_text('''#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$ARG_LOG"
 if [[ "$FIXTURE_CARGO_EXIT" != 0 ]]; then exit "$FIXTURE_CARGO_EXIT"; fi
-printf '[[package]]\\nname = "day"\\nversion = "0.0.0"\\nsource = "git+https://example.invalid/day#%s"\\n' "$FIXTURE_REVISION" > Cargo.lock
+printf '[[package]]\\nname = "day-core"\\nversion = "0.0.0"\\nsource = "git+https://example.invalid/day#%s"\\n' "$FIXTURE_REVISION" > Cargo.lock
 ''')
             cargo.chmod(0o755)
             env = dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH'],
@@ -37,14 +37,14 @@ printf '[[package]]\\nname = "day"\\nversion = "0.0.0"\\nsource = "git+https://e
     def test_default_resolves_tracked_tip(self):
         result, args, output = self.resolve()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(args, 'update -p day\n')
+        self.assertEqual(args, 'update -p day-core\n')
         self.assertEqual(output, 'rev=' + 'a' * 40 + '\n')
 
     def test_caller_revision_is_used_and_reported(self):
         revision = 'b' * 40
         result, args, output = self.resolve(revision, revision)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(args, 'update -p day --precise ' + revision + '\n')
+        self.assertEqual(args, 'update -p day-core --precise ' + revision + '\n')
         self.assertEqual(output, 'rev=' + revision + '\n')
 
     def test_invalid_revision_never_reaches_cargo(self):

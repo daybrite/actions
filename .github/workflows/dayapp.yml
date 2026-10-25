@@ -936,7 +936,7 @@ jobs:
       # A committed lock can be just as unusable: `day patch --local` points the day dependencies
       # at a checkout on the developer's machine, and cargo then REWRITES Cargo.lock to record
       # those paths. Commit that and the lock describes a machine nobody else has — every day
-      # crate loses its `source`, so there is no `day` package from git to update and no revision
+      # crate loses its `source`, so there is no day package from git to update and no revision
       # to read back. Both dead ends have the same cure, so neither is worth distinguishing:
       # `cargo metadata --locked` is precisely the question "does this lock describe this
       # checkout, without changing it?", and a no means throw it away and resolve from the
@@ -959,7 +959,9 @@ jobs:
       # below: they pass `--locked`, which fails outright on a lock that needs updating.
       #
       # Every day crate comes from one git source with no revision pinned in Cargo.toml, so they
-      # share a single locked revision and `-p day` moves all of them together.
+      # share a single locked revision and `-p day-core` moves all of them together. day-core, not
+      # the umbrella: every app reaches it, whatever key or package name (`day-app`) it gives the
+      # umbrella.
       - name: Resolve the day revision to track
         id: day-dep
         if: inputs.setup-command == '' && inputs.update-day-deps
@@ -970,9 +972,9 @@ jobs:
           set -euo pipefail
           if [[ -n "$DAY_REVISION_IN" ]]; then
             [[ "$DAY_REVISION_IN" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::day-revision must be a full Git commit"; exit 1; }
-            cargo update -p day --precise "$DAY_REVISION_IN"
+            cargo update -p day-core --precise "$DAY_REVISION_IN"
           else
-            cargo update -p day
+            cargo update -p day-core
           fi
           # Read the revision back out of the lock rather than asking git for the branch tip: the
           # lock is what the build actually uses, and it is the app's own Cargo.toml that decides
@@ -980,11 +982,11 @@ jobs:
           REV=$(python3 - <<'PY'
           import re, pathlib, sys
           for blk in pathlib.Path("Cargo.lock").read_text().split("[[package]]"):
-              if re.search(r'^name = "day"$', blk, re.M):
+              if re.search(r'^name = "day-core"$', blk, re.M):
                   m = re.search(r'^source = "git\+[^"]*#(\w+)"', blk, re.M)
                   if m:
                       print(m.group(1)); sys.exit(0)
-          sys.exit("no git-sourced `day` package in Cargo.lock — is this a Day app tracking day by git?")
+          sys.exit("no git-sourced `day-core` package in Cargo.lock — is this a Day app tracking day by git?")
           PY
           )
           if [[ -n "$DAY_REVISION_IN" && "$REV" != "$DAY_REVISION_IN" ]]; then
@@ -997,8 +999,8 @@ jobs:
       # The lock every leg builds with. Each leg checks the repository out afresh, so the lock
       # prepared above would otherwise stay here: a leg would start from the COMMITTED lock and
       # repeat the resolution, and a committed lock that `Prepare Cargo.lock` had to throw away
-      # would fail it (`cargo update -p day` finds no git-sourced `day` in a lock `day patch
-      # --local` rewrote). Shipping the file instead means the legs never read the committed
+      # would fail it (`cargo update -p day-core` finds no git-sourced `day-core` in a lock
+      # `day patch --local` rewrote). Shipping the file instead means the legs never read the committed
       # lock, and all of them build the same resolution of every crate, not only day.
       - name: Upload the lock the legs build with
         if: inputs.setup-command == '' && inputs.update-day-deps
@@ -2553,10 +2555,57 @@ jobs:
           # Uploaded even when the leg fails, so a re-run of the failed leg must replace it: the
           # website then assembles the re-run's screenshots with the other legs' first ones.
           overwrite: true
-      # The emulator's own output, kept by `day devices boot` on the host. A walkthrough that ends
-      # in "the device stopped answering" leaves no crash to find — the guest froze, and every adb
-      # call after that returns nothing — so what the emulator wrote is the one record of why.
-      # The CLI prints its tail into the job log; the whole file goes here.
+      # A dead emulator cannot supply an app crash log. Preserve host pressure and kernel
+      # evidence too, and bound every guest probe so diagnostics cannot hang the failed job.
+      - name: Collect Android failure diagnostics
+        if: failure() && matrix.target == 'android-material'
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          python3 - <<'PY'
+          import os, shutil, subprocess
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'android-diagnostics'
+          root.mkdir(parents=True, exist_ok=True)
+          adb = Path(os.environ.get('ANDROID_HOME', '')) / 'platform-tools' / 'adb'
+          adb = str(adb) if adb.is_file() else shutil.which('adb') or 'adb'
+          probes = {
+              'host-memory': ['free', '-m'],
+              'host-processes': ['ps', '-eo', 'pid,ppid,pcpu,pmem,rss,stat,comm'],
+              'host-disk': ['df', '-h'],
+              'host-kernel': ['journalctl', '-k', '--no-pager', '-n', '250'],
+              'devices': [adb, 'devices', '-l'],
+              'guest-memory': [adb, 'shell', 'dumpsys', 'meminfo'],
+              'guest-exits': [adb, 'shell', 'dumpsys', 'activity', 'exit-info'],
+              'guest-anr': [adb, 'shell', 'dumpsys', 'dropbox', '--print', 'data_app_anr'],
+              'guest-logcat': [adb, 'logcat', '-b', 'all', '-d', '-t', '2000'],
+          }
+          for name, command in probes.items():
+              with (root / (name + '.log')).open('w') as output:
+                  try:
+                      result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT,
+                                              timeout=10, check=False)
+                      output.write('\nexit code: ' + str(result.returncode) + '\n')
+                  except (OSError, subprocess.TimeoutExpired) as error:
+                      output.write('\nprobe unavailable: ' + str(error) + '\n')
+          for name in ['memory', 'cpu', 'io']:
+              try:
+                  (root / ('host-pressure-' + name + '.log')).write_text(
+                      Path('/proc/pressure', name).read_text())
+              except OSError:
+                  pass
+          PY
+      - name: Upload Android failure diagnostics
+        if: failure() && matrix.target == 'android-material'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-prefix }}android-diagnostics-${{ matrix.shots_artifact }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/android-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+      # The CLI prints the emulator log's tail into the job log; retain the whole file too.
       - name: Upload the emulator log (android-material)
         if: failure() && matrix.target == 'android-material'
         uses: actions/upload-artifact@v7

@@ -49,6 +49,12 @@ suffix separates targets, device profiles and flavors; rerun attempts retain ear
 directories to avoid collisions. `dayscript_report_summary: false` skips the summary job;
 collection and uploads remain enabled. The summary action writes to `GITHUB_STEP_SUMMARY`.
 
+Failed Android legs also upload host memory, process, disk and kernel diagnostics, plus
+device memory, process-exit records, application ANR traces and recent logcat output when ADB still responds.
+Each probe has a ten-second timeout, so a frozen emulator cannot stall collection.
+These files supplement the emulator log and help distinguish app crashes from guest or
+runner failures. They do not retry a failed walkthrough or change its result.
+
 ### The screenshot bundle
 
 Beside the packages, a release carries every capture the run took:
@@ -784,7 +790,8 @@ that assert on audio-only playback with `skip_on: [windows-winui]`.
 ### Requirements
 
 - The project's `Cargo.toml` must resolve its `day` dependencies on a runner — a git dependency
-  (`day = { git = "https://github.com/daybrite/day.git" }`, the `day new app --git` default), not
+  (`day = { package = "day-app", git = "https://github.com/daybrite/day.git" }`, the
+  `day new app --git` default), not
   a local path. For local-checkout development, put a `[patch]` in a gitignored
   `.cargo/config.toml`.
 - Attaching release assets needs `permissions: contents: write` on the calling job.
