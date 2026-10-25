@@ -3115,9 +3115,10 @@ jobs:
     runs-on: ubuntu-latest
     # Each crate's trusted publisher names this environment.
     environment: release
-    permissions:
-      contents: read
-      id-token: write # the crates.io Trusted Publishing token
+    # No job-level `permissions:`, like the pages and release jobs: GitHub validates a nested
+    # job's request against the CALLER's grant even when the job is skipped, so asking for
+    # `id-token: write` here failed every caller at startup. A caller with publish-crates grants
+    # `id-token: write` on the job that calls this workflow, and this job inherits it.
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
