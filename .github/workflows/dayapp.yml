@@ -74,8 +74,7 @@ on:
         description: >-
           Platform-toolkit pairs to build, comma- or space-separated. Supported:
           macos-appkit, macos-gtk, macos-qt, ios-uikit, linux-gtk, linux-qt,
-          android-material, harmony-arkui, windows-winui, windows-qt,
-          windows-gtk, web-dom.
+          android-material, harmony-arkui, windows-winui, web-dom.
           "all" builds every target the project's Day.toml declares (`[app] targets`), so a
           `day project add-target` reaches CI without a second edit.
         type: string
@@ -208,8 +207,7 @@ on:
           `<targets>: <packages>`, where several targets may share a line and a target may appear
           on several. Every leg of a named target installs them through setup-day-deps, with the
           runner's package manager: apt on the Ubuntu runners (linux, android, harmony, web),
-          Homebrew on the macOS ones (macos-*, ios-uikit), Chocolatey for windows-winui, and
-          MSYS2's MINGW64 packages for windows-qt and UCRT64 packages for windows-gtk.
+          Homebrew on the macOS ones (macos-*, ios-uikit), and Chocolatey for windows-winui.
 
               target-packages: |
                 linux-gtk, linux-qt: gstreamer1.0-plugins-good gstreamer1.0-libav
@@ -378,7 +376,7 @@ on:
       tolerate-failures:
         description: >-
           Let the best-effort work fail without failing the run: the pack and dayscripts of the
-          portable-toolkit targets (macos-gtk, macos-qt, windows-qt, windows-gtk), the HarmonyOS
+          portable-toolkit targets (macos-gtk, macos-qt), the HarmonyOS
           emulator's boot and walkthrough, and the web-dom browser install. Off by default, so any
           of those failing fails its leg, and a failed leg holds back the release and the website
           deploys until a re-run of the failed jobs succeeds. `optional=true` device rows are
@@ -1185,10 +1183,8 @@ jobs:
               harmony-arkui)     row='{"target":"harmony-arkui","os":"ubuntu-latest","toolkit":"harmonyos","rust_targets":"aarch64-unknown-linux-ohos,x86_64-unknown-linux-ohos","tier":"primary"}' ;;
               windows-winui)  row='{"target":"windows-winui","os":"windows-latest","toolkit":"winui","rust_targets":"","tier":"primary"}' ;;
               web-dom)        row='{"target":"web-dom","os":"ubuntu-latest","toolkit":"dom","rust_targets":"wasm32-unknown-unknown","tier":"primary"}' ;;
-              windows-qt)     row='{"target":"windows-qt","os":"windows-latest","toolkit":"qt","rust_targets":"","tier":"extra"}' ;;
-              windows-gtk)    row='{"target":"windows-gtk","os":"windows-latest","toolkit":"gtk","rust_targets":"","tier":"extra"}' ;;
               *)
-                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-material harmony-arkui windows-winui windows-qt windows-gtk web-dom"
+                echo "::error::unknown target '$t' — supported: macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-material harmony-arkui windows-winui web-dom"
                 exit 1 ;;
             esac
             rows+=("$row")
@@ -1235,7 +1231,7 @@ jobs:
           # read and a name that is not a target, so a typo fails here instead of quietly
           # installing nothing. A real target this call does not build is only noted, which lets
           # one list serve calls with different target sets.
-          SUPPORTED="macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-material harmony-arkui windows-winui windows-qt windows-gtk web-dom"
+          SUPPORTED="macos-appkit macos-gtk macos-qt ios-uikit linux-gtk linux-qt android-material harmony-arkui windows-winui web-dom"
           check_per_target() {
             local input="$1" line names name
             while IFS= read -r line; do

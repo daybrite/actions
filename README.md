@@ -179,9 +179,9 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `flavors` | string | — | [Build flavors](#build-flavors) to add to the matrix, comma- or space-separated. Each name is a `Day-<name>.toml` beside the project's `Day.toml`, and each gets a leg per target built with `DAY_FLAVOR=<name>`. The base app always builds. A flavor leg uploads `flavor-<name>-dist-<target>` and `flavor-<name>-screenshots-<target>`; release assets, notarization, store uploads and Pages stay with the base app. |
 | `release-flavor` | string | — | Attach this flavor's packages to the release as well as the base app's. A submission queue that rebuilds an app from its tag compares what it built against the release the maintainer published, which it can only do when that release carries the same flavor's packages. |
 | `store-flavor` | string | — | Which build the store-upload jobs publish on a tag: the base app when empty, or this flavor (which must also be in `flavors`). The jobs then take `flavor-<name>-dist-<target>` and stage that flavor's `store-<name>/` listing, so the submission carries its app id, version and copy. |
-| `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. Setting it marks the project as generated, which skips the preflight checks, `update-day-deps` and the pristine check; for what one target needs, use `target-packages` or `target-setup`. |
-| `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, Chocolatey for `windows-winui`, and MSYS2 packages for `windows-qt` and `windows-gtk`. A line naming something that is not a target fails the run. |
-| `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `update-day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
+| `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. Setting it marks the project as generated, which skips the preflight checks, `day-deps` and the pristine check; for what one target needs, use `target-packages` or `target-setup`. |
+| `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, and Chocolatey for `windows-winui`. A line naming something that is not a target fails the run. |
+| `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
 | `script-setup` | string | — | Bash commands sourced once from the project directory after device boot and before scripts. `DAY_SCRIPT_TARGET` identifies the target; `ANDROID_SERIAL` selects Android. Start local fixtures, configure reverse ports, and register an EXIT trap for cleanup. Store logs under `$RUNNER_TEMP`. |
 | `scripts` | string | `auto` | Dayscripts to run on each target, comma- or space-separated paths relative to the project. `auto` runs every `dayscript/*.yaml` (or `scripts/*.yaml`); `none` runs nothing. |
 | `grant-permissions` | string | — | Portable permissions to mark granted on the device before each scripted launch, one line per rule as `<targets>: <permissions>` (`android-material: camera microphone`). Each launch on a named target gets `--grant` per permission (`pm grant` on the Android emulator, `simctl privacy grant` on the iOS Simulator); the CLI refuses a grant the target has no tool for (HarmonyOS, macOS, web-dom, the camera on the simulator). Per target because one script may need the permission on one leg and assert the undecided state on another. |
@@ -192,7 +192,7 @@ Every input the workflow declares, in the order it declares them. Only `targets`
 | `android-abis` | string | `arm64-v8a x86_64` | Android ABIs packed into the `android-material` APK and AAB, comma- or space-separated; each adds its own `lib/<abi>/`. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
 | `day-source` | string | `install` | Where the day CLI comes from: `install` builds it with cargo per `day-version`; `artifact` downloads the `day-<os>-<arch>` artifact an earlier job in the same run uploaded. |
 | `day-cache` | boolean | `True` | Cache a day CLI built from git (a branch, tag or commit in `day-version`), keyed on the commit that ref resolves to, so a leg whose commit is already built restores the CLI instead of compiling it. A crates.io release is not cached. `false` builds the CLI on every leg. |
-| `tolerate-failures` | boolean | `False` | Let the best-effort work fail without failing the run: dayscripts on `macos-gtk`, `macos-qt`, `windows-qt` and `windows-gtk` (these combinations have no packer), the HarmonyOS emulator's boot and walkthrough, and the web-dom browser install. Off, any of them failing fails its leg, which holds back the release and the website deploys until [a re-run of the failed jobs](#re-running-failed-legs) passes. `optional=true` device rows are tolerated either way. |
+| `tolerate-failures` | boolean | `False` | Let the best-effort work fail without failing the run: dayscripts on `macos-gtk` and `macos-qt` (these combinations have no packer), the HarmonyOS emulator's boot and walkthrough, and the web-dom browser install. Off, any of them failing fails its leg, which holds back the release and the website deploys until [a re-run of the failed jobs](#re-running-failed-legs) passes. `optional=true` device rows are tolerated either way. |
 | `artifact-prefix` | string | — | Prefix for the package artifact names (`<prefix>dist-<target>`), so a repository that already publishes `dist-<target>` from another workflow can keep both. |
 | `themes` | string | — | Themes to run each dayscript under (`light dark`), expanded against `locales` into one run per combination. Each theme captures its own screenshot variant. |
 | `ios-profiles` | string | — | The older device-only form of `ios-devices`, comma-separated name prefixes with optional `=<slug>`. Setting both is an error. |
@@ -277,7 +277,7 @@ newest installed rather than pinning a major that the next image drops.
 | `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort under `tolerate-failures`); packs `.hap` |
 | `windows-winui` | windows-latest | installs the Windows App Runtime and caches the Windows App SDK packages; packs a self-contained `.msix` + NSIS installer |
 | `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`), all of them in one launch — web storage lasts only as long as the launch; ships the built dist as a zip |
-| `macos-gtk`, `macos-qt`, `windows-qt`, `windows-gtk` | (home OS) | portable-toolkit coverage builds and scripts; packaging is skipped because Day has no packer for these combinations |
+| `macos-gtk`, `macos-qt` | macOS | portable-toolkit coverage builds and scripts; packaging is skipped because Day has no packer for these combinations |
 
 ### Device profiles
 
@@ -859,20 +859,18 @@ than spelled out again in every workflow.
 ```yaml
 - uses: daybrite/actions/.github/actions/setup-day-deps@v1
   with:
-    target: linux-gtk   # required; any of the 12 combos
+    target: linux-gtk   # required; any of the 10 combos
     pack: true          # flatpak-builder + linuxdeploy (linux), NSIS (windows-winui)
     extras: false       # walkthrough extras: web view dev libs, xvfb, imagemagick, CJK fonts
     java: false         # pin JDK 21 + Gradle for android/harmony (else the runner's own JDK)
     rust: true          # rustup target add this target's std
-    packages: ""        # the app's own extra packages, via apt / brew / choco / MSYS2
+    packages: ""        # the app's own extra packages, via apt / brew / choco
 ```
 
 Everything that is not "make this target buildable" stays with the caller: checking out the app,
 installing the CLI (`setup-day-cli`), emulators, signing material, and the build/pack/script
 commands themselves.
 
-Windows GTK uses MSYS2's UCRT64 environment; extra `packages` for `windows-gtk` must use the
-`mingw-w64-ucrt-x86_64-` prefix. Windows Qt uses MINGW64 and `mingw-w64-x86_64-` packages.
 Qt SVG and librsvg development libraries are installed for Qt and GTK targets even with
 `extras: false`; their native vector renderers require them to compile. Setup checks these
 libraries through `pkg-config` before the caller starts building.

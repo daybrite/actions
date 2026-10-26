@@ -24,8 +24,7 @@ inputs:
   target:
     description: >-
       The platform-toolkit combo to prepare for: macos-appkit, macos-gtk, macos-qt, ios-uikit,
-      linux-gtk, linux-qt, android-material, harmony-arkui, windows-winui, windows-qt, windows-gtk,
-      web-dom. An unknown value fails loudly rather than installing nothing and failing later
+      linux-gtk, linux-qt, android-material, harmony-arkui, windows-winui, web-dom. An unknown value fails loudly rather than installing nothing and failing later
       inside cargo.
     required: true
   pack:
@@ -61,8 +60,7 @@ inputs:
       Extra packages this target needs beyond Day's own set, space-separated — an app's own
       needs, such as a media player's codecs. Installed after the toolkit's, with the runner's
       package manager and its defaults: apt on Linux (recommended packages included), Homebrew
-      on macOS, Chocolatey for windows-winui, and MSYS2 packages
-      (MINGW64 for windows-qt, UCRT64 for windows-gtk), beside the toolkit's own.
+      on macOS, and Chocolatey for windows-winui, beside the toolkit's own.
     required: false
     default: ""
 
@@ -88,7 +86,7 @@ runs:
       run: |
         case "${{ steps.canonical-target.outputs.target }}" in
           macos-appkit | macos-gtk | macos-qt | ios-uikit | linux-gtk | linux-qt \
-            | android-material | harmony-arkui | windows-winui | windows-qt | windows-gtk | web-dom) ;;
+            | android-material | harmony-arkui | windows-winui | web-dom) ;;
           *)
             echo "::error::setup-day-deps: unknown target '${{ steps.canonical-target.outputs.target }}'"
             exit 1 ;;
@@ -193,10 +191,9 @@ runs:
         sudo apt-get install -y --no-install-recommends $PKGS
 
     # --- the caller's own packages (inputs.packages) --------------------------------------------
-    # After the toolkit's, so a package can extend what those installed. windows-qt and
-    # windows-gtk take theirs through MSYS2 below, where their toolkit comes from.
+    # After the toolkit's, so a package can extend what those installed.
     - name: Extra packages
-      if: inputs.packages != '' && steps.canonical-target.outputs.target != 'windows-qt' && steps.canonical-target.outputs.target != 'windows-gtk'
+      if: inputs.packages != ''
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
@@ -306,35 +303,8 @@ runs:
         echo "$HOME/ohos-bin" >> "$GITHUB_PATH"
         echo "DEVECO_SDK_HOME=$C/sdk" >> "$GITHUB_ENV"
 
-    # --- Windows GTK/Qt: MSYS2 libraries with the windows-gnu toolchain ----------------
-    # GTK4 and libadwaita dropped MINGW64 in October 2026. GTK's compiler and libraries
-    # must all come from UCRT64; the pin step below follows that shell's MINGW_PREFIX.
-    - name: MSYS2 (windows qt/gtk)
-      if: steps.canonical-target.outputs.target == 'windows-qt' || steps.canonical-target.outputs.target == 'windows-gtk'
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: ${{ steps.canonical-target.outputs.target == 'windows-gtk' && 'UCRT64' || 'MINGW64' }}
-        update: true
-        path-type: inherit
-        install: >-
-          ${{ steps.canonical-target.outputs.target == 'windows-gtk' && 'mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-librsvg' || 'mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-svg' }}
-          ${{ inputs.packages }}
-    - name: Pin the MSYS2 mingw toolchain
-      if: steps.canonical-target.outputs.target == 'windows-qt' || steps.canonical-target.outputs.target == 'windows-gtk'
-      # MSVC cannot link MSYS2's import libraries, and the C++ shim is built from pkg-config's
-      # flags, which an aqtinstall Qt does not ship — hence the GNU toolchain and MSYS2's bin.
-      shell: msys2 {0}
-      run: |
-        rustup toolchain install stable-x86_64-pc-windows-gnu
-        rustup default stable-x86_64-pc-windows-gnu
-        cygpath -w "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
-        GCC="$(cygpath -m "$MINGW_PREFIX/bin/gcc.exe")"
-        echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$GCC" >> "$GITHUB_ENV"
-        echo "CC=$GCC" >> "$GITHUB_ENV"
-        echo "CXX=$(cygpath -m "$MINGW_PREFIX/bin/g++.exe")" >> "$GITHUB_ENV"
-
     # Match the native renderers' build probes before spending time compiling Rust crates.
-    # This also catches an incomplete installation or a pkg-config from the wrong MSYS2 prefix.
+    # This also catches an incomplete installation.
     - name: Verify SVG development libraries
       if: endsWith(steps.canonical-target.outputs.target, '-qt') || endsWith(steps.canonical-target.outputs.target, '-gtk')
       shell: bash

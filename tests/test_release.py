@@ -208,12 +208,12 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(rows[0]["device_slug"], "")
 
     def test_portable_hosts_keep_build_rows_but_have_no_package_consumers(self):
-        result, values = self.plan(TARGETS_IN="macos-gtk, windows-qt, web-dom")
+        result, values = self.plan(TARGETS_IN="macos-gtk, macos-qt, web-dom")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual([r["target"] for r in json.loads(values["pack_matrix"])["include"]],
                          ["web-dom"])
         self.assertTrue(self.rows(values, "macos-gtk"))
-        self.assertTrue(self.rows(values, "windows-qt"))
+        self.assertTrue(self.rows(values, "macos-qt"))
         result, values = self.plan(TARGETS_IN="macos-qt")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(json.loads(values["pack_matrix"])["include"], [])
