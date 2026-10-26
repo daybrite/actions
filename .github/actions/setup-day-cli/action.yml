@@ -208,10 +208,12 @@ runs:
           curl -fsSL --retry 3 -o "$DIR/$ASSET" "$BASE/$ASSET"
           curl -fsSL --retry 3 -o "$DIR/SHA256SUMS" "$BASE/SHA256SUMS"
           WANT="$(awk -v f="$ASSET" '$2 == f || $2 == "*" f { print $1 }' "$DIR/SHA256SUMS")"
+          # Hash stdin: given a path with a backslash (any Windows runner's), GNU sha256sum
+          # escapes the name and starts its line with `\`.
           if command -v sha256sum >/dev/null; then
-            GOT="$(sha256sum "$DIR/$ASSET" | cut -d' ' -f1)"
+            GOT="$(sha256sum < "$DIR/$ASSET" | cut -d' ' -f1)"
           else
-            GOT="$(shasum -a 256 "$DIR/$ASSET" | cut -d' ' -f1)"
+            GOT="$(shasum -a 256 < "$DIR/$ASSET" | cut -d' ' -f1)"
           fi
           if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
             echo "::error::$ASSET does not match the release's SHA256SUMS (want '${WANT:-none}', got $GOT)"

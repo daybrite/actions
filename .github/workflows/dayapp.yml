@@ -2227,7 +2227,7 @@ jobs:
 
       - name: Run dayscripts (${{ matrix.target }})
         if: steps.scripts.outputs.found == 'true' && matrix.target != 'android-material' && matrix.target != 'harmony-arkui' && matrix.target != 'web-dom'
-        continue-on-error: ${{ inputs.tolerate-failures && matrix.tier == 'extra' }}
+        continue-on-error: ${{ inputs.tolerate-failures == true && matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
       - name: Enable KVM group perms (android / harmony emulator)
@@ -2354,7 +2354,7 @@ jobs:
       - name: Boot the OpenHarmony emulator (${{ matrix.profile }})
         id: ohosemu
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui'
-        continue-on-error: ${{ inputs.tolerate-failures }}
+        continue-on-error: ${{ inputs.tolerate-failures == true }}
         env:
           PROFILE: ${{ matrix.profile }}
           DEVICE_ORIENTATION: ${{ matrix.device_orientation }}
@@ -2397,7 +2397,7 @@ jobs:
         id: arkweb
         timeout-minutes: 20
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.ohosemu.outcome == 'success'
-        continue-on-error: ${{ inputs.tolerate-failures }}
+        continue-on-error: ${{ inputs.tolerate-failures == true }}
         uses: daybrite/actions/.github/actions/setup-harmony-webview@main
       - name: Upload Harmony runtime diagnostics
         if: always() && steps.arkweb.outcome != 'skipped' && matrix.target == 'harmony-arkui'
@@ -2408,7 +2408,7 @@ jobs:
           if-no-files-found: ignore
       - name: Run dayscripts (harmony emulator · ${{ matrix.profile }})
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'harmony-arkui' && steps.arkweb.outcome == 'success'
-        continue-on-error: ${{ inputs.tolerate-failures }}
+        continue-on-error: ${{ inputs.tolerate-failures == true }}
         env:
           # Per-screenshot compositor settle before capture (script.rs): matches the measured
           # 2-3 s emulator compositor lag; the byte-identical stale-frame retry still catches
@@ -2423,7 +2423,7 @@ jobs:
       - name: Install the walkthrough browser (web)
         id: webdriver
         if: steps.scripts.outputs.found == 'true' && matrix.target == 'web-dom'
-        continue-on-error: ${{ inputs.tolerate-failures }}
+        continue-on-error: ${{ inputs.tolerate-failures == true }}
         run: |
           set -euo pipefail
           # An older CLI without the subcommand skips the scripts rather than failing the leg: the
