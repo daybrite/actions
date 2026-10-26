@@ -202,7 +202,9 @@ runs:
             BASE="https://github.com/$REPO/releases/download/v${V#v}"
           fi
           ASSET="day-$T.$EXT"
-          DIR="$RUNNER_TEMP/day-cli-release"
+          # A DOS path's backslashes would not survive DAY_BIN being expanded into a generated
+          # script (dayapp's run-dayscripts.sh), so the binary takes the cygpath spelling.
+          DIR="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")/day-cli-release"
           rm -rf "$DIR"
           mkdir -p "$DIR"
           curl -fsSL --retry 3 -o "$DIR/$ASSET" "$BASE/$ASSET"

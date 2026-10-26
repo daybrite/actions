@@ -150,8 +150,9 @@ runs:
         CLI_IN: ${{ steps.pick.outputs.cli }}
       run: |
         set -euo pipefail
+        # Windows' Python ends each line with CRLF, and cargo rejects a spec ending in `\r`.
         day_crates() {
-          python3 - <<'PY'
+          python3 - <<'PY' | tr -d '\r'
         import pathlib, tomllib
         lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text())
         for p in lock.get("package", []):
@@ -168,8 +169,14 @@ runs:
         ARGS=()
         for spec in "${SPECS[@]}"; do ARGS+=(-p "$spec"); done
         cargo update "${ARGS[@]}"
-        VERSION="$(day_crates | sed -n 's/^day-core@//p' | sort -V | tail -1)"
-        [ -n "$VERSION" ] || { echo "::error::no day-core from crates.io in Cargo.lock"; exit 1; }
+        # Every framework crate carries day's workspace version. A part that never pulls in
+        # day-core (day-part-speech: day-bridge, day-spec, day-build) still names the release.
+        VERSION=""
+        for crate in day-core day-spec day-build; do
+          VERSION="$(day_crates | sed -n "s/^$crate@//p" | sort -V | tail -1)"
+          [ -z "$VERSION" ] || break
+        done
+        [ -n "$VERSION" ] || { echo "::error::no day-core, day-spec or day-build from crates.io in Cargo.lock"; exit 1; }
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
         echo "cli=${CLI_IN:-v$VERSION}" >> "$GITHUB_OUTPUT"
         echo "building against day $VERSION from crates.io" >> "$GITHUB_STEP_SUMMARY"

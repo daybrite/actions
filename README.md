@@ -1,705 +1,311 @@
 # daybrite/actions
 
-Reusable GitHub workflows for [Day](https://daybrite.dev) projects.
+Build, test, package, and publish [Day](https://daybrite.dev) apps with GitHub Actions.
+The `dayapp` workflow runs your app across platforms, captures screenshots, and can publish
+GitHub releases, upload to app stores, and deploy a project website.
 
-## dayapp
+| I want to… | Start here |
+|---|---|
+| Build an app in CI | [Quick start](#quick-start) |
+| Run tests and capture the UI | [Tests and screenshots](#tests-and-screenshots) |
+| Distribute a version | [GitHub releases](#github-releases) |
+| Upload or submit to a store | [Store uploads](#store-uploads) |
+| Host a web app and download page | [Project website](#project-website) |
+| Build a demo, flavor, or Rust library | [Flavors and library releases](#flavors-and-library-releases) |
+| Add Day steps to an existing workflow | [Individual actions](#individual-actions) |
 
-Builds a conventional Day project for a set of platform-toolkit targets, runs its dayscripts
-(capturing screenshots), and packages it for distribution with `day pack`. A `preflight` job runs
-first and gates the whole matrix: it rejects retired Day crate names and imports, then runs
-`cargo fmt --all -- --check` by default, with clippy, check, and test available through the
-`preflight-checks` input — so a formatting slip fails one small ubuntu
-job before any build runner starts. On a semantic-version tag (`vX.Y.Z`), a final job attaches
-every package, one `screenshots.tar.xz` bundle, one per-target `screenshots-<target>.tar.xz` with the `gallery.json`
-index beside it — plus a `SHA256SUMS` manifest — to the GitHub release for that tag, and
-[store-upload jobs](#store-uploads) can hand the packed artifacts to the app's own fastlane lanes.
+## Quick start
 
-Release assets are packed with `day pack --no-version-in-name`, so their filenames carry no
-version, and each is tagged with its platform-toolkit combo — `app-fair-android-material.aab`,
-`app-fair-linux-gtk-x86_64.appimage`, `app-fair-windows-winui-setup.exe`, `app-fair-harmony-arkui.hap`.
-Each is therefore reachable at a stable "latest release" URL —
-`https://github.com/<owner>/<repo>/releases/latest/download/<name>` (e.g.
-`.../releases/latest/download/app-fair-android-material.aab`) — that always redirects to the newest
-tagged release.
-
-Each package's provenance travels beside it, named after the package so a release directory
-holding seven targets says which file each document describes:
-`app-fair-macos-appkit.dmg.buildinfo.json`, `.sbom-cdx.json`, `.sbom-spdx.json`. That is what
-`day rebuild <downloaded-package>` reads.
-
-### DayScript reports
-
-`dayscript_report_summary: true` (the default) adds a summary job after all build matrix
-legs finish. It groups runs by script and shows target/device, variant/locale/flavor, start
-time, outcome, passed/skipped/failed/aborted steps, duration, sample count, min/max/average/end
-memory in MB, metric, and hardware/OS. Retries stay separate; platform memory metrics are
-not mixed. End is the last observed sample, including on interrupted runs.
-
-Every build leg sets host `DAY_SCRIPT_REPORT=1`. A compatible Day CLI/runtime writes
-incremental JSON to `build/day/reports/dayscript/` (or the flavor's build directory), including
-samples collected during pauses and long steps. Each script invocation has a unique report.
-Older versions yield an explicit missing/unavailable report; logs are never parsed for memory.
-
-Both report uploads and summary aggregation use `always()`, so assertion failures, app crashes
-and failed build jobs do not suppress available evidence. A job manifest identifies scripts
-that never produced a report. A killed CLI's last running checkpoint is shown as interrupted.
-An unavailable/destroyed runner may be unable to upload; the summary lists missing artifacts.
-
-Artifacts are named `<artifact-prefix>dayscript-reports-<shots_artifact>-<run_attempt>`; the existing matrix
-suffix separates targets, device profiles and flavors; rerun attempts retain earlier artifacts. Downloads retain separate artifact
-directories to avoid collisions. `dayscript_report_summary: false` skips the summary job;
-collection and uploads remain enabled. The summary action writes to `GITHUB_STEP_SUMMARY`.
-
-Failed Android legs also upload host memory, process, disk and kernel diagnostics, plus
-device memory, process-exit records, application ANR traces and recent logcat output when ADB still responds.
-Each probe has a ten-second timeout, so a frozen emulator cannot stall collection.
-These files supplement the emulator log and help distinguish app crashes from guest or
-runner failures. They do not retry a failed walkthrough or change its result.
-
-### The screenshot bundle
-
-Beside the packages, a release carries every capture the run took:
-
-| asset | what it is |
-| --- | --- |
-| `screenshots.tar.xz` | every target's captures, `<target>/[<device>/]<variant>/<shot>.png`, each target's (and each device profile's) own index beside them, the merged `gallery.json` at the root, and `SHA256SUMS` first |
-| `screenshots-<target>[-<device>].tar.xz` | one capture tree, the way one CI leg uploaded it, with its own `SHA256SUMS` |
-| `gallery.json` | the merged index on its own, with an `archive` block naming the bundles, their sizes and sha-256s, and each capture's size and sha-256 as archived |
-
-The bundles are plain tar.xz files, written by `day screenshot pack` in one pass over the
-capture trees. The PNG files inside are uncompressed, so xz's window compresses across the
-captures: a page's eight theme and locale variants, forty pages around one sidebar. On Day
-Showcase's 392 iPad captures that is 20.6 MB against 191 MB of PNG files or 120 MB of
-`.tar.gz`. The merged bundle and the per-target ones share their compressed bodies, so
-compressing a tree happens once.
-
-`tar -xJf screenshots.tar.xz` extracts the files anywhere, as large PNG files;
-`sha256sum -c SHA256SUMS` then checks them. `day screenshot unpack screenshots.tar.xz --out
-<dir>` does both as it streams and writes each capture back as a compact PNG of the same
-pixels, with a `gallery.json` that describes the files it wrote; `--check` verifies and
-writes nothing. The website job unpacks a release's bundle this way, and the release job runs
-`--check` on the bundle before it publishes. The format is specified in day's
-`docs/screenshot-archive.md`. A tool that reads a release's screenshots takes
-`screenshots.tar.xz`; there is no zip.
-
-Before the release publishes them, the job holds the listing's screenshots to the stores' rules
-(`day store screenshots`, for every store target whose listing declares screenshots) and fails
-with the store's reason when one would refuse the set: the same check the upload jobs and the
-App Fair's queue run, moved to where the app's author sees it first.
-
-`gallery.json` is `day screenshot index`'s merge of the per-target and per-device indexes, read
-from each artifact as its own root (two device profiles' artifacts can carry an index at the same
-path, and a merged download garbles the collision): file name, shot id,
-localized title and caption, platform-toolkit, device, theme, locale, pixel dimensions, byte size,
-and sha-256 per capture. This is what makes a release's project-site pages buildable from the
-release alone — see [Project website](#project-website-daysite).
-
-### Try it in one line
-
-Every release that ships a desktop build also gets a launcher beside the packages, so the app has
-a try-it path that needs no toolchain and leaves nothing behind:
-
-```sh
-# macOS and Linux
-curl -fsSL https://github.com/<owner>/<repo>/releases/latest/download/launch.sh | bash
-```
-
-```powershell
-# Windows
-irm https://github.com/<owner>/<repo>/releases/latest/download/launch.ps1 | iex
-```
-
-Both are generated per release and pinned to their own tag, so the URL picks the version:
-`latest/download/…` runs the newest release, `download/v1.2.0/…` runs that one, and running two of
-them gives two versions to compare rather than the same one twice. Each prints what it is about to
-download and where, and asks before doing anything.
-
-| | what it downloads | what it does |
-| --- | --- | --- |
-| macOS | the signed, notarized `.dmg` | copies the `.app` into a temporary directory and opens it |
-| Linux | the `.appimage` | `chmod +x` and runs it — no package manager, no runtime, no root |
-| Windows | the per-user `-setup.exe` | installs it silently into a temporary folder (no admin prompt) and runs it, printing the uninstall line |
-
-`launch.sh` detects macOS versus Linux, and on Linux reads the desktop to choose the GNOME or KDE
-build; `--target <combo>` overrides it and `--yes` skips the prompt (when piping, pass them after
-`bash -s --`). `launch.ps1` takes `-Yes`, or `DAY_LAUNCH_YES=1` under `| iex`, which cannot pass
-arguments. Neither script is generated when a release ships nothing they can run.
-
-The release notes are GitHub's own, generated from the pull requests and contributors since the
-previous release; nothing is added to them. A project with a website shows these commands instead,
-pinned to the release it describes, at the bottom of each desktop platform's download card.
-
-Call it from your app repository:
+Add this to your app repository as `.github/workflows/ci.yml`:
 
 ```yaml
-# .github/workflows/ci.yml
 name: ci
 on:
   push:
     branches: ["**"]
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   pull_request:
-  schedule:
-    - cron: "0 7 * * *"   # nightly, against the newest day release
   workflow_dispatch:
-    inputs:
-      day-main:
-        description: Build against day's main branch instead of the newest release
-        type: boolean
-        default: false
+
 permissions:
-  contents: read    # the repository's own jobs, if any, run its code read-only
+  contents: read
+
 jobs:
   app:
     uses: daybrite/actions/.github/workflows/dayapp.yml@v1
     permissions:
-      contents: write # release-asset upload on tag builds
+      contents: write # Attach packages to GitHub releases on version tags.
     secrets: inherit
     with:
-      day-deps: ${{ inputs.day-main && 'main' || 'auto' }}
-      targets: windows-winui, macos-appkit, linux-gtk, linux-qt, ios-uikit, android-material, harmony-arkui, web-dom
-      scripts: dayscript/walkthrough.yaml
-      locales: all   # every locale the app ships; or name them, `en fr`
-      # preflight-checks: fmt clippy   # opt into clippy before the matrix (fmt alone is the default)
-      # preflight-exclude: crates      # directories whose crates the checks leave alone (upstream code)
+      targets: all
 ```
 
-### Inputs
+`targets: all` reads `[app] targets` from `Day.toml`. You can name a subset instead:
+`targets: macos-appkit, linux-gtk, android-material, web-dom`.
 
-Every input the workflow declares, in the order it declares them. Only `targets` is required.
+By default, the workflow checks formatting, runs `day lint`, builds each target, runs scripts
+from `dayscript/*.yaml` (or `scripts/*.yaml`), and packages the app. Each mobile target gets a
+phone job and a tablet job. A version tag such as `v1.2.3` also publishes a GitHub release.
 
-| input | type | default | meaning |
-|---|---|---|---|
-| `targets` | string | (required) | Platform-toolkit pairs to build, comma- or space-separated: `macos-appkit`, `macos-gtk`, `macos-qt`, `windows-winui`, `linux-gtk`, `linux-qt`, `ios-uikit`, `android-material`, `harmony-arkui`, `web-dom`. `all` builds every target the project's `Day.toml` declares under `[app] targets`, which is what `day new` scaffolds, so `day project add-target` reaches CI without a second edit. |
-| `day-deps` | string | `auto` | Which day the project's Day dependencies resolve to; see [Which day a run builds against](#which-day-a-run-builds-against). `published`, `main`, `locked`, a full 40-hex day commit, or `auto`, which picks `published` for a scheduled run, a version tag and a manual run, and `main` for everything else. |
-| `day-version` | string | `auto` | Day CLI to install. `auto` matches it to `day-deps`: the release binary of the published version the lock resolved, a build of the day commit under `main`, or `main` for a `locked` project. Otherwise a branch name of the day repository (built from git), a 40-hex commit, `latest` (the newest release's binary), or `v1.2.3`/`1.2.3` (that release's binary). |
-| `day-git` | string | `https://github.com/daybrite/day.git` | Git URL of the day repository, for branch and commit installs. |
-| `day-verbose` | boolean | `True` | Run the day CLI with `DAY_VERBOSE=1`, so every `day build`/`launch`/`pack`/`rebuild` forwards the raw cargo, gradle, xcodebuild and hvigor output. `false` keeps the quiet status lines. |
-| `project-path` | string | `.` | Directory of the Day project within the repository. |
-| `flavors` | string | — | [Build flavors](#build-flavors) to add to the matrix, comma- or space-separated. Each name is a `Day-<name>.toml` beside the project's `Day.toml`, and each gets a leg per target built with `DAY_FLAVOR=<name>`. The base app always builds. A flavor leg uploads `flavor-<name>-dist-<target>` and `flavor-<name>-screenshots-<target>`; release assets, notarization, store uploads and Pages stay with the base app. |
-| `release-flavor` | string | — | Attach this flavor's packages to the release as well as the base app's. A submission queue that rebuilds an app from its tag compares what it built against the release the maintainer published, which it can only do when that release carries the same flavor's packages. |
-| `store-flavor` | string | — | Which build the store-upload jobs publish on a tag: the base app when empty, or this flavor (which must also be in `flavors`). The jobs then take `flavor-<name>-dist-<target>` and stage that flavor's `store-<name>/` listing, so the submission carries its app id, version and copy. |
-| `setup-command` | string | — | Shell command run at the repository root after the CLI installs and before anything else, for example a `day new app …` that scaffolds the project the run builds. Setting it marks the project as generated, which skips the preflight checks, `day-deps` and the pristine check; for what one target needs, use `target-packages` or `target-setup`. |
-| `target-packages` | string | — | Extra packages for particular targets, one line per entry as `<targets>: <packages>`; several targets may share a line (`linux-gtk, linux-qt: gstreamer1.0-libav`). Every leg of a named target installs them through `setup-day-deps`: apt on the Ubuntu runners, Homebrew on macOS, and Chocolatey for `windows-winui`. A line naming something that is not a target fails the run. |
-| `target-setup` | string | — | Shell commands for particular targets, one line per command as `<targets>: <command>`, run with bash at the repository root, in line order, after that target's dependencies install and before `day build`. Unlike `setup-command`, neither this nor `target-packages` skips the preflight checks, `day-deps` or the pristine check, so anything a command writes belongs under `$RUNNER_TEMP`. |
-| `script-setup` | string | — | Bash commands sourced once from the project directory after device boot and before scripts. `DAY_SCRIPT_TARGET` identifies the target; `ANDROID_SERIAL` selects Android. Start local fixtures, configure reverse ports, and register an EXIT trap for cleanup. Store logs under `$RUNNER_TEMP`. |
-| `scripts` | string | `auto` | Dayscripts to run on each target, comma- or space-separated paths relative to the project. `auto` runs every `dayscript/*.yaml` (or `scripts/*.yaml`); `none` runs nothing. |
-| `grant-permissions` | string | — | Portable permissions to mark granted on the device before each scripted launch, one line per rule as `<targets>: <permissions>` (`android-material: camera microphone`). Each launch on a named target gets `--grant` per permission (`pm grant` on the Android emulator, `simctl privacy grant` on the iOS Simulator); the CLI refuses a grant the target has no tool for (HarmonyOS, macOS, web-dom, the camera on the simulator). Per target because one script may need the permission on one leg and assert the undecided state on another. |
-| `fast-scripts` | boolean | `True` | Request fast functional walkthroughs using `DAY_TEST_FAST=1`. Supported runtimes finish decorative motion immediately; literal pauses, media, physics and I/O retain real timing. Set `false` for animation coverage. Explicit `DAY_TEST_FAST` in `launch-env` takes precedence. Older runtimes keep normal behavior; full acceleration requires an updated app and CLI. |
-| `launch-env` | string | — | Space-separated `KEY=VALUE` pairs passed to every scripted launch as `--env`; values must not contain spaces. |
-| `capture-size` | string | — | Pixel size of the desktop-class screenshots (the desktop toolkits and web-dom), passed to every scripted launch as `--capture-size`: `2560x1600`, `2880x1800@2`, or `window` for the app's own `[window]` size. Empty leaves it to the app's Day.toml `[screenshots]` table, whose default is 2560x1600 at 2x, a size the Mac App Store accepts. |
-| `locales` | string | — | Locales to run each dayscript under, comma- or space-separated (`en fr ar zh-CN`), or `all` for every locale the app ships — its `resource/locales/<tag>/` catalogs, default locale first, so adding a language to the app adds it to the walkthrough. Each locale captures its own screenshot variant. |
-| `android-abis` | string | `arm64-v8a x86_64` | Android ABIs packed into the `android-material` APK and AAB, comma- or space-separated; each adds its own `lib/<abi>/`. Supported: `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. |
-| `day-source` | string | `install` | Where the day CLI comes from: `install` builds it with cargo per `day-version`; `artifact` downloads the `day-<os>-<arch>` artifact an earlier job in the same run uploaded. |
-| `day-cache` | boolean | `True` | Cache a day CLI built from git (a branch, tag or commit in `day-version`), keyed on the commit that ref resolves to, so a leg whose commit is already built restores the CLI instead of compiling it. A crates.io release is not cached. `false` builds the CLI on every leg. |
-| `tolerate-failures` | boolean | `False` | Let the best-effort work fail without failing the run: dayscripts on `macos-gtk` and `macos-qt` (these combinations have no packer), the HarmonyOS emulator's boot and walkthrough, and the web-dom browser install. Off, any of them failing fails its leg, which holds back the release and the website deploys until [a re-run of the failed jobs](#re-running-failed-legs) passes. `optional=true` device rows are tolerated either way. |
-| `artifact-prefix` | string | — | Prefix for the package artifact names (`<prefix>dist-<target>`), so a repository that already publishes `dist-<target>` from another workflow can keep both. |
-| `themes` | string | — | Themes to run each dayscript under (`light dark`), expanded against `locales` into one run per combination. Each theme captures its own screenshot variant. |
-| `ios-profiles` | string | — | The older device-only form of `ios-devices`, comma-separated name prefixes with optional `=<slug>`. Setting both is an error. |
-| `ios-devices` | string | phone + tablet | Device profiles for `ios-uikit`, one per line as `device=…, os=…, orientation=…, slug=…`. Each becomes its own parallel job, screenshot artifact and gallery column; the first one packs. `device` is a name prefix in which `*` matches anything, so `iPhone * Pro Max` is the largest iPhone the runner image has. Unset runs `iPhone * Pro Max` portrait and `iPad Pro 13-inch` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
-| `android-profiles` | string | — | The older device-only form of `android-devices`: `avdmanager list device` ids such as `medium_phone` or `Nexus 7 2013`, comma-separated. |
-| `android-devices` | string | phone + tablet | Device profiles for `android-material`, one per line in the same shape as `ios-devices`, plus a `density` field; `os` is the API level. Unset runs `medium_phone` portrait and `medium_tablet` landscape; naming any replaces the pair (see [Device profiles](#device-profiles)). |
-| `harmony-devices` | string | phone + tablet | Device profiles for `harmony-arkui`, one per line as `device=…, orientation=…, slug=…`, where `device` is a PANEL of the one Oniro image: `phone` (360x720), `tablet` (1280x800) or `WxH`. Unset runs the phone in portrait and the tablet in landscape. |
-| `app-id` | string | — | The app's bundle id. When set, the Linux legs verify that the packed flatpak installs and reports that id, and the macOS legs that the `.app` carries it. |
-| `lint` | boolean | `True` | Run `day lint` before building: fluent coverage, ids, routes, and the store listing. |
-| `assert-pristine` | boolean | `True` | Fail if the checkout has uncommitted changes before packing. An artifact packed from a dirty tree records a commit that cannot reproduce it. |
-| `signing-environment` | string | — | GitHub environment holding the macOS release-signing secrets (`DAY_MACOS_CERT_P12`, `DAY_MACOS_CERT_PASSWORD`, `DAY_SIGN_MACOS_IDENTITY`, `DAY_NOTARY_KEY_ID`, `DAY_NOTARY_ISSUER`, `DAY_NOTARY_KEY_B64`). When set, a tag build signs and notarizes the `.dmg` in a separate job that checks out no code, and fails rather than shipping unsigned when the material is missing. The store packages follow the same rule from repository secrets (`DAY_APPLE_*`, `DAY_ANDROID_*`, `DAY_OHOS_*`): see [Signing](#signing). |
-| `validate-rebuild` | boolean | `False` | After packing, rebuild each artifact from its own recorded provenance and compare (`day rebuild --strict`). Off by default: the check needs a fixed day revision to be meaningful. |
-| `release-assets` | boolean | `True` | Whether this call assembles the GitHub release for a semantic-version tag. `false` leaves it to another call, which is what a second workflow in the same repository needs — one owns the release, the other builds and uploads a `store-flavor` submission. |
-| `publish-release` | boolean | `True` | Publish the GitHub release for the tag. `false` leaves it as a fully assembled draft, packages, checksums, launch scripts and notes in place, for a human to review and publish. A public release is never un-published. |
-| `release-mode` | string | — | What the tag's release becomes: `publish` (public and latest), `pre-release` (public, flagged, so `releases/latest` skips it), or `draft`. Empty follows `publish-release`. See [Staging a release](#staging-a-release). |
-| `deploy-web` | boolean | `False` | Publish the `web-dom` build to the caller's GitHub Pages after the matrix, reusing the dist the build job packed (see [Web deploy](#web-deploy)). Requires `web-dom` in `targets`. |
-| `daysite-version` | string | `main` | Git ref of daybrite/daysite the website job builds with (branch, tag, or SHA). Used only when the repository has a `website/site.toml`. |
-| `tab-release` | boolean | `True` | Give the website a version tab for the latest release, built from that release's own assets. It owns the site's root while it is shown. |
-| `tab-pre-release` | boolean | `True` | Give the website a version tab for a pending pre-release (the newest published pre-release newer than the latest release), built from its own assets and placed between the release and main. Its pages say it may be unstable and link the release. No tab when there is no such pre-release. |
-| `tab-main` | boolean | `True` | Give the website a version tab for this run's build of the default branch. Its pages carry the development-build notice. |
-| `deploy-website` | string | — | Whether this call deploys the project website. Empty auto-detects from `website/site.toml` and the ref; `"false"` turns it off, which a second call of the workflow in one job graph needs (see [Project website](#project-website-daysite)); `"true"` forces it. |
-| `web-deploy-tag-pattern` | string | — | With `deploy-web`: empty deploys on a push to the default branch; a bash regex such as `^v[0-9]+\.[0-9]+\.[0-9]+$` deploys only on a tag matching it. A [project website](#project-website-daysite) also deploys on every `vX.Y.Z` tag when this is empty, since a new release changes what its release channel shows. |
-| `preflight-checks` | string | `fmt` | Rust checks the `preflight` job runs before the matrix, from `fmt`, `clippy`, `check`, `test`, comma- or space-separated. `fmt` takes seconds; the others compile the whole workspace and delay every leg. Empty skips them. |
-| `preflight-exclude` | string | — | Directories the preflight checks leave alone, relative to the repository root (`crates`, `vendor/third-party`), comma-, space- or newline-separated. Workspace members under one are left out: `fmt` then names the remaining members with `-p` instead of `--all` (which also formats path dependencies), and clippy/check/test add `--exclude`. For a Day project added to a repository whose other crates it depends on by path but does not maintain. |
-| `publish-crates` | boolean | `False` | On a semantic-version tag, once every build leg passed, publish the repository's workspace crates to crates.io through Trusted Publishing, with the [`publish-crates`](#publish-crates) action. For a piece's or part's repository, whose demo is the project this workflow builds. The calling job must grant `id-token: write`. |
-| `publish-crates-paths` | string | `.` | With `publish-crates`, the workspaces to publish, relative to the repository root, space-separated and in order: `.`, then any package kept beside it rather than in it (a piece's `gallery`, which depends on the piece). |
-| `upload-ios` | string | — | Upload the packed `.ipa` to App Store Connect on semantic-version tags through `ios-upload-lane`. Empty auto-detects: on when the repository has lanes for it, either a `fastlane/Fastfile` (or `platform/ios/fastlane/Fastfile`) with `platform :ios` or a `store/storefront.toml` listing that `day store stage` turns into lanes, and the App Store Connect key secrets `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and `DAY_ASC_KEY_B64` are set. `"true"`/`"false"` override. |
-| `upload-macos` | string | — | Sign the built `macos-appkit` bundle into a Mac App Store `.pkg` and upload it on semantic-version tags through `macos-upload-lane`. Empty auto-detects: on when the listing names `mac-app-store` (or a `fastlane/Fastfile` has `platform :mac`), `macos-appkit` is among the targets, and the App Store Connect key and `DAY_MAS_CERT_P12`/`DAY_MAS_CERT_PASSWORD` secrets are set; `"true"`/`"false"` override. |
-| `upload-play` | string | — | Upload the packed `.aab` to Google Play on semantic-version tags through `play-upload-lane`. Empty auto-detects on a `fastlane/Fastfile` (or `platform/android/fastlane/Fastfile`) with `platform :android`, or a `store/storefront.toml` listing that `day store stage` turns into lanes, when `DAY_PLAY_JSON_KEY` is set; `"true"`/`"false"` override. |
-| `ios-upload-lane` | string | `ios upload` | The fastlane arguments the `appstore-ios` job runs (platform + lane). The staged lanes are `ios validate`, `ios upload`, and `ios release`, which also submits the version for review. |
-| `macos-upload-lane` | string | `mac upload` | The fastlane arguments the `appstore-macos` job runs. |
-| `play-upload-lane` | string | `android upload` | The fastlane arguments the `playstore-android` job runs. The staged lanes are `android validate`, `android upload` (internal track, draft), and `android release` (production track, completed, which is Play's submission). |
-| `store-screenshots` | boolean | `False` | Replace the App Store and Google Play listings' screenshots on each upload with the captures `store/storefront.toml` `[storefront…screenshots]` declares for each store and device kind, taken from this run's own `screenshots-<target>` artifact and checked against each store's rules first. See [Store screenshots](#store-screenshots). |
+The project must build from a fresh checkout. Use registry or Git dependencies for Day;
+local paths outside the repository won't exist on the runner. For an app in a subdirectory,
+set `project-path: demo`.
 
-### Which day a run builds against
+The examples below change the calling job's `with:` block unless they show a complete job.
+See [dayapp.yml](.github/workflows/dayapp.yml) for every input, default, and signing secret.
 
-Every Day crate an app, piece or part depends on comes from crates.io by version
-(`day = { package = "day-app", version = "0.6" }`), which is what someone who builds it gets. CI
-builds against two days, picked by `day-deps: auto` from the event:
+## Tests and screenshots
 
-| event | day-deps | what the run builds against |
-|---|---|---|
-| scheduled run, `vX.Y.Z` tag, manual run | `published` | the newest release the requirements accept: preflight runs `cargo update` on every `day-*` crate the lock takes from crates.io, and the legs install that release's CLI binary |
-| push to any branch, pull request, anything else | `main` | the head of every Day repository's default branch: preflight runs `day patch --git <day>@<commit> --main --check`, which takes day at the resolved commit and every external piece or part at its own head, and the legs install the CLI built from that day commit |
+Use Rust tests for application logic and DayScript for interactions with the running app.
+Preflight checks run once on Ubuntu before the platform jobs start. Each platform job then
+builds the app and runs its scripts on a desktop, simulator, emulator, or browser.
 
-Preflight resolves this once and ships the lock (and under `main` the `.cargo/config.toml` patch
-table) to every leg, so a push to day during the run cannot give two legs two frameworks.
-`locked` builds exactly what the manifest and lock say, for a project that pins day from git.
+```mermaid
+flowchart TD
+    checks["Preflight checks"] --> desktop["Desktop jobs"]
+    checks --> phone["Phone jobs"]
+    checks --> tablet["Tablet jobs"]
+    checks --> web["Browser job"]
+    desktop & phone & tablet & web --> scripts["DayScript runs in each job"]
+    scripts --> reports["DayScript reports"]
+    scripts --> shots["Screenshot artifacts"]
+```
 
-A `main` run fails when a patch goes unused instead of building the release quietly: `day patch
---check` names the crate. That happens when the requirement does not accept the version on main
-(day's main moved to the next minor before the app raised its requirement) or when a checkout is
-behind the newest release.
+For example, run Rust tests before checking the UI in light and dark themes, in English and
+French:
 
-For the choice on a manual run, declare a `workflow_dispatch` boolean in the calling workflow and
-pass `day-deps: ${{ inputs.day-main && 'main' || 'auto' }}`, as the example above does. On any
-other event the input is empty, so `auto` decides. A repository's own jobs that run cargo
-themselves (a piece's host tests, say) make the same choice with the
-[`day-deps`](#day-deps) action.
+```yaml
+with:
+  targets: macos-appkit, ios-uikit, android-material, web-dom
+  preflight-checks: fmt clippy test
+  scripts: dayscript/walkthrough.yaml
+  themes: light dark
+  locales: en fr
+```
 
-### Targets and runners
+The walkthrough runs four times per device: once for each theme and locale pair. Its
+`screenshot:` steps capture the UI. Use `locales: all` to cover every locale the app ships.
 
-<a id="macos-runner"></a>
-Every macOS job — the Apple targets, the portable-toolkit builds on macOS, code signing and both
-store uploads — runs on **`xcode-27`**, and never on an older image. That is a floor rather than a
-preference: turning a simulator headlessly needs a `devicectl` that can see simulators, and a
-machine gets that from the CoreDevice framework its **Xcode** installs, not from its macOS. Xcode
-26.6 ships CoreDevice 518.33, which cannot see a simulator at all; Xcode 27 ships 642.15, which
-turns them. Every default GitHub macOS image stops at 26.6, so on those a device profile asking for
-`landscape` captured portrait and reported success. The label is defined once, as the preflight
-job's `macos_runner` output.
-
-That image carries a single iOS runtime, so device profiles should leave `os=` unset and take the
-newest installed rather than pinning a major that the next image drops.
-
-| target | runner | notes |
-|---|---|---|
-| `macos-appkit` | xcode-27 | packs a `.dmg` |
-| `ios-uikit` | xcode-27 | Simulator scripts; packs an unsigned device `.ipa` for sideloading/self-signing (a signed `.ipa` with signing secrets) |
-| `linux-gtk`, `linux-qt` | ubuntu-latest | scripts under xvfb / offscreen; pack a `.flatpak` **and** a `.appimage`, and the release check installs the one and runs the other |
-| `android-material` | ubuntu-latest | scripts on a KVM emulator; packs `.apk` + `.aab` |
-| `harmony-arkui` | ubuntu-latest | scripts on the Oniro QEMU emulator (best-effort under `tolerate-failures`); packs `.hap` |
-| `windows-winui` | windows-latest | installs the Windows App Runtime and caches the Windows App SDK packages; packs a self-contained `.msix` + NSIS installer |
-| `web-dom` | ubuntu-latest | scripts in headless Chromium through day-cli's bundled page-driver (needs a day CLI with `day web driver`), all of them in one launch — web storage lasts only as long as the launch; ships the built dist as a zip |
-| `macos-gtk`, `macos-qt` | macOS | portable-toolkit coverage builds and scripts; packaging is skipped because Day has no packer for these combinations |
+| Input | Use it to… |
+|---|---|
+| `scripts: none` | Build and package without running DayScript. |
+| `target-scripts` | Choose scripts per target, such as `web-dom: dayscript/browser.yaml`. |
+| `scripts-once` | Run selected scripts once, after the theme/locale runs, in the order listed. Useful for tests that consume saved state. |
+| `fast-scripts: false` | Keep decorative animation timing for animation tests. |
+| `capture-size: 2880x1800@2` | Set desktop and browser screenshot dimensions. |
+| `launch-env: DEMO_DATA=1` | Pass environment variables to each scripted launch. Values cannot contain spaces. |
+| `script-setup` | Start a local test service or configure emulator ports before scripts run. |
+| `grant-permissions` | Grant device permissions before launch, such as `android-material: camera microphone`. |
 
 ### Device profiles
 
-**Every mobile target runs on a phone and a tablet by default**, with no configuration in the
-calling workflow. `ios-uikit` runs `iPhone * Pro Max` in portrait and `iPad Pro 13-inch` in
-landscape; `android-material` runs `medium_phone` in portrait and `medium_tablet` in landscape;
-Harmony walkthroughs automatically install a checksum-verified x86_64 ArkWeb runtime,
-apply the Oniro renderer/GPU compatibility fixes, and reboot before launching the app.
-The extracted runtime is cached; callers need no WebView-specific setup. This enables
-bundled WebViews used by Showcase, Lottie, News, and other apps. See the
-[setup details and emulator limitations](.github/actions/setup-harmony-webview/README.md).
-
-`harmony-arkui` runs its one Oniro image on a `phone` panel (360x720) in portrait and a `tablet`
-panel (1280x800) in landscape. Each is its own parallel job, its own screenshot artifact and its
-own gallery column, and captures land under `<target>/<slug>/<variant>/` — `ios-uikit/iphone/`,
-`ios-uikit/ipad/`, `android-material/phone/`, `android-material/tablet/`, `harmony-arkui/phone/`,
-`harmony-arkui/tablet/`. Those are the two device classes a store listing asks for and the two an
-adaptive UI has to be looked at on. The iOS panels are ones the App Store accepts as screenshots;
-the Android tablet capture is not one Play takes — see [Store-sized Android
-profiles](#store-sized-android-profiles) for the pair that is. The HarmonyOS tablet is a panel
-size, not a tablet image: the Oniro guest identifies itself as a phone whatever its screen, so
-that row shows the app's wide layout rather than the system's tablet behaviors.
-
-Naming `ios-devices`, `android-devices` or `harmony-devices` replaces that target's whole list,
-which is how an app runs on one device:
+Mobile targets use a portrait phone and a landscape tablet by default. Set `ios-devices`,
+`android-devices`, or `harmony-devices` to replace that target's device list:
 
 ```yaml
 with:
   targets: ios-uikit, android-material
   ios-devices: |
-    device=iPhone, orientation=portrait
+    device=iPhone * Pro Max, orientation=portrait, slug=iphone
+    device=iPad Pro 13-inch, orientation=landscape, slug=ipad
   android-devices: |
-    device=medium_phone, os=36, orientation=portrait
-```
-
-Two jobs, `ios-uikit · iPhone` and `android-material · medium_phone`, each capturing to
-`<target>/<variant>/` with no device level, since neither target runs on more than one device.
-
-`ios-devices` names each device by device, OS and orientation. One profile per **line**; the comma
-separates the fields *inside* a profile:
-
-```yaml
-with:
-  targets: macos-appkit, ios-uikit
-  ios-devices: |
-    device=iPhone,           os=iOS 26, orientation=portrait
-    device=iPad Pro 13-inch, os=iOS 26, orientation=landscape, slug=ipad
-```
-
-Three jobs: `macos-appkit`, `ios-uikit · iPhone`, `ios-uikit · iPad Pro 13-inch`.
-
-- **`device` is a prefix and `os` a major version.** `iPad Pro` takes the first iPad Pro; `iOS 26`
-  takes the newest 26.x the image has. Runner images retire exact device names and runtimes, so a
-  pinned "iPhone 15" on "iOS 26.2" would start failing on its own. Unmatched fails the job and
-  lists what the image does have.
-- **`orientation`** is `portrait` (default) or `landscape`, applied headlessly through
-  `devicectl device orientation set`. Nothing extra is needed to make it work: every macOS job runs
-  on `xcode-27` (see [macOS runner](#macos-runner)).
-
-On Android the same fields mean the same things, with two differences worth knowing. `device` is an
-exact `avdmanager list device` id rather than a prefix — those ids are stable, so an unknown one
-should fail loudly — and `os` is an API level (`36`, `API 36`, `android-36`), defaulting to 36.
-
-**Check a candidate id against the runner, not against a laptop.** The device catalog ships inside
-the Android command-line tools, and the image carries version 12.0 while a current Android Studio
-carries 23.0 — 66 profiles against 96. `pixel_8` and later and `small_tablet` exist only in the
-newer catalog, and naming one fails the job with `No device found matching --device`. The generic
-`medium_phone` / `medium_tablet` pair is in both, which is why the defaults use it. To see what
-the runner has, install that exact version and ask it:
-
-```sh
-sdkmanager "cmdline-tools;12.0"
-"$ANDROID_HOME/cmdline-tools/12.0/bin/avdmanager" list device
-```
-
-```yaml
-with:
-  targets: android-material
-  android-devices: |
-    device=medium_phone,  os=36, orientation=portrait,  slug=phone
+    device=medium_phone, os=36, orientation=portrait, slug=phone
     device=medium_tablet, os=36, orientation=landscape, slug=tablet
 ```
 
-Android takes one field iOS does not: **`density`**, the dpi the panel is read at. It moves the
-layout's size in points and leaves the capture's pixels alone.
+Each line creates a parallel job. The first device also produces the target's packages;
+additional devices produce screenshots and reports. A single line runs just one device.
 
-The default pair captures 1080x2400 on the phone and, because `day devices boot` halves a
-headless panel past three million pixels, 1280x800 on the tablet — which is also 1280x800 in
-points, the tablet layout Day-Showcase's walkthrough is written against.
+iOS device names match prefixes and `*` wildcards; omit `os` to use the installed runtime.
+Android names must exist in the runner's `avdmanager list device` catalog. HarmonyOS accepts
+`phone`, `tablet`, or a pixel size such as `1280x800`; its tablet profile tests a wide layout
+while the emulator still identifies as a phone.
 
-Android CI explicitly disables system crash/ANR dialogs on each emulator before launching
-the app and verifies that setting. Current Day CLI builds also inspect system windows before
-and after every device screenshot. If a dialog remains or the inspection fails, the capture
-falls back to the app's own view; if that fails too, the screenshot step fails instead of
-publishing an obstructed image. These capture checks require a Day CLI containing the safeguard;
-the workflow's emulator settings also apply when using an older pinned CLI.
+### Results and failures
 
-#### Store-sized Android profiles
+The run's **Artifacts** include `dist-<target>` packages and `screenshots-<target>` captures.
+Additional devices add their slug to the screenshot artifact name. The DayScript summary
+shows step outcomes, duration, and sampled memory. Available reports upload even when a job
+fails; older Day versions without report support are listed as unavailable.
 
-The defaults above are picked for durability in the runner catalog, and the halved tablet
-capture is below what Google Play takes; `day store stage` scales it up, so the default pair
-serves a store listing as it is:
+A failed required build or walkthrough blocks releases, signing, store uploads, and website
+deployment. Use **Re-run failed jobs** after addressing the failure. After upgrading the
+workflow reference, start a new run or use **Re-run all jobs** to pick up the new workflow.
 
-| profile | capture | points | Play |
-|---|---|---|---|
-| `medium_phone` | 1080x2400 portrait | 411x914 | phone slot, as captured |
-| `medium_tablet` | 1280x800 landscape (halved) | 1280x800 | both tablet slots, scaled x2 to 2560x1600 at staging |
+For exploratory coverage, `optional=true` lets an additional device fail without failing the
+run. `tolerate-failures: true` also permits failures in designated coverage work, including
+macOS GTK/Qt scripts and HarmonyOS emulator runs. It does not ignore every test failure.
 
-Play's help page says a screenshot's long side may be at most twice its short side, which would
-rule out every phone made since about 2018. The publishing API is looser, and these are the
-limits it actually enforces, each one measured by offering the API an image and reading its
-answer:
+### Which Day version is tested?
 
-| offered | phone slot | ten-inch slot |
-|---|---|---|
-| 100x100 | refused | — |
-| 1080x2400 (2.22:1) | accepted | — |
-| 1080x2424 (2.24:1) | **accepted** | — |
-| 1080x2500 (2.32:1) | refused | — |
-| 320x2000 (6.25:1) | refused | — |
-| 1280x800 | — | refused |
-| 1920x1200 | — | **accepted** |
-| 2560x1600 | — | accepted |
+The default `day-deps: auto` chooses dependencies by event and matches the CLI to them:
 
-So a tall modern phone is fine: the cutoff sits between 2.24:1 and 2.32:1, and `medium_phone`
-(which is `pixel_7`'s panel, and `pixel_6`'s, and `pixel_6a`'s — all 1080x2400 at 420 dpi) is
-2.22:1. The ten-inch tablet slot holds a floor of 1,080 px on the short side, while the
-seven-inch slot took 1280x800 and 800x1280 without complaint.
-
-No tablet in the runner catalog clears that floor as captured: `day devices boot` halves a
-headless panel past three million pixels (both axes and the density, so the size in points
-holds) to keep the emulator answering, so `pixel_tablet` and `medium_tablet` at 2560x1600 come
-back at 1280x800. `Nexus 7 2013` (1920x1200, 2.3 Mpx) is captured whole, but at `density=240`,
-the 1280x800-point layout a tablet walkthrough is written against, its pixels behind a
-desktop-width web page wedged the headless emulator (Day-Showcase, 2026-09-24), the same freeze
-that made the halving necessary. So the tablet capture is scaled instead: the store rules mark
-Play's tablet kinds `upscale = true`, and `day store stage` scales a capture under the floor up
-by the smallest whole factor that clears it (x2, to 2560x1600, the panel's own size), bicubic,
-before placing it. A scaled capture is softer than a native one; the layout and the content are
-the device's own.
-
-`density` re-reads a panel at a density of your choosing, which moves the size in points and
-leaves the capture's pixels alone: a way to hand a walkthrough the layout it was written
-against on a profile whose native density would not give it.
-
-The emulator itself is stood up by the `day` CLI rather than a third-party action: `day devices
-setup` creates the AVD from the profile (installing the system image if the cache missed), and
-`day devices boot --wait --headless` starts it, blocks on `sys.boot_completed`, applies the
-orientation and prints the serial the walkthrough then drives. Only the system image is cached,
-keyed by API level — the AVD is rebuilt each run in about a second, so it cannot go stale against a
-changed profile.
-
-- **`slug`** fixes the artifact suffix *and* the capture directory; it defaults to the kebab-cased
-  device name. Captures land in `<target>/<slug>/<variant>/`, which is what stops two form factors
-  of one target overwriting each other when the site job merges every screenshot artifact into one
-  tree — and gives each its own **column in the published gallery**.
-- **The first profile is primary.** It packs, uploads the packages and release assets, and keeps
-  the plain `screenshots-ios-uikit` artifact name; later profiles upload
-  `screenshots-ios-uikit-<slug>` and never pack.
-
-A single profile writes no device level at all, so a one-device project's captures and gallery are
-exactly what they were.
-
-#### The older `ios-profiles` / `android-profiles`
-
-Both are still supported and unchanged. `ios-devices` supersedes `ios-profiles` and
-`android-devices` supersedes `android-profiles`; setting a pair together is an error rather than a
-silent preference.
-
-`ios-profiles` and `android-profiles` run a mobile target's dayscripts on more than one device.
-Each profile becomes its own **parallel job**, so a second device costs wall clock only for its own
-build and script run, not the first device's:
-
-```yaml
-with:
-  targets: macos-appkit, ios-uikit, android-material
-  ios-profiles: "iPhone 16, iPad Pro=ipad"
-  android-profiles: "medium_phone, medium_tablet=tablet"
-```
-
-That is five jobs: `macos-appkit`, `ios-uikit · iPhone 16`, `ios-uikit · iPad Pro`,
-`android-material · medium_phone`, `android-material · medium_tablet`.
-
-- **iOS profiles are prefixes**, matched against the simulators the runner image has: `iPhone`
-  takes the first iPhone, `iPad Pro` the first iPad Pro. Exact names age out with each Xcode image,
-  so a pinned "iPhone 15" would start failing on its own. An unmatched prefix fails the job and
-  lists the devices the image does have. **Android profiles are exact** `avdmanager list device`
-  ids, passed to the emulator action verbatim.
-- **`=<slug>` fixes the artifact suffix** for a long device name: `iPad Pro 13-inch (M4)=ipad`
-  uploads `screenshots-ios-uikit-ipad` instead of `screenshots-ios-uikit-ipad-pro-13-inch-m4`.
-- **The first profile is primary.** It packs, uploads the packages, and feeds the release, signing
-  and store-upload jobs; its screenshots keep the plain `screenshots-<target>` name. Every later
-  profile builds, runs the scripts, and uploads `screenshots-<target>-<slug>` — it never packs, so
-  a tag build cannot race two identical release assets.
-- **Naming no profiles gives a mobile target the default pair** — a phone and a tablet, two jobs
-  named `<target> · <device>`. Every other target is one job named `<target>`, exactly as before.
-
-**Replacing `tablet-walkthroughs`.** That input is gone (2026-08). It ran the scripts a second time
-inside the phone's job, on a hard-coded iPad and `pixel_tablet`, adding its whole wall clock to a
-job that was already the slowest in the matrix. Profiles do the same work as parallel jobs, so
-`tablet-walkthroughs: true` becomes:
-
-```yaml
-  ios-profiles: "iPhone, iPad=ipad"
-  android-profiles: "medium_phone, medium_tablet=tablet"
-```
-
-which uploads the same `screenshots-ios-uikit-ipad` and `screenshots-android-material-tablet` the old
-input did. Passing `tablet-walkthroughs` now fails the run — GitHub rejects an input a reusable
-workflow does not define — so a caller still setting it has to change one of these two lines.
-
-### Build flavors
-
-A flavor ships one source tree as more than one app — a paid build beside a free one, a
-white-label build per customer — and is written in a `Day-<name>.toml` beside the project's
-`Day.toml`, stating what differs: app id, title, targets, cargo features, environment, the
-`resource/` and `store/` directories it uses. [Build flavors](https://daybrite.dev/docs/flavors)
-covers the file.
-
-```yaml
-with:
-  targets: macos-appkit,ios-uikit,android-material,web-dom
-  flavors: custom
-```
-
-Each name adds a leg per target, alongside the base app's, built with `DAY_FLAVOR=<name>` in the
-environment so every `day` command in the leg — build, the scripted launches, pack — builds that
-flavor. A flavor's output is kept apart on the runner (`build/day/flavors/<name>/`) and uploaded
-under names of its own:
-
-| artifact | contents |
+| Event | Day dependencies |
 |---|---|
-| `flavor-<name>-dist-<target>` | the packages `day pack` produced for that flavor |
-| `flavor-<name>-screenshots-<target>` | its dayscript captures, in the same variant layout |
+| Branch push or pull request | Default branches of Day and its pieces and parts |
+| Version tag, scheduled run, or manual run | Newest published versions allowed by the project's requirements |
 
-Release assets, macOS notarization and the Pages deployment read the base app's artifacts and are
-unaffected, so adding a flavor to a repository that already ships does not change what the tag
-publishes. A flavor named here whose `Day-<name>.toml` the project does not carry fails the run in
-preflight, before any leg starts, and a flavor that declares `targets` gets legs only for the
-targets it names.
+Set `day-deps: published` or `day-deps: main` to make that choice explicit. Use `locked` to
+keep the manifest and lockfile unchanged, or a full Day commit SHA to pin Day within a `main`
+build. The workflow resolves dependencies once for all platform jobs.
 
-The store uploads follow `store-flavor`. Left empty they publish the base app as before; set to a
-flavor, the three upload jobs take that flavor's packages and stage its `store-<name>/` listing:
+To check compatibility with published Day releases nightly, add this under `on:`:
 
 ```yaml
-with:
-  targets: ios-uikit,android-material
-  flavors: appfair
-  store-flavor: appfair
+schedule:
+  - cron: "0 7 * * *"
 ```
 
-That is the shape of an app whose store records belong to a flavor — a white-label release, or a
-rebuilt app continuing the listing of the app it replaces.
+## GitHub releases
 
-### Staging a release
+A `vX.Y.Z` tag builds the app and attaches its packages to a GitHub release after all required
+builds and walkthroughs pass. Configured signing runs before the packages are published.
 
-By default a `vX.Y.Z` tag ends the run with a published release, and that release is what
-`releases/latest` answers with the moment the run finishes. `release-mode: pre-release` stages it
-instead:
+```mermaid
+flowchart TD
+    tag["Version tag"] --> ci["Build, test, and package"]
+    ci --> sign["Sign packages when configured"]
+    sign --> assets["Collect release assets"]
+    assets --> mode{"release-mode"}
+    mode -->|publish| latest["Latest release"]
+    mode -->|pre-release| preview["Public preview"]
+    mode -->|draft| draft["Draft for review"]
+```
+
+| `release-mode` | Result |
+|---|---|
+| `publish` (default) | Publish the release and make it latest. |
+| `pre-release` | Publish a preview while latest download URLs keep pointing to the previous release. |
+| `draft` | Assemble a draft for someone with repository write access to review and publish. |
+
+For a preview release, add `release-mode: pre-release`. To rebuild the project website when
+you later promote it to a release, also add this trigger under `on:`:
 
 ```yaml
-    with:
-      release-mode: pre-release
+release:
+  types: [released]
 ```
 
-The release is assembled and published exactly as before, with every package, checksum, launch
-script and install command, and it carries GitHub's pre-release flag. What that changes:
+That promotion run rebuilds and deploys the website; it doesn't upload to stores or assemble
+another release. The `github-pages` environment must allow deployments from the tag.
 
-- `https://<owner>/<repo>/releases/download/<tag>/<asset>` works, so the version can be installed
-  and tested by anyone with the link.
-- `releases/latest/download/<asset>` and the project website's release channel keep describing the
-  version before it, because `releases/latest` skips pre-releases.
-- The store lanes ran on the tag build as usual. Staging governs what the release page says is
-  current, not what the stores received.
+**Release mode only controls the GitHub release.** Configured store uploads still run on the
+tag, including for drafts and pre-releases. Set `upload-ios: "false"`, `upload-macos: "false"`,
+and `upload-play: "false"` when you want to hold those uploads.
 
-Marking the release **Latest** in the GitHub UI, or `gh release edit <tag> --prerelease=false`,
-fires a `release: released` event. A caller that listens for it rebuilds and redeploys:
+### Release downloads
 
-```yaml
-on:
-  push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
-  release:
-    types: [released]
+Package filenames include the target and omit the version, so a latest-download link stays
+stable, for example:
+`https://github.com/<owner>/<repo>/releases/latest/download/my-app-android-material.aab`.
+
+| Release asset | Contents |
+|---|---|
+| Platform packages | Installers and archives listed in [Targets](#targets). |
+| `screenshots.tar.xz` | All captured screenshots, with a merged index. |
+| `screenshots-<target>[-<device>].tar.xz` | Screenshots from one target/device job. |
+| `gallery.json`, `storefront.json` | Screenshot index and exported store listing data. |
+| `SHA256SUMS` | Checksums for release assets. |
+| Package sidecars | Build provenance and software bills of materials for `day rebuild`. |
+| `launch.sh`, `launch.ps1` | Launchers for the desktop packages the release includes. |
+
+Extract and verify a screenshot bundle with:
+
+```sh
+day screenshot unpack screenshots.tar.xz --out screenshots
 ```
 
-That run builds the tag, deploys the website, and stops there: it assembles no release and
-uploads to no store, since the tag's own build did both. Its release channel is the version just
-promoted; its development channel shows the tag rather than the default branch, until the next
-push to the branch rebuilds it.
+Desktop launchers let someone try a release without installing a toolchain. They ask before
+downloading and running the app:
 
-The `github-pages` environment has to admit the tag, or the promotion run has nothing to do; see
-[Project website](#project-website-daysite) for the one-line rule.
+```sh
+curl -fsSL https://github.com/<owner>/<repo>/releases/latest/download/launch.sh | bash
+```
 
-Add the trigger only with `release-mode: pre-release`. With `publish`, publishing the release
-fires the same event and the run rebuilds for nothing, which the preflight warns about.
+On Windows, use:
 
-A release that is already public and not a pre-release is never demoted, so re-running a tag
-after promoting it leaves it alone. `release-mode: draft` is the older `publish-release: false`:
-a complete draft, visible only to people with write access.
+```powershell
+irm https://github.com/<owner>/<repo>/releases/latest/download/launch.ps1 | iex
+```
 
 ### Signing
 
-`day pack` degrades to the dev tier (ad-hoc / dev keystore / self-signed) when signing secrets are
-absent — it never fails for that reason. On semantic-version tags, the same `DAY_*` secret names
-[daybrite/day's ci.yml](https://github.com/daybrite/day) uses light up release signing when they
-exist and the caller forwards them with `secrets: inherit`. Branch and PR builds always pack
-dev-signed, even when the secrets exist.
+Branch and pull request builds use development signing where available; device IPAs are
+unsigned. On version tags, supplied certificates and keys enable release signing. A signer
+with incomplete credentials fails the release. Build and test jobs do not receive signing keys.
 
-Every signer runs on one rule: a release that is not a promotion, the whole build matrix green,
-and the platform's material there. For the `.app` that material is the environment
-`signing-environment` names, and `sign-macos` signs and notarizes it. For the store packages it
-is the repository secrets: preflight plans one `sign` row per store target whose keystore or
-certificate is set, the build leg packs exactly those packages unsigned (`day pack --no-sign`,
-which produces `<stem>-<target>-unsigned.<ext>`: the iOS `.ipa`, the Android `.aab` and `.apk`,
-the HarmonyOS `.hap`), and each row, which checks out no code, signs its one package. A
-platform without material packs at the dev tier as on any other ref: a dev-signed `.apk` or
-`.hap` that installs, an `.ipa` that is unsigned on its own. A row hands its package and its
-platform's material alone to the [`sign-package`](#sign-package) action: the distribution
-certificate (`DAY_APPLE_CERT_P12` with `DAY_APPLE_CERT_PASSWORD`) and the App Store profile
-(`DAY_IOS_PROFILE_B64`) for iOS, into an ephemeral keychain; the upload keystore
-(`DAY_ANDROID_KEYSTORE_B64`, `DAY_ANDROID_KEY_ALIAS`, `DAY_KS_PASS`, `DAY_KEY_PASS`) for Android;
-the keystore, certificate and profile (`DAY_OHOS_KEYSTORE_B64`, `DAY_OHOS_CERT_B64`,
-`DAY_OHOS_PROFILE_B64`, `DAY_OHOS_KEY_ALIAS`, `DAY_OHOS_KS_PASS`, `DAY_OHOS_KEY_PASS`) for
-HarmonyOS, whose hap-sign-tool comes from the OpenHarmony SDK the row installs. The Mac App
-Store is signed in its upload job instead, since its signature is not the notarized download's:
-`appstore-macos` takes the unsigned `.app` the build staged for `sign-macos` and signs it into a
-`.pkg` with `DAY_MAS_CERT_P12` (one `.p12` holding the Apple Distribution and the Mac Installer
-Distribution identities), `DAY_MAS_CERT_PASSWORD`, and the Mac App Store profile
-`DAY_MAS_PROFILE_B64` (or one issued from the App Store Connect key with `DAY_APPLE_TEAM`). The action runs
-`day sign apply` over the package and removes the material; the row republishes `dist-<target>`
-with the signed package in place of the unsigned one. The App Fair's queue signs with the same
-action. The job that builds and runs the app's code never holds a signing key for any platform,
-so nothing an app's own build script or dependency runs can read one. A signer that runs and
-finds its set incomplete (the keystore without its alias or passwords, the certificate without
-its password) fails rather than degrading, as `sign-macos` does, since its package was packed
-unsigned for it and nothing else will sign it. The App Store upload itself takes
-`DAY_APPLE_TEAM` and the API key trio `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64`.
+For signed and notarized macOS downloads, set `signing-environment: release-signing` and put the
+macOS signing secrets in that GitHub environment. Store package credentials are repository
+secrets, forwarded through `secrets: inherit`.
 
-The token follows the same boundary as the keys. The build legs, which run the repository's
-code, hold a `GITHUB_TOKEN` narrowed to `contents: read`; the write grants a caller makes for
-release assets and Pages reach only the `release`, `pages` and `website` jobs, which run no
-repository code (see [Web deploy](#web-deploy)).
+<details>
+<summary>Signing and upload secrets</summary>
 
-Every store upload runs on the same gate: the whole build matrix succeeded (a failed walkthrough
-on any device is a regression the release does not ship, as the release job already holds) and
-that platform's signer ran. A release with a red leg therefore holds every signer and every
-store, not one. An upload that is on while its signer will not run (Play with no Android
-material, the App Store with no certificate, the Mac App Store with no `DAY_MAS_CERT_P12`) is
-refused when the uploads are decided, with the secrets to set, rather than by the lane after
-the build.
+| Destination | Secrets |
+|---|---|
+| macOS downloads | `DAY_MACOS_CERT_P12`, `DAY_MACOS_CERT_PASSWORD`, `DAY_SIGN_MACOS_IDENTITY`, `DAY_NOTARY_KEY_ID`, `DAY_NOTARY_ISSUER`, `DAY_NOTARY_KEY_B64` |
+| iOS signing | `DAY_APPLE_CERT_P12`, `DAY_APPLE_CERT_PASSWORD`, `DAY_IOS_PROFILE_B64` |
+| Mac App Store signing | `DAY_MAS_CERT_P12`, `DAY_MAS_CERT_PASSWORD`, `DAY_MAS_PROFILE_B64` |
+| Apple uploads | `DAY_APPLE_TEAM`, `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY_B64` |
+| Android signing | `DAY_ANDROID_KEYSTORE_B64`, `DAY_ANDROID_KEY_ALIAS`, `DAY_KS_PASS`, `DAY_KEY_PASS` |
+| Google Play uploads | `DAY_PLAY_JSON_KEY` (JSON contents) |
+| HarmonyOS signing | `DAY_OHOS_KEYSTORE_B64`, `DAY_OHOS_CERT_B64`, `DAY_OHOS_PROFILE_B64`, `DAY_OHOS_KEY_ALIAS`, `DAY_OHOS_KS_PASS`, `DAY_OHOS_KEY_PASS` |
 
-Signing after the build is not only a trust boundary. An archive signed automatically on a CI
-runner, whose keychain starts empty, had Xcode's cloud provisioning mint a new development
-certificate on every run, and the account filled up one tag build at a time until Apple refused
-to issue another; `day sign apply` signs with the certificate it is given and provisions
-nothing.
+Apple provisioning profiles can also be issued using the App Store Connect key and team.
+The Mac App Store `.p12` must contain both Apple Distribution and Mac Installer Distribution
+identities. See [sign-package inputs](.github/actions/sign-package/action.yml) for details.
 
-### Store uploads
+</details>
 
-On semantic-version tags, three independent jobs upload the packed artifacts to the stores by
-running a lane from the app's own fastlane config:
+## Store uploads
 
-| job | store | artifact it downloads | env it sets |
-|---|---|---|---|
-| `appstore-ios` | App Store Connect | `dist-ios-uikit` (the `.ipa`) | `DAY_IPA` |
-| `appstore-macos` | Mac App Store | `app-macos-appkit` (the unsigned `.app`, which the job signs into a `.pkg`) | `DAY_PKG` (and `DAY_PKG_OR_APP`) |
-| `playstore-android` | Google Play | `dist-android-material` (the `.aab`) | `DAY_AAB` |
+On version tags, the workflow can upload iOS, macOS, and Android packages to their stores.
+It uses `store/storefront.toml` to generate fastlane lanes, or runs your existing Fastfile.
+Uploads auto-enable when the listing or lane and the required upload credentials are present.
+The Mac App Store listing must explicitly name `mac-app-store`.
 
-The `upload-*` and `*-upload-lane` inputs that drive them are in [Inputs](#inputs).
-
-With an `upload-*` input left empty, the upload runs exactly when the repo has a fastlane config
-for that platform — a `fastlane/Fastfile` under `project-path` (for iOS also
-`platform/ios/fastlane/Fastfile`, for the Mac `platform/macos/fastlane/Fastfile`, for Play also
-`platform/android/fastlane/Fastfile`) containing the literal `platform :ios`, `platform :mac`, or
-`platform :android` (case-sensitive). For iOS and Play a `store/storefront.toml` listing counts as
-well: the job runs `day store stage` and uses the lanes it writes (`ios validate`, `ios upload`,
-and `ios release`, which also submits the version for review; `android validate`, `android
-upload`, and `android release`). The Mac App Store is opt-in, so for it the listing counts when it
-names `mac-app-store` (a `[storefront.macos-appkit.mac-app-store.*]` table), and the lanes are
-`mac validate`, `mac upload`, `mac submit` and `mac release`. An auto upload also needs the store's
-upload credentials: the App Store Connect key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
-`DAY_ASC_KEY_B64`) for iOS and the Mac App Store, `DAY_MAS_CERT_P12` and `DAY_MAS_CERT_PASSWORD`
-for the Mac App Store's signature, and `DAY_PLAY_JSON_KEY` for Play. Every app
-scaffold carries a `store/` listing for its website and web manifest, so a tagged release of an
-app without those secrets skips the store jobs instead of failing in them. The `store uploads` job
-runs on release tags and prints a `::notice` for each auto decision.
-
-Each job checks out the repo, downloads the built artifact, finds the package, and hands it to
-the [`store-upload`](#store-upload) action with the lane, the listing's screenshot index and the
-credentials. The action stages the listing (or takes the app's own `fastlane/`), points the
-`DAY_*` variable at the package (an absolute path), and runs the lane from the directory holding
-`fastlane/` — with `bundle install && bundle exec fastlane <lane>` when a `Gemfile` is present,
-plain `fastlane <lane>` otherwise (installed with `gem install fastlane` on ubuntu; macOS runners
-ship it). The iOS job hands it the App Store Connect API key (`DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`,
-`DAY_ASC_KEY_B64`), which reaches the lane as `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER` and
-`DAY_ASC_KEY` (the `.p8` as a file), what the staged lanes read; a repository's own Fastfile may
-read the same names or its own. The Play job hands it `DAY_PLAY_JSON_KEY` (the service-account
-JSON), which reaches the lane as `SUPPLY_JSON_KEY`. The macOS job signs first: it downloads
-the unsigned `.app` (`app-macos-appkit`), signs it into a `.pkg` named after the release's `.dmg`
-through [`sign-package`](#sign-package), and hands that `.pkg` and the App Store Connect key to
-the action as the iOS job does. The App Fair's queue uploads with the same action. Caller
-permissions are unchanged: the upload jobs need nothing beyond what the workflow already uses.
-
-```ruby
-# fastlane/Fastfile
-platform :ios do
-  lane :upload do
-    upload_to_app_store(ipa: ENV.fetch("DAY_IPA"), skip_screenshots: true, skip_metadata: true)
-  end
-end
-platform :android do
-  lane(:upload) { upload_to_play_store(aab: ENV.fetch("DAY_AAB"), track: "internal") }
-end
+```mermaid
+flowchart TD
+    passed["Required builds and tests pass"] --> signed["Sign the store package"]
+    listing["Store listing and selected screenshots"] --> staged["Validate and stage listing"]
+    signed & staged --> lane{"Selected fastlane lane"}
+    lane -->|upload| upload["Upload for preparation or testing"]
+    lane -->|release| submit["Submit to review or production"]
 ```
+
+For an app with store listings and signing/upload secrets configured:
+
+```yaml
+with:
+  targets: ios-uikit, macos-appkit, android-material
+  upload-ios: "true"
+  upload-macos: "true"
+  upload-play: "true"
+  ios-upload-lane: ios upload
+  macos-upload-lane: mac upload
+  play-upload-lane: android upload
+```
+
+The `upload-*` inputs are strings: use quoted `"true"` or `"false"`. Enabling an upload without
+its signing credentials fails the run.
+
+The generated lanes distinguish uploading a build from submitting it:
+
+| Store | Default lane | To submit |
+|---|---|---|
+| iOS App Store | `ios upload`: upload without review submission | `ios release`: upload and submit for review |
+| Mac App Store | `mac upload`: upload without review submission | `mac release`: upload and submit for review |
+| Google Play | `android upload`: draft on the internal track | `android release`: completed release on the production track |
+
+For example, change `ios-upload-lane` to `ios release` when the tag should also submit the app
+for review. A custom Fastfile controls its own behavior; it receives the package as `DAY_IPA`,
+`DAY_PKG`, or `DAY_AAB`.
 
 ### Store screenshots
 
-By default an upload leaves the screenshots each store already shows. With
-`store-screenshots: true`, the upload replaces them with the captures the app declares for the
-listing in `store/storefront.toml`, naming its walkthrough's `screenshot:` steps per store and device
-kind (the [store listings](https://daybrite.dev/docs/store#screenshots) doc has the whole shape):
+Uploads leave existing store screenshots alone by default. To replace them with this run's
+captures, set `store-screenshots: true` and select screenshot step names in
+`store/storefront.toml`:
 
 ```toml
 [storefront.ios-uikit.apple-app-store.screenshots]
@@ -710,476 +316,167 @@ ipad = ["home", "editor"]
 default = ["home", "editor"]
 ```
 
-Each list applies to every locale the walkthrough captured. The captures are this
-run's own: the build legs for the target uploaded them as `screenshots-<target>` and
-`screenshots-<target>-<slug>`, one per device profile (a flavor submission's as
-`flavor-<name>-screenshots-<target>…`), so the set is the tagged version's, and no website,
-release or earlier run is consulted. Each upload job downloads those artifacts into one capture
-tree and indexes it with `day screenshot index`; the `store-upload` action then runs `day store
-screenshots` on the index and stages the listing with `day store stage --screenshots`. Every
-locale the store knows gets its own set; the theme is
-the theme each item names in `store/storefront.toml`, `light` unless the item says `{ name = "…", theme = "dark" }`.
+Run the scripts in the selected themes and locales. The workflow checks the captures against
+[store rules](.github/actions/store-rules/store-rules.toml) before upload. The default mobile
+profiles support this flow; Android tablet captures are scaled during staging to meet the store
+size requirement. Missing captures or invalid sets fail the upload with a reason.
 
-What the check requires, and fails the upload on before anything is signed:
+Automatic screenshot placement requires the generated lanes. If you supply a Fastfile, it must
+handle screenshot placement. See the [store listing guide](https://daybrite.dev/docs/store#screenshots)
+for listing configuration.
 
-| store | device | rule |
-|---|---|---|
-| App Store | `iphone`, `ipad` | one of Apple's exact sizes per device, at most 10 per locale; the default profiles `iPhone * Pro Max` and `iPad Pro 13-inch` produce 1320×2868 and 2752×2064 |
-| Google Play | `phone`, `tablet` | 1080 to 7680 px a side, the long side at most 2.3× the short, at most 8 per locale; the tablet set is optional. These are the numbers Play's publishing API enforces ("min size: [1080], max size: [7680], max aspect ratio: [2.3]"), not the 320 px and 2:1 of its help page |
+## Project website
 
-Every locale the walkthrough captured needs a capture on each required device. The workflow's
-default `medium_tablet` is captured halved (1280×800, see [Device profiles](#device-profiles))
-and Play refuses it as captured, so `day store stage` scales it up x2 before placing it (the
-store rules mark Play's tablet kinds `upscale = true`), and preflight says so in a notice. The
-default pair therefore serves the listing:
+Set `deploy-web: true` with `web-dom` in `targets` to host the web app on GitHub Pages.
+Add `website/site.toml` to publish a [daysite](https://github.com/daybrite/daysite) project site
+with downloads, a screenshot gallery, and the web app:
 
-```yaml
-      android-devices: |
-        device=medium_phone,  os=36, orientation=portrait,  slug=phone
-        device=medium_tablet, os=36, orientation=landscape, slug=tablet
-      store-screenshots: true
+```toml
+# website/site.toml
+host = "https://<owner>.github.io/<repo>"
 ```
 
-Any 1080-wide phone (`medium_phone`, `pixel_7`, `pixel`) clears the phone slot as captured. A
-profile captured at a store size (`Nexus 7 2013` at `density=240`, 1920x1200) is placed as it
-is, at the cost of a heavier panel for the emulator to rasterize.
-
-The limits themselves are data in this repository,
-[`.github/actions/store-rules/store-rules.toml`](.github/actions/store-rules/store-rules.toml),
-handed to the CLI through `DAY_STORE_RULES`; the day CLI embeds the same file as its
-default. When a store changes what it accepts, edit the file here and every app takes it on its
-next run. A CLI from before the staged Mac App Store (an app pinned to an older `day-version`)
-gets a copy with the Mac App Store unstaged, since it reads the rules strictly and would refuse
-the newer keys.
-
-The input needs a dayscript with marked `screenshot:` steps running on the target, and the
-lanes `day store stage` writes: an app with its own Fastfile places its own screenshots, and the
-run fails rather than guess. An artifact with no captures, or a set the stores would refuse,
-fails in the upload job with the reason. The Mac App Store upload takes the `screenshots-macos-appkit`
-captures the same way.
-
-### Web deploy
-
-With `deploy-web: true` (and `web-dom` among the `targets`), a final job publishes the `web-dom`
-(WebAssembly) build to the calling repository's own
-[GitHub Pages](https://docs.github.com/pages). It **reuses the release-profile dist the build
-already produced** — no second build — and the dist references every asset by a relative path, so
-it serves correctly from a project-Pages subpath (`https://<owner>.github.io/<repo>/`) with no
-`<base>` tag or path rewriting.
+Give the calling job Pages permissions:
 
 ```yaml
-# .github/workflows/ci.yml — build every target and deploy the web build on each push to main
-permissions:
-  contents: read
 jobs:
   app:
     uses: daybrite/actions/.github/workflows/dayapp.yml@v1
     permissions:
-      contents: write # release-asset upload on tag builds
-      pages: write    # web-dom → GitHub Pages
-      id-token: write # deploy-pages OIDC token
+      contents: write
+      pages: write
+      id-token: write
     secrets: inherit
     with:
-      targets: macos-appkit, ios-uikit, android-material, web-dom
+      targets: all # Include web-dom in Day.toml.
       deploy-web: true
-      # web-deploy-tag-pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'   # publish only on version tags instead
 ```
 
-By default it publishes on a push to the repo's default branch; set `web-deploy-tag-pattern` to a
-regex to publish only on matching tags. The native release-assets job (on `vX.Y.Z` tags) is
-independent, so one caller can attach packages on tags *and* deploy the web build on every push to
-main. The deploy waits for every build leg to succeed, so a run whose build failed or never ran
-leaves the published web app as it was.
+In repository settings, set **Pages → Source → GitHub Actions**. For tag deployments, also
+allow your version tags in **Environments → github-pages → Deployment branches and tags**.
 
-Pages keys a deployment by its commit, so a second deploy of a commit it has already deployed is
-reported a success and not served. Marking a release Latest rebuilds the site from the commit the
-push to `main` already deployed, so that site catches up at the next deploy of a new commit.
+```mermaid
+flowchart LR
+    release["Latest release assets"] --> stable["Release pages"]
+    preview["Pending pre-release assets"] --> candidate["Preview pages"]
+    build["This run's packages and screenshots"] --> dev["Development pages"]
+    stable & candidate & dev --> site["Project site with version picker"]
+    site --> pages["GitHub Pages"]
+```
 
-#### Re-running failed legs
+Each release page uses that release's packages and screenshots. Development pages use the
+current run's artifacts and carry a development notice. A pending pre-release gets a separate
+tab. Use `tab-release`, `tab-pre-release`, and `tab-main` to choose which tabs appear.
 
-A leg that fails, a dayscript included, fails the run, and neither the release, the web deploy nor
-the website publishes. Re-run it from the run's page with **Re-run failed jobs**: GitHub re-runs
-the failed legs and every job waiting on them, and once the legs pass, the release and deploys run
-with the first attempt's passing legs counted. The website assembles every leg's screenshots, the
-re-run's replacing the failed attempt's. Set `tolerate-failures: true` to let the best-effort work
-fail without holding anything back instead.
+The project site deploys on default-branch pushes and version tags after the required builds
+pass. Without `website/site.toml`, `deploy-web` publishes the bare web app on default-branch
+pushes. Set `web-deploy-tag-pattern` to restrict automatic deployment to matching tags.
 
-**Re-running a job is safe.** Artifacts belong to the run, not to the attempt, so a re-run used to
-leave a second artifact named `github-pages` beside the first and `actions/deploy-pages` refused to
-deploy at all — one flaky build leg would take the whole workflow down on its way out
-([upload-pages-artifact#97](https://github.com/actions/upload-pages-artifact/issues/97)). The Pages
-artifact now carries the run attempt in its name, so each attempt deploys its own; a duplicate left
-by the uploader's internal retry is swept before deploying, where the caller's token allows it.
-Nothing to configure.
+Use `daysite-version` to pin the template. Themes and other site settings belong in
+`website/site.toml`; see the [app website guide](https://daybrite.dev/docs/websites) and
+[daysite customization guide](https://github.com/daybrite/daysite/blob/main/docs/customization.md).
 
-WinUI script jobs enable Windows Error Reporting full dumps before launching the app. If a native
-crash produces a dump, the job uploads it as `<artifact-prefix>crash-dumps-windows-winui-<attempt>`
-(with the flavor in the name when applicable), retained for seven days. Open the `.dmp` in WinDbg
-or Visual Studio to inspect the native fault; a lost engine connection alone does not identify
-its cause. Startup hangs do not produce WER crash dumps.
+If you call `dayapp` twice in one run, set `deploy-website: "false"` on the second call and
+let one call own release publication with `release-assets: false` on the other.
 
-A hosted Windows runner has no audio endpoint, so Media Foundation cannot create an audio
-renderer there: an audio-only source fails with `MF_E_CANNOT_CREATE_SINK` (0xC00D36FA), while a
-video with a soundtrack plays silently. The workflow installs no virtual sound card: Scream's
-driver signature expired in 2023 and its install hangs the job on the current image. Gate steps
-that assert on audio-only playback with `skip_on: [windows-winui]`.
+## Flavors and library releases
 
-### Requirements
-
-- The project's `Cargo.toml` must resolve its `day` dependencies on a runner — a git dependency
-  (`day = { package = "day-app", git = "https://github.com/daybrite/day.git" }`, the
-  `day new app --git` default), not
-  a local path. For local-checkout development, put a `[patch]` in a gitignored
-  `.cargo/config.toml`.
-- Attaching release assets needs `permissions: contents: write` on the calling job.
-- **Web deploy** additionally needs, on the calling job: `permissions: pages: write` **and**
-  `id-token: write` (the latter lets `actions/deploy-pages` mint the OIDC token it uploads with —
-  omitting it fails with a 403), plus the one-time repo setting Settings → Pages → "Build and
-  deployment" → **Source = "GitHub Actions"**. No repository secrets are involved.
-- Put those grants on the job that calls this workflow, not at the top of the caller, so the
-  caller's own jobs run with the read-only default. Inside this workflow only `release`,
-  `pages` and `website` keep the caller's grant; every job that runs the repository's code —
-  preflight, the build legs, validate, the store jobs — declares `contents: read` and so
-  holds a token that can neither push, nor edit a release, nor mint an OIDC credential. A
-  called job can narrow the caller's grant but never widen it, which is why those three jobs
-  declare nothing: a caller that grants `contents: read` alone (day's own CI) still runs.
-
-## Composite actions
-
-`dayapp` is the whole pipeline. When you only want a piece of it, the actions it is built
-from are usable on their own — daybrite/day's own workflows call them directly.
-
-### `setup-day-deps`
-
-Everything one platform-toolkit target needs on a runner, in one step: the toolkit's dev libraries,
-the Rust std for its cross-compile, the SDK a mobile target builds through, and the tools
-`day pack` needs. What a target needs is a property of the target, so it is derived here rather
-than spelled out again in every workflow.
+Build a free, paid, or customer-specific version by adding a `Day-<name>.toml` beside `Day.toml`:
 
 ```yaml
-- uses: daybrite/actions/.github/actions/setup-day-deps@v1
-  with:
-    target: linux-gtk   # required; any of the 10 combos
-    pack: true          # flatpak-builder + linuxdeploy (linux), NSIS (windows-winui)
-    extras: false       # walkthrough extras: web view dev libs, xvfb, imagemagick, CJK fonts
-    java: false         # pin JDK 21 + Gradle for android/harmony (else the runner's own JDK)
-    rust: true          # rustup target add this target's std
-    packages: ""        # the app's own extra packages, via apt / brew / choco
+with:
+  targets: all
+  flavors: paid
+  release-flavor: paid
+  store-flavor: paid
 ```
 
-Everything that is not "make this target buildable" stays with the caller: checking out the app,
-installing the CLI (`setup-day-cli`), emulators, signing material, and the build/pack/script
-commands themselves.
+`flavors` adds builds alongside the base app. `release-flavor` attaches that flavor's packages
+to the GitHub release; `store-flavor` selects its packages and listing for store uploads.
+Omit those two inputs to keep the extra builds as CI artifacts. See
+[build flavors](https://daybrite.dev/docs/flavors) for the app configuration.
 
-Qt SVG and librsvg development libraries are installed for Qt and GTK targets even with
-`extras: false`; their native vector renderers require them to compile. Setup checks these
-libraries through `pkg-config` before the caller starts building.
-
-Windows WinUI packaging restores the pinned NSIS installer from GitHub Actions cache, keyed
-by OS, architecture, version and SHA-256. Every restored installer is checksum-verified;
-missing or corrupt bytes are downloaded from SourceForge with retries. A valid cache hit
-needs no Chocolatey or SourceForge request. The installer is saved after setup, before builds
-and tests, so a later failure does not lose it. New runners still install NSIS locally.
-
-### `setup-day-cli`
-
-Installs the `day` CLI and exports `DAY_BIN` — a release's binary (`latest` or a version, checked
-against the release's `SHA256SUMS`), a build from a git ref, or an artifact this run built
-(`day-source: artifact`, how daybrite/day tests the CLI it just compiled). Source installs
-never reuse a build directory: a cached one once handed `--branch main` a stale binary labeled
-with the new commit. With `cache` on (the default), a git install instead caches the finished
-binary under a key naming the commit it was built from, `day-cli-<runner image>-<arch>-<commit>`.
-The action resolves the branch or tag to that commit and builds exactly it, so a leg restores the
-CLI only when the commit is unchanged, and a new commit always builds.
-
-Two outputs say what was installed. `cargo-root` is the directory cargo installed into, so
-`cargo install --list --root <it>` shows the build's record: `?branch=main#<short>` for an uncached
-git install, `?rev=<commit>#<short>` for a cached one. `commit` is the full commit a cached
-install was built from. A check that the CLI is a build of `main` reads the record from
-`cargo-root`, since the cache does not install into `~/.cargo`.
-
-### `day-deps`
-
-Resolves a cargo project's Day dependencies to the day the run builds against, the decision
-`dayapp.yml`'s preflight makes for its legs: under `published`, every `day-*` crate the lock takes
-from crates.io moves to its newest compatible release; under `main`, it writes the project's
-`.cargo/config.toml` with `day patch --git <day>@<commit> --main --check`, run by the newest
-release's CLI when it knows `--main`, or else by one built from that commit (cached). `day-deps: auto` picks by the event the same way. Run it after the Rust
-toolchain is installed and before the job's own cargo commands:
+For a piece or part with a demo app, build the demo and publish the library from the same tag:
 
 ```yaml
-host:
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v7
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: daybrite/actions/.github/actions/day-deps@v1
-      with:
-        day-deps: ${{ inputs.day-main && 'main' || 'auto' }}
-    - run: cargo test
+jobs:
+  app:
+    uses: daybrite/actions/.github/workflows/dayapp.yml@v1
+    permissions:
+      contents: write
+      id-token: write
+    with:
+      targets: all
+      project-path: demo
+      publish-crates: true
 ```
 
-Its outputs say what it chose: `mode`, `rev` (the day commit under `main`), `version` (the
-release under `published`), and `cli` (the matching `setup-day-cli` version).
+Before using `publish-crates`, configure each crate's Trusted Publisher with this repository,
+the calling workflow filename, and environment `release`. New crates need an initial publication
+before Trusted Publishing can be configured. Versions come from the manifests. The action
+publishes in dependency order and skips versions already on crates.io, so interrupted runs can
+resume. Use `publish-crates-paths` for multiple workspaces.
 
-### `publish-crates`
+For desktop self-updates, `post-pack-command` can stage helper files and update metadata.
+`update-signing: true` signs that metadata after platform signing; `macos-update-zip` adds a
+signed update archive. Configure `update-public-key`, `update-application-id`, and
+`DAY_UPDATE_PRIVATE_KEY` in the signing environment. See the
+[workflow inputs](.github/workflows/dayapp.yml) and
+[sign-updates action](.github/actions/sign-updates/action.yml) for the metadata requirements.
 
-Publishes every publishable member of a cargo workspace to crates.io: each crate whose `publish`
-is not `false`, at its manifest version, in dependency order, skipping versions crates.io already
-has, so a re-run finishes an interrupted release. crates.io accepts 30 new versions at once and
-then one a minute, and a Trusted Publishing token lasts 30 minutes, so the action authenticates
-three times with up to 25 uploads each and waits out any rate-limit refusal. It ends by asking
-crates.io whether anything is still missing.
+## Individual actions
+
+Use these actions as steps when you already have a workflow. Each link lists its inputs and
+outputs.
+
+| Action | Purpose |
+|---|---|
+| [setup-day-deps](.github/actions/setup-day-deps/action.yml) | Install a target's libraries, SDKs, and optional packaging tools. |
+| [setup-day-cli](.github/actions/setup-day-cli/action.yml) | Install a released CLI, build one from Git, or download a run artifact; export `DAY_BIN`. |
+| [day-deps](.github/actions/day-deps/action.yml) | Select published, main, or locked Day dependencies before Cargo commands. |
+| [sign-package](.github/actions/sign-package/action.yml) | Sign an existing iOS, Android, HarmonyOS, or Mac App Store package. |
+| [store-upload](.github/actions/store-upload/action.yml) | Stage a listing and run a fastlane lane with a signed package. |
+| [publish-crates](.github/actions/publish-crates/action.yml) | Publish workspace crates through Trusted Publishing. |
+| [sign-updates](.github/actions/sign-updates/action.yml) | Sign desktop update metadata. |
+| [dayscript-report-summary](.github/actions/dayscript-report-summary/action.yml) | Summarize DayScript reports in the GitHub run. |
+
+For example, run a library's host tests against published Day dependencies:
 
 ```yaml
-publish:
-  runs-on: ubuntu-latest
-  environment: release
-  permissions:
-    id-token: write
-  steps:
-    - uses: actions/checkout@v7
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: daybrite/actions/.github/actions/publish-crates@v1
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: daybrite/actions/.github/actions/day-deps@v1
+        with:
+          day-deps: published
+      - run: cargo test
 ```
 
-Each crate's trusted publisher on crates.io names the repository, the workflow file that runs the
-job (for `dayapp.yml`'s `publish-crates`, the calling workflow, such as `ci.yml`) and the
-environment `release`. Trusted Publishing can only be configured for a crate that exists, so a new
-crate is reserved first with an empty 0.0.1 placeholder, from a checkout logged in with
-`cargo login`:
+## Targets
 
-```sh
-python3 ../actions/.github/actions/publish-crates/crates-io.py --root . reserve --only <crate>
-```
+| Target | Runner | Packages / test environment |
+|---|---|---|
+| `macos-appkit` | `xcode-27` | `.dmg`; native desktop |
+| `ios-uikit` | `xcode-27` | `.ipa`; iOS Simulator |
+| `linux-gtk`, `linux-qt` | `ubuntu-latest` | `.flatpak` and `.appimage`; virtual display |
+| `windows-winui` | `windows-latest` | `.msix` and NSIS installer; native desktop |
+| `android-material` | `ubuntu-latest` | `.apk` and `.aab`; Android emulator |
+| `harmony-arkui` | `ubuntu-latest` | `.hap`; Oniro emulator |
+| `web-dom` | `ubuntu-latest` | Web distribution ZIP; headless Chromium |
+| `macos-gtk`, `macos-qt` | `xcode-27` | Build and script coverage; packaging unavailable |
 
-### `sign-package`
+Use `target-packages` for extra system dependencies and `target-setup` for commands before a
+target builds. `setup-command` is for generating a project during the run; it skips preflight,
+dependency resolution, and the clean-checkout check.
 
-Signs a packed app with key material named on the command line, through `day sign apply`, which
-re-signs the package as an archive so no app code runs. An iOS `.ipa` takes a distribution
-certificate and an App Store profile — a stored one, or one the action issues now from an App
-Store Connect key (`fastlane sigh`) so the caller stores none per app; an Android `.aab` or
-`.apk` takes the upload keystore, with further `.apk` files signed best-effort; a HarmonyOS
-`.hap` takes its keystore, certificate and profile (`ohos-*` inputs), signed by the OpenHarmony
-SDK's hap-sign-tool, so the caller sets that SDK up first (`setup-day-deps`); a macOS `.app`
-takes one `.p12` with the Apple Distribution and Mac Installer Distribution identities and a
-Mac App Store profile (stored, or issued for the macos platform), and comes out as a `.pkg`
-where `out` says. The certificate
-lives in an ephemeral keychain the action destroys when it ends, whatever happened in between,
-and the decoded files do not outlive their step.
-A package named `<stem>-unsigned.<ext>` is signed to `<stem>.<ext>` with its provenance sidecars
-renamed along. The caller sets up the CLI first (`setup-day-cli`).
+Windows runners have no audio endpoint, so scripts that require audio-only playback need a
+platform skip. HarmonyOS WebView support and emulator limitations are described in
+[setup-harmony-webview](.github/actions/setup-harmony-webview/README.md).
 
-```yaml
-- uses: daybrite/actions/.github/actions/sign-package@v1
-  id: sign
-  with:
-    target: ios-uikit
-    package: ${{ runner.temp }}/dist/app-ios-uikit-unsigned.ipa
-    apple-cert-p12: ${{ secrets.DAY_APPLE_CERT_P12 }}
-    apple-cert-password: ${{ secrets.DAY_APPLE_CERT_PASSWORD }}
-    apple-profile-b64: ${{ secrets.DAY_IOS_PROFILE_B64 }}   # or app-id + the App Store Connect key
-# ${{ steps.sign.outputs.package }} is the signed .ipa
-```
-
-### `store-upload`
-
-Stages an app's store listing and runs a fastlane lane over a signed package. `day store stage`
-writes the fastlane project from `store/storefront.toml` (holding the text to `day lint`'s rules
-first, and placing the listing's screenshots from a gallery index the action checks against the
-stores' rules); an app with a `fastlane/Fastfile` of its own (or `platform/<os>/fastlane/`) keeps
-it, and the lane runs there instead. The package reaches the lane as `DAY_IPA`, `DAY_AAB` or
-`DAY_PKG` (also `DAY_PKG_OR_APP`, its older name), the credentials as `DAY_ASC_KEY_ID`, `DAY_ASC_ISSUER`, `DAY_ASC_KEY` and
-`SUPPLY_JSON_KEY`, each given as a value or as a file already on the runner. The caller sets up
-the CLI first.
-
-```yaml
-- uses: daybrite/actions/.github/actions/store-upload@v1
-  with:
-    target: android-material
-    package: ${{ steps.sign.outputs.package }}
-    lane: android upload
-    project-path: .                      # the app's checkout
-    screenshots: shots/gallery.json      # empty leaves the store's screenshots alone
-    rules: ${{ steps.rules.outputs.path }}
-    play-json-key: ${{ secrets.DAY_PLAY_JSON_KEY }}
-```
-
-Both actions are what `dayapp.yml`'s `sign` and upload jobs run, and what the App Fair's
-queue runs in its signing stage, so the two pipelines sign and upload one way.
-
-## Validation
-
-`validate.yml` runs on every push and pull request: it scaffolds a fresh app with `day new app`
-and drives it through the reusable workflow for all 7 primary platform-toolkit pairs, with
-`day-version` at its default (`main` for a generated project) and the scaffold's day from git, so
-the CLI and the framework come from the same tree. (It exercises
-`dayapp`'s build/pack path; the web deploy publishes to a live Pages site and so isn't part
-of the validation run.)
-
-## Project website (daysite)
-
-Add a `website/site.toml` to your repository and the same workflow builds and deploys a full
-project site to your GitHub Pages — landing page, screenshot gallery, and download links — using
-the [daybrite/daysite](https://github.com/daybrite/daysite) template, with the web-dom build
-hosted under the site's `webapp/` subdirectory (`site.toml` `webapp` key names it). The content
-comes from what the repo already maintains: `Day.toml`, the `store/` listings, the screenshots
-your dayscripts capture in this very workflow, and the latest release's assets.
-
-Follow Day's [App websites guide](https://daybrite.dev/docs/websites) for the complete setup,
-local previews, customization, GitHub Pages settings, and optional custom domains. A custom
-Astro project still uses `website/site.toml` and the workflow's staging/output contract.
-
-```toml
-# website/site.toml — the only required key:
-host = "https://<owner>.github.io/<repo>"
-```
-
-Everything else about the site is a key in that file rather than an input here, because it is a
-property of the app and not of the run: the accent color, which platform the picker opens on,
-and `icon-effect`, which decides what the landing page's app mark does when a visitor hovers it
-(the [daysite README](https://github.com/daybrite/daysite#icon-effect) lists the six). This
-workflow's inputs stay the things a build can vary.
-
-### Two build channels
-
-The site publishes the app twice, with a version picker above the platform picker:
-
-| | `/<locale>/` — the release | `/<locale>/main/` — the branch |
-| --- | --- | --- |
-| picker label | the release's version, `1.2.3` | the default branch, `main` |
-| downloads | that release's packages, at their `releases/latest/download/` URLs | this run's packages, served from the site under `main/downloads/` |
-| screenshots | that release's `screenshots.tar.xz` | the captures this run's dayscripts took |
-| web app | that release's `web-dom` dist, at `/webapp/` | this run's, at `/main/webapp/` |
-| page | as published | carries a development-build notice and a link to the release |
-
-The release channel is assembled from **assets the release already carries** and nothing the run
-built, so the file a visitor downloads is the version the page names. The development channel is
-assembled from this run's artifacts and says so on every page; its packages are copied onto the
-site because a GitHub Actions artifact needs a signed-in account and expires with the run's
-retention window. That last part is the one cost worth knowing: a full package set is tens to
-hundreds of megabytes on every Pages deploy (Day Rise's is 117 MB).
-
-A repository with no release publishes the branch build at the locale root instead, and the
-picker, having one entry, is not drawn.
-
-With `deploy-web: true`, a missing web artifact fails deployment. Webapp directories are cleared
-before staging, including channels without an artifact, so template leftovers cannot be served.
-
-### Deploys and setup
-
-By default, the site deploys on pushes to the default branch and release tags, because the
-release channel's content changes when a release is published. Setting
-`web-deploy-tag-pattern` restricts automatic website deployment to matching tags instead.
-The job waits for the release job so it sees the release it just made. It also waits for
-every build leg to succeed: the site hosts the
-web app, screenshots and packages that build produced, so a run whose build failed or never ran
-leaves the live site as it was. They need the same one-time setup: grant `pages: write` +
-`id-token: write` and set Settings → Pages → Source = "GitHub Actions". `daysite-version`
-selects the template revision; the default, `main`, means every rebuild takes the template's
-latest fixes, which is what the Day apps want. Without a `website/` directory,
-`deploy-web: true` keeps its original behavior — the bare web app at the Pages root.
-
-Apps can select a separate website theme in `website/site.toml`:
-
-```toml
-[theme]
-repository = "appfair/appsite"
-ref = "main" # A released tag or commit can pin the theme independently of daysite-version.
-```
-
-The website job checks it out as `site-theme`, installs the theme and project website npm
-dependencies from their lockfiles, and runs daysite's renderer selection. Local themes can use
-`path = "./theme"` instead, relative to `website/site.toml`. With no theme, the default site and
-the existing `theme.css` behavior are unchanged. An app can supply `website/daysite.config.mjs`
-for component/style overrides or `website/astro.config.mjs` to own its Astro configuration;
-the latter takes precedence over a theme's configuration. Generated screenshots, release
-downloads, and hosted web builds stay in `daysite/public`; the uploaded output stays in
-`daysite/dist`. See the [daysite customization contract](https://github.com/daybrite/daysite/blob/main/docs/customization.md)
-for component wrapping, custom routes, and Astro blogs. This requires the updated actions and
-daysite revisions. Existing apps pinned to older daysite revisions still use their original
-default build. The App Fair repository must be published before selecting it remotely.
-
-After upgrading a reusable workflow tag such as `v1`, start a new app workflow run or choose
-**Re-run all jobs**. Re-running only a failed job retains the reusable workflow's original
-commit, so it cannot pick up a newly added theme checkout or renderer launcher. See GitHub's
-[reusable workflow rerun behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#behavior-of-reusable-workflows-when-re-running-jobs).
-
-A workflow that calls `dayapp.yml` twice in one run (a second call with `artifact-prefix`, say,
-to pack a demo-data variant) must set `deploy-website: "false"` on the second call. Left to the
-`site.toml` rule, both calls deploy: the first publishes a site assembled from its own
-artifacts, and the second finds a duplicate Pages artifact in the run and fails.
-
-A tag deploys only when the repository's `github-pages` environment admits it, and turning Pages
-on creates that environment admitting the Pages branch alone. The `preflight` job reads the
-environment's deployment rules for a tag build. When they would refuse the tag, it skips the site
-and web deploys with a warning instead of letting those jobs fail the run. To publish on release
-tags, add a tag rule under Settings → Environments → `github-pages` → Deployment branches and
-tags, or run:
-
-```sh
-gh api -X POST repos/<owner>/<repo>/environments/github-pages/deployment-branch-policies -f name='v*' -f type=tag
-```
-
-An environment set to protected branches only never admits a tag. When the rules cannot be read,
-the deploys run and GitHub decides as each job starts.
-
-This rule is a prerequisite for [staging a release](#staging-a-release), not a nicety: a
-promotion run's ref is the tag, so an environment that admits `main` alone refuses it, and the
-run has nothing left to do. It says so and stands every job down.
-
-The job reads the network in two places only: the template's npm packages, installed from its
-lockfile as committed, and the repository's latest release — its asset list through `gh api`, its
-screenshot bundle and web dist through `gh release download` — each handed to the site generator
-as a file or a directory. The `day` CLI merges each channel's screenshot index, renders the icon
-family the favicons are copied from, and exports the storefront (`day store export`: the app's
-identity, the listing text per locale, the store records, and the declared permissions with
-their reasons in every locale), which is everything the site says about the app; the site build
-itself fetches nothing, and fails if the built site would load a resource from another origin.
-A release also carries that document as `storefront.json`, beside `gallery.json`.
-
-### Signed desktop updates and demo releases
-
-Tagged `day-piece-*` / `day-part-*` demo apps already use `project-path: demo` with
-`release-assets: true` (the default). The tag's workflow builds and publishes that app through the
-same path as a standalone app. The demo's package version/build must be advanced before tagging.
-
-An updater can additionally opt into:
-
-```yaml
-project-path: demo
-post-pack-command: python ../scripts/release.py stage "$DAY_PACK_TARGET"
-signing-environment: release-signing
-macos-update-zip: selfupdate-demo-macos-appkit-update.zip
-update-signing: true
-update-public-key: ${{ vars.DAY_UPDATE_PUBLIC_KEY }}
-update-application-id: dev.daybrite.selfupdatedemo
-```
-
-`post-pack-command` runs from the project directory after packing and before artifact staging,
-with `DAY_PACK_TARGET` set. It has no signing credentials. It can embed helper/XPC code in the
-packed macOS app and place extra payloads plus `update-<target>-<arch>.unsigned.json` templates
-under `build/day/dist/`. The template names `application_id`, `version`, increasing integer `build`,
-`target`, `archive`, and (for Windows/Linux) `helper.name`; it does not supply trusted hashes.
-
-The isolated macOS signer signs Helpers and XPCServices before the enclosing app. With
-`macos-update-zip`, it also validates the app sandbox entitlement, staples the app after the DMG's
-notarization, and archives the app with Apple metadata preserved. The ZIP is a separate update
-payload, while the signed DMG remains the initial-install package.
-
-`update-signing` adds a separate job after platform signing. It reads `DAY_UPDATE_PRIVATE_KEY`
-from the signing environment, checks it against `update-public-key`, hashes the final package and
-helper files, and signs exact schema-2 metadata bytes using Ed25519. Its only executable code is
-the maintained `sign-updates` action and its cryptography dependency; it never builds or runs the
-app or its helper with the key present. The release waits for this job, attaches the `.json` and
-`.json.sig` files, and drops unsigned templates. Missing/mismatched keys fail release publication.
-Existing callers remain unchanged unless they opt in.
-
-## Android target naming
-
-Use `android-material` for the Android target and `material` for its toolkit and Cargo
-feature. The tooling temporarily accepts `android-mdc` and `mdc`, warns that they are
-deprecated, and writes canonical target names. Mixed spellings in target lists select one
-target; conflicting override keys are rejected. These aliases do not apply to Rust package
-names, imports, or Cargo features. They will be removed in the next announced breaking
-tooling release after one release of overlap.
+This repository's [validation workflow](.github/workflows/validate.yml) scaffolds a fresh app
+and checks the reusable build/package workflow on the primary targets.
