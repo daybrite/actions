@@ -396,26 +396,46 @@ to the GitHub release; `store-flavor` selects its packages and listing for store
 Omit those two inputs to keep the extra builds as CI artifacts. See
 [build flavors](https://daybrite.dev/docs/flavors) for the app configuration.
 
-For a piece or part with a demo app, build the demo and publish the library from the same tag:
+For a piece or part with a demo app, publish the library from its own job, gated on the
+repository's build and test jobs rather than on the demo legs:
 
 ```yaml
 jobs:
-  app:
+  host: …          # cargo build/test per OS
+  cross-check: …   # cargo check per mobile and web target
+  demo:
     uses: daybrite/actions/.github/workflows/dayapp.yml@v1
     permissions:
       contents: write
-      id-token: write
     with:
       targets: all
       project-path: demo
-      publish-crates: true
+  publish:
+    needs: [host, cross-check]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: daybrite/actions/.github/actions/publish-crates@v1
 ```
 
-Before using `publish-crates`, configure each crate's Trusted Publisher with this repository,
-the calling workflow filename, and environment `release`. New crates need an initial publication
+A tag publishes as soon as those jobs pass. The demo's packaging and emulator walkthroughs can
+take hours and fail for reasons outside the crate, so they gate the demo's release, not the
+library's. On a tag, both sets of jobs build against Day from crates.io.
+
+Before publishing, configure each crate's Trusted Publisher with this repository, the workflow
+filename (`ci.yml` above), and environment `release`. New crates need an initial publication
 before Trusted Publishing can be configured. Versions come from the manifests. The action
 publishes in dependency order and skips versions already on crates.io, so interrupted runs can
-resume. Use `publish-crates-paths` for multiple workspaces.
+resume. Its `path` input takes several workspaces, such as `. gallery`.
+
+dayapp's `publish-crates: true` (with `publish-crates-paths`) still publishes from inside the
+reusable workflow, after every build leg has passed.
 
 For desktop self-updates, `post-pack-command` can stage helper files and update metadata.
 `update-signing: true` signs that metadata after platform signing; `macos-update-zip` adds a
