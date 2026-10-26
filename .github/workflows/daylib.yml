@@ -61,11 +61,19 @@ on:
       targets:
         description: >-
           The demo's targets, and the mobile and web targets cross-checked: "all" (default)
-          reads the demo's Day.toml `[app] targets`. Without a demo, the crates' toolkit
-          features name the targets, and a library with none is checked for every target.
+          reads the demo's Day.toml `[app] targets`, less the extra tier (macos-gtk, macos-qt)
+          unless `extra-targets` is on. Without a demo, the crates' toolkit features name the
+          targets, and a library with none is checked for every target.
         type: string
         required: false
         default: all
+      extra-targets:
+        description: >-
+          Keep the demo's extra-tier targets (GTK and Qt on macOS) when `targets` is "all": two
+          more macOS legs, built and walked through like the others.
+        type: boolean
+        required: false
+        default: false
       feature-sets:
         description: >-
           Extra cargo arguments to lint and test the crates with, one set per line, beside the
@@ -166,6 +174,7 @@ jobs:
       host: ${{ steps.plan.outputs.host }}
       cross: ${{ steps.plan.outputs.cross }}
       demo: ${{ steps.plan.outputs.demo }}
+      targets: ${{ steps.plan.outputs.targets }}
       publish-paths: ${{ steps.plan.outputs.publish-paths }}
     steps:
       - uses: actions/checkout@v7
@@ -182,6 +191,7 @@ jobs:
         with:
           project-path: ${{ inputs.project-path }}
           targets: ${{ inputs.targets }}
+          extra-targets: ${{ inputs.extra-targets }}
           target-packages: ${{ inputs.target-packages }}
           publish-paths: ${{ inputs.publish-paths }}
 
@@ -294,7 +304,7 @@ jobs:
     secrets: inherit
     with:
       project-path: ${{ inputs.project-path }}
-      targets: ${{ inputs.targets }}
+      targets: ${{ needs.plan.outputs.targets }}
       day-deps: ${{ needs.plan.outputs.day-deps }}
       scripts: ${{ inputs.scripts }}
       target-scripts: ${{ inputs.target-scripts }}

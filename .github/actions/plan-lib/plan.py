@@ -20,11 +20,12 @@ Inputs come from the environment, as daylib.yml passes them:
 
     PROJECT_PATH     the demo app's directory ("demo"); no Day.toml there means no demo.
     TARGETS          "all" (the demo's [app] targets) or a comma/space list.
+    EXTRA_TARGETS    "true" keeps the extra tier (macos-gtk, macos-qt) that "all" leaves out.
     TARGET_PACKAGES  `<targets>: <packages>` lines, the same input dayapp.yml takes.
     PUBLISH_PATHS    "auto", or the workspaces to publish, space-separated.
 
-It writes `host`, `cross`, `demo` and `publish-paths` to $GITHUB_OUTPUT when that is set, and
-prints the plan either way.
+It writes `host`, `cross`, `demo`, `targets` and `publish-paths` to $GITHUB_OUTPUT when that is
+set, and prints the plan either way.
 """
 
 import json
@@ -61,6 +62,9 @@ TOOLKIT_TARGET = {
     "material": "android-material", "arkui": "harmony-arkui", "winui": "windows-winui",
     "dom": "web-dom",
 }
+# GTK and Qt off Linux: a local convenience on a Mac, and two more macOS legs per run in CI, so
+# "all" leaves them out unless the caller asks.
+EXTRA_TARGETS = {"macos-gtk", "macos-qt"}
 PRIMARY_TARGETS = ["macos-appkit", "ios-uikit", "linux-gtk", "linux-qt", "android-material",
                    "harmony-arkui", "windows-winui", "web-dom"]
 
@@ -114,11 +118,11 @@ def demo_targets(root, project_path):
     return list(app.get("targets", []))
 
 
-def pick_targets(requested, demo, features):
+def pick_targets(requested, demo, features, extras=False):
     if requested and requested != "all":
         return split_list(requested)
     if demo:
-        return demo
+        return [t for t in demo if extras or t not in EXTRA_TARGETS]
     if features:
         return [TOOLKIT_TARGET[f] for f in features]
     return list(PRIMARY_TARGETS)
@@ -200,7 +204,8 @@ def plan(root, env):
     packages, members = workspace(root)
     features = toolkit_features(packages)
     demo = demo_targets(root, project_path)
-    targets = pick_targets(env.get("TARGETS", "all").strip(), demo, features)
+    extras = env.get("EXTRA_TARGETS", "false").strip().lower() == "true"
+    targets = pick_targets(env.get("TARGETS", "all").strip(), demo, features, extras)
     by_target = per_target(env.get("TARGET_PACKAGES", ""))
     return {
         "host": host_rows(features, by_target),
@@ -222,6 +227,7 @@ def main():
             f.write(f"host={json.dumps(result['host'])}\n")
             f.write(f"cross={json.dumps(result['cross'])}\n")
             f.write(f"demo={'true' if result['demo'] else 'false'}\n")
+            f.write(f"targets={', '.join(result['targets'])}\n")
             f.write(f"publish-paths={' '.join(result['publish-paths'])}\n")
 
 

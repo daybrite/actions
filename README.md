@@ -441,6 +441,7 @@ The other inputs cover what a manifest doesn't say:
 | `feature-sets` | Extra cargo arguments to lint and test with, one set per line (`--features demo-provider`, `--no-default-features`). |
 | `target-packages` | System packages per target (`linux-gtk, linux-qt: gstreamer1.0-libav`), installed for the host, cross-check, and demo jobs of those targets. |
 | `targets` | The targets to build and cross-check, instead of all of the demo's. |
+| `extra-targets` | Also build and walk through the demo's `macos-gtk` and `macos-qt` targets, which `targets: all` leaves out. |
 | `publish`, `publish-paths` | Turn publishing off, or name the workspaces to publish. By default these are `.`, then any directory beside it whose package depends on it by path, such as `gallery`. |
 | `scripts`, `target-scripts`, `target-setup`, `script-setup`, `launch-env`, `grant-permissions`, `themes`, `ios-devices`, `android-devices`, `deploy-web`, `preflight-checks` | Passed to dayapp for the demo. The device defaults are one iPhone and one Android phone. |
 

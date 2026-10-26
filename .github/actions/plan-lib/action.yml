@@ -14,6 +14,10 @@ inputs:
     description: '"all" (the demo''s [app] targets) or a comma/space list of Day targets.'
     required: false
     default: all
+  extra-targets:
+    description: '"true" keeps the demo''s extra-tier targets (macos-gtk, macos-qt) that "all" leaves out.'
+    required: false
+    default: "false"
   target-packages:
     description: '`<targets>: <packages>` lines, the same shape dayapp.yml''s input takes.'
     required: false
@@ -32,6 +36,9 @@ outputs:
   demo:
     description: '"true" when the project path holds a Day.toml.'
     value: ${{ steps.plan.outputs.demo }}
+  targets:
+    description: The demo's targets, comma-separated, for dayapp.yml.
+    value: ${{ steps.plan.outputs.targets }}
   publish-paths:
     description: The workspaces publish-crates uploads, space-separated.
     value: ${{ steps.plan.outputs.publish-paths }}
@@ -44,6 +51,7 @@ runs:
         PLAN_SCRIPT: ${{ github.action_path }}/plan.py
         PROJECT_PATH: ${{ inputs.project-path }}
         TARGETS: ${{ inputs.targets }}
+        EXTRA_TARGETS: ${{ inputs.extra-targets }}
         TARGET_PACKAGES: ${{ inputs.target-packages }}
         PUBLISH_PATHS: ${{ inputs.publish-paths }}
       run: python3 "$PLAN_SCRIPT"

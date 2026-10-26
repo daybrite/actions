@@ -84,6 +84,14 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([c['name'] for c in self.run_plan()['cross']],
                          ['ios-uikit', 'android-material', 'harmony-arkui', 'web-dom'])
 
+    def test_all_leaves_the_extra_tier_out_unless_asked(self):
+        self.library()
+        self.demo(['macos-appkit', 'macos-gtk', 'macos-qt', 'linux-gtk', 'ios-uikit'])
+        self.assertEqual(self.run_plan()['targets'], ['macos-appkit', 'linux-gtk', 'ios-uikit'])
+        self.assertEqual(self.run_plan(EXTRA_TARGETS='true')['targets'],
+                         ['macos-appkit', 'macos-gtk', 'macos-qt', 'linux-gtk', 'ios-uikit'])
+        self.assertEqual(self.run_plan(TARGETS='macos-gtk')['targets'], ['macos-gtk'])
+
     def test_named_targets_override_the_demos(self):
         self.library()
         self.demo(['ios-uikit', 'android-material'])
