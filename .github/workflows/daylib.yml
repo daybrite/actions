@@ -209,7 +209,11 @@ jobs:
           packages: ${{ matrix.packages }}
       - if: matrix.fmt
         run: cargo fmt --all -- --check
+      # A hung test fails the row instead of holding the release for the job's six-hour limit.
+      # The bound is on the cargo step alone, since a slow package mirror can stretch the
+      # toolkit install above.
       - name: clippy and test
+        timeout-minutes: 30
         shell: bash
         env:
           TOOLKIT: ${{ matrix.features }}
@@ -259,6 +263,7 @@ jobs:
           rust: "false"
           packages: ${{ matrix.packages }}
       - name: clippy
+        timeout-minutes: 30
         shell: bash
         env:
           TRIPLE: ${{ matrix.triple }}
