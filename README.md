@@ -2,7 +2,8 @@
 
 Build, test, package, and publish [Day](https://daybrite.dev) apps with GitHub Actions.
 The `dayapp` workflow runs your app across platforms, captures screenshots, and can publish
-GitHub releases, upload to app stores, and deploy a project website.
+GitHub releases, upload to app stores, and deploy a project website. The `daylib` workflow does
+the same for a piece or part, and also tests and publishes its crates.
 
 | I want to… | Start here |
 |---|---|
@@ -11,7 +12,8 @@ GitHub releases, upload to app stores, and deploy a project website.
 | Distribute a version | [GitHub releases](#github-releases) |
 | Upload or submit to a store | [Store uploads](#store-uploads) |
 | Host a web app and download page | [Project website](#project-website) |
-| Build a demo, flavor, or Rust library | [Flavors and library releases](#flavors-and-library-releases) |
+| Test and publish a piece or part | [Pieces and parts](#pieces-and-parts) |
+| Build a flavor or a self-updating app | [Flavors and library releases](#flavors-and-library-releases) |
 | Add Day steps to an existing workflow | [Individual actions](#individual-actions) |
 
 ## Quick start
@@ -379,6 +381,78 @@ Use `daysite-version` to pin the template. Themes and other site settings belong
 If you call `dayapp` twice in one run, set `deploy-website: "false"` on the second call and
 let one call own release publication with `release-assets: false` on the other.
 
+## Pieces and parts
+
+Add this to a piece's or part's repository as `.github/workflows/ci.yml`:
+
+```yaml
+name: ci
+on:
+  push:
+    branches: ["**"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      day-main:
+        description: Build against day's main branch instead of the newest release
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: daybrite/actions/.github/workflows/daylib.yml@v1
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    secrets: inherit
+    with:
+      day-main: ${{ inputs.day-main || false }}
+```
+
+daylib reads what to check from the repository's manifests:
+
+| Job | What it runs |
+|---|---|
+| `host` | `cargo clippy` and `cargo test` on Linux, macOS, and Windows, plus `cargo clippy --features <toolkit>` on the OS each toolkit feature draws on (`gtk` and `qt` on Linux, `appkit` on macOS, `winui` on Windows), with that toolkit's libraries installed. `cargo fmt --check` runs once. |
+| `cross-check` | `cargo clippy --target <triple>` for each of iOS, Android, HarmonyOS, and the web that the demo's `Day.toml` declares, with the matching toolkit feature (`uikit`, `material`, `arkui`, `dom`) when a crate has one. |
+| `demo` | The app in `demo/` through dayapp: built, packaged, and run through its dayscripts on every target in its `Day.toml`, released on a version tag. |
+| `publish` | On a version tag, the crates to crates.io once `host` and `cross-check` pass. It does not wait for the demo. |
+
+A library without a `demo/Day.toml` skips the demo, and its toolkit features name the targets to
+cross-check; with neither, it is checked for every mobile and web target.
+
+Which Day each run builds against depends on the event. A push or pull request builds against the
+head of day's `main` and of every other Day repository's default branch. A scheduled run, a
+manual run, and a version tag build against the newest releases on crates.io. Run the workflow
+by hand with `day-main` checked to build against `main` instead. One run resolves Day once, so
+every job builds against the same commit or release.
+
+The other inputs cover what a manifest doesn't say:
+
+| Input | Use |
+|---|---|
+| `feature-sets` | Extra cargo arguments to lint and test with, one set per line (`--features demo-provider`, `--no-default-features`). |
+| `target-packages` | System packages per target (`linux-gtk, linux-qt: gstreamer1.0-libav`), installed for the host, cross-check, and demo jobs of those targets. |
+| `targets` | The targets to build and cross-check, instead of all of the demo's. |
+| `publish`, `publish-paths` | Turn publishing off, or name the workspaces to publish. By default these are `.`, then any directory beside it whose package depends on it by path, such as `gallery`. |
+| `scripts`, `target-scripts`, `target-setup`, `script-setup`, `launch-env`, `grant-permissions`, `themes`, `ios-devices`, `android-devices`, `deploy-web`, `preflight-checks` | Passed to dayapp for the demo. The device defaults are one iPhone and one Android phone. |
+
+A repository with checks of its own adds jobs beside `ci`. When those jobs must also gate the
+release, set `publish: false` and add a publish job with the longer `needs:`. See
+[publish-crates](.github/actions/publish-crates/action.yml) for the steps.
+
+Before the first release, configure each crate's Trusted Publisher on crates.io with this
+repository, the workflow file `ci.yml`, and the environment `release`. A crate name crates.io has
+never seen needs one release by hand first. Versions come from the manifests; a version already
+on crates.io is skipped, so a re-run finishes an interrupted release.
+
 ## Flavors and library releases
 
 Build a free, paid, or customer-specific version by adding a `Day-<name>.toml` beside `Day.toml`:
@@ -396,46 +470,9 @@ to the GitHub release; `store-flavor` selects its packages and listing for store
 Omit those two inputs to keep the extra builds as CI artifacts. See
 [build flavors](https://daybrite.dev/docs/flavors) for the app configuration.
 
-For a piece or part with a demo app, publish the library from its own job, gated on the
-repository's build and test jobs rather than on the demo legs:
-
-```yaml
-jobs:
-  host: …          # cargo build/test per OS
-  cross-check: …   # cargo check per mobile and web target
-  demo:
-    uses: daybrite/actions/.github/workflows/dayapp.yml@v1
-    permissions:
-      contents: write
-    with:
-      targets: all
-      project-path: demo
-  publish:
-    needs: [host, cross-check]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: daybrite/actions/.github/actions/publish-crates@v1
-```
-
-A tag publishes as soon as those jobs pass. The demo's packaging and emulator walkthroughs can
-take hours and fail for reasons outside the crate, so they gate the demo's release, not the
-library's. On a tag, both sets of jobs build against Day from crates.io.
-
-Before publishing, configure each crate's Trusted Publisher with this repository, the workflow
-filename (`ci.yml` above), and environment `release`. New crates need an initial publication
-before Trusted Publishing can be configured. Versions come from the manifests. The action
-publishes in dependency order and skips versions already on crates.io, so interrupted runs can
-resume. Its `path` input takes several workspaces, such as `. gallery`.
-
-dayapp's `publish-crates: true` (with `publish-crates-paths`) still publishes from inside the
-reusable workflow, after every build leg has passed.
+A piece or part publishes its crates through [daylib](#pieces-and-parts). dayapp's
+`publish-crates: true` (with `publish-crates-paths`) publishes from inside the app workflow
+instead, after every build leg has passed.
 
 For desktop self-updates, `post-pack-command` can stage helper files and update metadata.
 `update-signing: true` signs that metadata after platform signing; `macos-update-zip` adds a
@@ -457,6 +494,7 @@ outputs.
 | [sign-package](.github/actions/sign-package/action.yml) | Sign an existing iOS, Android, HarmonyOS, or Mac App Store package. |
 | [store-upload](.github/actions/store-upload/action.yml) | Stage a listing and run a fastlane lane with a signed package. |
 | [publish-crates](.github/actions/publish-crates/action.yml) | Publish workspace crates through Trusted Publishing. |
+| [plan-lib](.github/actions/plan-lib/action.yml) | Read a piece's or part's manifests into daylib's host, cross-target, and publish plans. |
 | [sign-updates](.github/actions/sign-updates/action.yml) | Sign desktop update metadata. |
 | [dayscript-report-summary](.github/actions/dayscript-report-summary/action.yml) | Summarize DayScript reports in the GitHub run. |
 

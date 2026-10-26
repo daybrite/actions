@@ -744,10 +744,9 @@ on:
           re-run finishes what an interrupted one started), through crates.io Trusted
           Publishing. Configure each crate's trusted publisher as this repository, the CALLING
           workflow's file name, and the environment `release`. A crate name crates.io has never
-          seen must be published once by hand first (see the README). A piece or part usually
-          publishes from a job of its own instead, gated on its build and test jobs, so a tag
-          does not wait on the demo's emulator legs (README, "publish the library from its own
-          job").
+          seen must be published once by hand first (see the README). A piece or part publishes
+          through daylib.yml instead, which gates the upload on its build and test jobs, so a
+          tag does not wait on the demo's emulator legs (README, "Pieces and parts").
         type: boolean
         required: false
         default: false

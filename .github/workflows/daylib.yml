@@ -1,0 +1,328 @@
+# Copyright © The Daybrite Project
+# SPDX-License-Identifier: MPL-2.0
+#
+# daylib — the whole CI of a Day library repository (a piece or a part), from its manifests.
+#
+#   jobs:
+#     ci:
+#       uses: daybrite/actions/.github/workflows/daylib.yml@v1
+#       permissions: { contents: write, pages: write, id-token: write }
+#       secrets: inherit
+#       with:
+#         day-main: ${{ inputs.day-main || false }}
+#
+# The caller keeps only what GitHub requires of it: the triggers (`on:`, with its own nightly
+# cron) and the permission grant. Everything else comes from what the repository already says:
+#
+#   plan         resolves Day once for the run and reads the manifests (plan-lib): the toolkit
+#                features of the crates and the demo's Day.toml targets.
+#   host         clippy and test on Linux, macOS and Windows, plus clippy with each toolkit
+#                feature on the OS it draws on, with that toolkit's libraries installed.
+#   cross-check  clippy for every mobile and web target the demo declares (iOS, Android,
+#                HarmonyOS, web), with the matching toolkit feature.
+#   demo         the demo app through dayapp.yml: built, packed and walked through by its
+#                dayscripts on every target, released on a version tag, and deployed as the
+#                project website.
+#   publish      on a version tag, the crates to crates.io once host and cross-check pass. It
+#                does not wait for the demo, whose emulator legs gate the demo's release only.
+#
+# Day resolves by the event (day-deps "auto"): a push or pull request builds against the head of
+# day's main branch and of every other Day repository's default branch (`day patch --main`); a
+# scheduled run, a manual run and a version tag build against the newest releases on crates.io,
+# which is what someone who adds the crate gets. `day-main: true` on a manual run picks main.
+# Every job of one run builds against the same day: `plan` resolves it once.
+#
+# Trusted Publishing: each crate's trusted publisher on crates.io names the repository, the
+# CALLER's workflow file (ci.yml), and the environment `release`.
+
+name: daylib
+
+on:
+  workflow_call:
+    inputs:
+      day-main:
+        description: Build against day's main branch on a run that would otherwise use the newest release (a manual run's input).
+        type: boolean
+        required: false
+        default: false
+      day-deps:
+        description: >-
+          Which day the run builds against, as daybrite/actions' day-deps takes it: "auto"
+          (default; by the event, as above), "published", "main", "locked", or a 40-hex day
+          commit. `day-main: true` overrides it with "main".
+        type: string
+        required: false
+        default: auto
+      project-path:
+        description: The demo app's directory. A directory without a Day.toml means the library has no demo, and the demo job is skipped.
+        type: string
+        required: false
+        default: demo
+      targets:
+        description: >-
+          The demo's targets, and the mobile and web targets cross-checked: "all" (default)
+          reads the demo's Day.toml `[app] targets`. Without a demo, the crates' toolkit
+          features name the targets, and a library with none is checked for every target.
+        type: string
+        required: false
+        default: all
+      feature-sets:
+        description: >-
+          Extra cargo arguments to lint and test the crates with, one set per line, beside the
+          default features (`--features demo-provider`, `--no-default-features`). Each set runs
+          on every host and cross-check row.
+        type: string
+        required: false
+        default: ""
+      target-packages:
+        description: >-
+          System packages a target needs beyond Day's own, one `<targets>: <packages>` line per
+          entry (`linux-gtk, linux-qt: gstreamer1.0-libav`). Installed for the demo's legs and
+          for the host and cross-check rows of those targets.
+        type: string
+        required: false
+        default: ""
+      publish:
+        description: Publish the crates to crates.io on a version tag. Off for a repository that publishes from a job of its own.
+        type: boolean
+        required: false
+        default: true
+      publish-paths:
+        description: >-
+          The workspaces to publish, space-separated and in order. "auto" (default) is "." and
+          then every directory beside it whose package depends on the workspace by path, such as
+          a piece's `gallery`.
+        type: string
+        required: false
+        default: auto
+      # Passed to dayapp.yml for the demo; each has dayapp's meaning (see its inputs).
+      scripts:
+        description: The demo's dayscripts (dayapp.yml `scripts`). "auto" runs every script under the demo's dayscript/.
+        type: string
+        required: false
+        default: auto
+      target-scripts:
+        description: Per-target dayscripts (dayapp.yml `target-scripts`).
+        type: string
+        required: false
+        default: ""
+      target-setup:
+        description: Per-target setup commands before the dayscripts (dayapp.yml `target-setup`).
+        type: string
+        required: false
+        default: ""
+      script-setup:
+        description: A command sourced before each dayscript (dayapp.yml `script-setup`).
+        type: string
+        required: false
+        default: ""
+      launch-env:
+        description: Environment for the launched demo (dayapp.yml `launch-env`).
+        type: string
+        required: false
+        default: ""
+      grant-permissions:
+        description: Permissions granted before launch, per target (dayapp.yml `grant-permissions`).
+        type: string
+        required: false
+        default: ""
+      themes:
+        description: Appearances the dayscripts capture (dayapp.yml `themes`).
+        type: string
+        required: false
+        default: ""
+      ios-devices:
+        description: The demo's iOS device profiles (dayapp.yml `ios-devices`). One iPhone by default, where dayapp's own default is an iPhone and an iPad.
+        type: string
+        required: false
+        default: device=iPhone, orientation=portrait
+      android-devices:
+        description: The demo's Android device profiles (dayapp.yml `android-devices`). One phone by default, where dayapp's own default is a phone and a tablet.
+        type: string
+        required: false
+        default: device=pixel_7, os=36, orientation=portrait
+      deploy-web:
+        description: Deploy the demo's web-dom build to GitHub Pages (dayapp.yml `deploy-web`).
+        type: boolean
+        required: false
+        default: false
+      preflight-checks:
+        description: >-
+          Rust checks dayapp.yml runs on the demo before its matrix (`preflight-checks`). The
+          default covers the demo's own workspace, which the host jobs do not build.
+        type: string
+        required: false
+        default: fmt, clippy, test
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      day-deps: ${{ steps.day.outputs.mode == 'main' && steps.day.outputs.rev || steps.day.outputs.mode }}
+      host: ${{ steps.plan.outputs.host }}
+      cross: ${{ steps.plan.outputs.cross }}
+      demo: ${{ steps.plan.outputs.demo }}
+      publish-paths: ${{ steps.plan.outputs.publish-paths }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # One resolution for the run, so a day push landing mid-run does not split the legs: every
+      # later job is handed this run's mode, or under "main" the exact day commit.
+      - id: day
+        uses: daybrite/actions/.github/actions/day-deps@v1
+        with:
+          day-deps: ${{ inputs.day-main && 'main' || inputs.day-deps }}
+      - uses: daybrite/actions/.github/actions/check-crate-names@v1
+      - id: plan
+        uses: daybrite/actions/.github/actions/plan-lib@v1
+        with:
+          project-path: ${{ inputs.project-path }}
+          targets: ${{ inputs.targets }}
+          target-packages: ${{ inputs.target-packages }}
+          publish-paths: ${{ inputs.publish-paths }}
+
+  host:
+    name: host (${{ matrix.name }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.host) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: daybrite/actions/.github/actions/day-deps@v1
+        with:
+          day-deps: ${{ needs.plan.outputs.day-deps }}
+      - if: matrix.day-target != ''
+        uses: daybrite/actions/.github/actions/setup-day-deps@v1
+        with:
+          target: ${{ matrix.day-target }}
+          pack: "false"
+          packages: ${{ matrix.packages }}
+      - if: matrix.fmt
+        run: cargo fmt --all -- --check
+      - name: clippy and test
+        shell: bash
+        env:
+          TOOLKIT: ${{ matrix.features }}
+          FEATURE_SETS: ${{ inputs.feature-sets }}
+        run: |
+          set -euo pipefail
+          # The default features first, then each extra set. A toolkit feature is linted, not
+          # tested: its tests would open windows on a runner that has no display.
+          sets=("")
+          while IFS= read -r line; do
+            [ -n "${line//[[:space:]]/}" ] && sets+=("$line")
+          done <<< "$FEATURE_SETS"
+          for set in "${sets[@]}"; do
+            # shellcheck disable=SC2206 # a set is cargo arguments, split on purpose
+            args=($set)
+            cargo clippy --all-targets ${args[@]+"${args[@]}"} -- -D warnings
+            cargo test ${args[@]+"${args[@]}"}
+            if [ -n "$TOOLKIT" ]; then
+              cargo clippy --all-targets ${args[@]+"${args[@]}"} --features "$TOOLKIT" -- -D warnings
+            fi
+          done
+
+  cross-check:
+    name: cross-check (${{ matrix.name }})
+    needs: plan
+    if: needs.plan.outputs.cross != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.cross) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+          components: clippy
+      - uses: daybrite/actions/.github/actions/day-deps@v1
+        with:
+          day-deps: ${{ needs.plan.outputs.day-deps }}
+      # The target's SDK and std (the Android NDK, the OpenHarmony SDK), for crates whose build
+      # scripts compile C or reach the platform's headers.
+      - uses: daybrite/actions/.github/actions/setup-day-deps@v1
+        with:
+          target: ${{ matrix.day-target }}
+          pack: "false"
+          rust: "false"
+          packages: ${{ matrix.packages }}
+      - name: clippy
+        shell: bash
+        env:
+          TRIPLE: ${{ matrix.triple }}
+          TOOLKIT: ${{ matrix.features }}
+          FEATURE_SETS: ${{ inputs.feature-sets }}
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          set -euo pipefail
+          sets=("")
+          while IFS= read -r line; do
+            [ -n "${line//[[:space:]]/}" ] && sets+=("$line")
+          done <<< "$FEATURE_SETS"
+          for set in "${sets[@]}"; do
+            # shellcheck disable=SC2206 # a set is cargo arguments, split on purpose
+            args=($set)
+            [ -z "$TOOLKIT" ] || args+=(--features "$TOOLKIT")
+            cargo clippy --target "$TRIPLE" ${args[@]+"${args[@]}"} -- -D warnings
+          done
+
+  demo:
+    needs: plan
+    if: needs.plan.outputs.demo == 'true'
+    uses: daybrite/actions/.github/workflows/dayapp.yml@v1
+    permissions:
+      contents: write # release assets on a version tag
+      pages: write # the project website and web deploy
+      id-token: write # deploy-pages OIDC token
+    secrets: inherit
+    with:
+      project-path: ${{ inputs.project-path }}
+      targets: ${{ inputs.targets }}
+      day-deps: ${{ needs.plan.outputs.day-deps }}
+      scripts: ${{ inputs.scripts }}
+      target-scripts: ${{ inputs.target-scripts }}
+      target-packages: ${{ inputs.target-packages }}
+      target-setup: ${{ inputs.target-setup }}
+      script-setup: ${{ inputs.script-setup }}
+      launch-env: ${{ inputs.launch-env }}
+      grant-permissions: ${{ inputs.grant-permissions }}
+      themes: ${{ inputs.themes }}
+      ios-devices: ${{ inputs.ios-devices }}
+      android-devices: ${{ inputs.android-devices }}
+      deploy-web: ${{ inputs.deploy-web }}
+      preflight-checks: ${{ inputs.preflight-checks }}
+
+  publish:
+    name: publish (crates.io)
+    needs: [plan, host, cross-check]
+    # cross-check is skipped for a library with no mobile or web target, which must not hold
+    # the release back.
+    if: >-
+      ${{ !cancelled()
+          && inputs.publish
+          && startsWith(github.ref, 'refs/tags/v')
+          && needs.host.result == 'success'
+          && (needs.cross-check.result == 'success' || needs.cross-check.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: daybrite/actions/.github/actions/publish-crates@v1
+        with:
+          path: ${{ needs.plan.outputs.publish-paths }}

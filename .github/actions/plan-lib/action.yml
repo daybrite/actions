@@ -1,0 +1,49 @@
+# Copyright © The Daybrite Project
+# SPDX-License-Identifier: MPL-2.0
+name: Plan a Day library's CI
+description: >-
+  Read a piece's or part's manifests (its crates' toolkit features and its demo's Day.toml
+  targets) and emit the host, cross-target and publish plans daylib.yml runs. plan.py, beside
+  this file, says how each is derived.
+inputs:
+  project-path:
+    description: The demo app's directory; a directory without a Day.toml means no demo.
+    required: false
+    default: demo
+  targets:
+    description: '"all" (the demo''s [app] targets) or a comma/space list of Day targets.'
+    required: false
+    default: all
+  target-packages:
+    description: '`<targets>: <packages>` lines, the same shape dayapp.yml''s input takes.'
+    required: false
+    default: ""
+  publish-paths:
+    description: '"auto", or the workspaces to publish, space-separated and in order.'
+    required: false
+    default: auto
+outputs:
+  host:
+    description: The host matrix's rows, as JSON.
+    value: ${{ steps.plan.outputs.host }}
+  cross:
+    description: The cross-target matrix's rows, as JSON ([] when the library targets no mobile or web platform).
+    value: ${{ steps.plan.outputs.cross }}
+  demo:
+    description: '"true" when the project path holds a Day.toml.'
+    value: ${{ steps.plan.outputs.demo }}
+  publish-paths:
+    description: The workspaces publish-crates uploads, space-separated.
+    value: ${{ steps.plan.outputs.publish-paths }}
+runs:
+  using: composite
+  steps:
+    - id: plan
+      shell: bash
+      env:
+        PLAN_SCRIPT: ${{ github.action_path }}/plan.py
+        PROJECT_PATH: ${{ inputs.project-path }}
+        TARGETS: ${{ inputs.targets }}
+        TARGET_PACKAGES: ${{ inputs.target-packages }}
+        PUBLISH_PATHS: ${{ inputs.publish-paths }}
+      run: python3 "$PLAN_SCRIPT"
