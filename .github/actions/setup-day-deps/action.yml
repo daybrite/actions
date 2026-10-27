@@ -127,6 +127,41 @@ runs:
           macos-gtk) brew install gtk4 libadwaita librsvg pkg-config ;;
         esac
 
+    # --- the .deb cache (Linux) ------------------------------------------------------------------
+    # The runner's Ubuntu mirror can crawl (114 MB in 48 minutes on 2026-10-26, the Qt WebEngine and
+    # CJK font packages), so every apt install below downloads into one directory that is cached
+    # per runner image, target and package set. apt reuses an archive whose checksum still
+    # matches the package index and downloads the rest, so a stale entry costs a download, never a
+    # wrong package. Only the archives are cached: apt's lock and partial downloads stay out.
+    - name: Configure the apt package cache
+      id: apt-cache
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        TARGET: ${{ steps.canonical-target.outputs.target }}
+        EXTRAS: ${{ inputs.extras }}
+        PACK: ${{ inputs.pack }}
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        DIR=/var/cache/day-apt
+        # apt refuses an archive directory without `partial/`, and gives that to its `_apt` user
+        # itself; the directory is the runner user's so the cache can restore into it.
+        sudo mkdir -p "$DIR/partial"
+        sudo chown "$(id -u):$(id -g)" "$DIR"
+        printf 'Dir::Cache::Archives "%s";\nAPT::Keep-Downloaded-Packages "true";\n' "$DIR" \
+          | sudo tee /etc/apt/apt.conf.d/99day-archives >/dev/null
+        SET="$(printf '%s|%s|%s|%s' "$TARGET" "$EXTRAS" "$PACK" "$PACKAGES" | sha256sum | cut -c1-16)"
+        echo "path=$DIR/*.deb" >> "$GITHUB_OUTPUT"
+        echo "key=day-apt-v1-${ImageOS:-linux}-${ImageVersion:-unknown}-${RUNNER_ARCH}-${TARGET}-${SET}" >> "$GITHUB_OUTPUT"
+    - name: Restore the apt package cache
+      id: apt-restore
+      if: runner.os == 'Linux'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.apt-cache.outputs.path }}
+        key: ${{ steps.apt-cache.outputs.key }}
+
     - name: Toolkit deps (apt)
       if: steps.canonical-target.outputs.target == 'linux-gtk' || steps.canonical-target.outputs.target == 'linux-qt'
       shell: bash
@@ -476,3 +511,20 @@ runs:
       with:
         path: ${{ steps.nsis-installer.outputs.path }}
         key: ${{ steps.nsis-cache.outputs.cache-primary-key }}
+    # Saved once per key, after every apt install above. A job whose downloads all came from the
+    # cache, or that installed nothing, saves nothing.
+    - name: Check for downloaded packages
+      id: apt-new
+      if: runner.os == 'Linux' && steps.apt-restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        if compgen -G "/var/cache/day-apt/*.deb" >/dev/null; then
+          echo "any=true" >> "$GITHUB_OUTPUT"
+          du -sh /var/cache/day-apt
+        fi
+    - name: Save the apt package cache
+      if: runner.os == 'Linux' && steps.apt-new.outputs.any == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.apt-cache.outputs.path }}
+        key: ${{ steps.apt-cache.outputs.key }}
