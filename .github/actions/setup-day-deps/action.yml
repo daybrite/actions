@@ -518,9 +518,10 @@ runs:
       if: runner.os == 'Linux' && steps.apt-restore.outputs.cache-hit != 'true'
       shell: bash
       run: |
+        # The archives only: `partial/` is apt's own (mode 700, user _apt), and unreadable here.
         if compgen -G "/var/cache/day-apt/*.deb" >/dev/null; then
           echo "any=true" >> "$GITHUB_OUTPUT"
-          du -sh /var/cache/day-apt
+          du -ch /var/cache/day-apt/*.deb | tail -1
         fi
     - name: Save the apt package cache
       if: runner.os == 'Linux' && steps.apt-new.outputs.any == 'true'
