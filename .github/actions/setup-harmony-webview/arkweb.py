@@ -30,6 +30,22 @@ BUNDLE = "com.huawei.hmos.arkwebcore"
 EGL_PATH = "/system/lib64/platformsdk/libEGL.so"
 SANDBOX_PATH = "/system/etc/sandbox/appdata-sandbox.json"
 
+# The pinned API-12 renderer waits only 100 ms for AMS to deliver its IPC descriptors.
+# On the 7.0 tablet, AMS answered after 128 ms: the renderer had already exited. Keep
+# its 10 ms condition-variable waits and require the same notification, for up to 1 s.
+# See RENDERER-STARTUP.md for the disassembly and reproduction evidence.
+ENGINE_MEMBER = "libs/x86_64/libarkweb_engine.so"
+ENGINE_PATH = f"/data/app/el1/bundle/public/{BUNDLE}/{ENGINE_MEMBER}"
+ENGINE_SHA = "eaa70293550c974f8d2a715ecbde6e4177b075dbfd3475b59271d857f3a97303"
+ENGINE_PATCHED_SHA = "2dbc8a8045a796598ff184ece7bbc5d337ab42fb38622051368db67f9c181ca7"
+ENGINE_STARTUP_PATCHES = (
+    # File offsets; executable virtual addresses are offset + 0x1000.
+    (0x9372e76, bytes.fromhex("4183fd0a"), bytes.fromhex("4183fd64")),  # loop: 10 → 100
+    (0x9372e88, bytes.fromhex("6a0a5d"), bytes.fromhex("6a645d")),      # exhausted count
+    (0x9372ec0, bytes.fromhex("6a645e"), bytes.fromhex("6bf50a")),     # log count × 10 ms
+    (0x9372f16, bytes.fromhex("83fd0a"), bytes.fromhex("83fd64")),     # success boundary
+)
+
 # OpenHarmony 7 calls new mouse methods missing from the pinned API-12 engine.
 # Redirect only this verified emulator glue's wrappers to the existing legacy APIs.
 # Readable source and ABI rationale: mouse_compat.S and INPUT-COMPAT.md.
@@ -49,6 +65,28 @@ MOUSE_ADAPTER = bytes.fromhex(
     "c3e8da1b0c00"
 )
 MOUSE_WHEEL_ADAPTER = bytes.fromhex("e90bc0ffff")
+
+
+def patch_engine_startup(data):
+    digest = hashlib.sha256(data).hexdigest()
+    if digest == ENGINE_PATCHED_SHA:
+        return data
+    if digest != ENGINE_SHA:
+        raise ValueError(f"Unsupported ArkWeb engine: {digest}; refusing to patch")
+    patched = bytearray(data)
+    for offset, original, replacement in ENGINE_STARTUP_PATCHES:
+        if data[offset:offset + len(original)] != original:
+            raise ValueError(f"Unexpected renderer startup instructions at {offset:#x}")
+        patched[offset:offset + len(original)] = replacement
+    if hashlib.sha256(patched).hexdigest() != ENGINE_PATCHED_SHA:
+        raise ValueError("Unexpected patched ArkWeb engine")
+    return bytes(patched)
+
+
+def require_guest_hash(device, path, expected):
+    actual = device.shell(f"sha256sum {path}").split()
+    if not actual or actual[0] != expected:
+        raise ValueError(f"Unexpected installed SHA256 for {path}: {actual}; expected {expected}")
 
 
 def patch_input_bridge(data):
@@ -210,6 +248,10 @@ def install(hap, target, diagnostics):
     patched_config = patch_sandbox(config, namespaces)
     (diagnostics / "libEGL.patched.so").write_bytes(patched_egl)
     (diagnostics / "appdata-sandbox.patched.json").write_text(json.dumps(patched_config, indent=2) + "\n")
+    # Validate every patch before changing the guest. The signed HAP and cached download
+    # remain original; only the extracted library in this disposable guest is replaced.
+    with zipfile.ZipFile(hap) as package:
+        patched_engine = patch_engine_startup(package.read(ENGINE_MEMBER))
     device.shell("mkdir -p /data/local/tmp/day-arkweb")
     guest_hap = "/data/local/tmp/day-arkweb/ArkWebCore.hap"
     device.run("file", "send", hap, guest_hap)
@@ -218,6 +260,14 @@ def install(hap, target, diagnostics):
         raise RuntimeError(f"Bundle installation failed: {result}")
     installed = f"/data/app/el1/bundle/public/{BUNDLE}/entry.hap"
     device.shell(f"test -f {installed}")
+    require_guest_hash(device, ENGINE_PATH, ENGINE_SHA)
+    with tempfile.TemporaryDirectory(prefix="arkweb-startup-") as directory:
+        engine = Path(directory) / "libarkweb_engine.so"
+        engine.write_bytes(patched_engine)
+        device.run("file", "send", engine, ENGINE_PATH + ".day-new")
+        device.shell(f"chmod 644 {ENGINE_PATH}.day-new && "
+                     f"chown installs:installs {ENGINE_PATH}.day-new && "
+                     f"mv {ENGINE_PATH}.day-new {ENGINE_PATH}")
     device.shell(f"param set persist.arkwebcore.package_name {BUNDLE}")
     device.shell(f"param set persist.arkwebcore.install_path {installed}")
     device.shell("mount -o remount,rw /")
@@ -234,25 +284,60 @@ def install(hap, target, diagnostics):
     # Reboot is essential: appspawn otherwise retains the original library mappings.
     device.run("shell", "reboot")
     time.sleep(5)
-    deadline = time.monotonic() + 150
+    # A reboot that has not finished in 150 s gets a second window with a fresh hdc server: on
+    # the CI runners it sometimes never came back while QEMU itself kept running, and a stale hdc
+    # connection is the one cause a runner can clear on its own.
+    if not wait_for_boot(device, target, 150):
+        print("::warning::the emulator did not finish rebooting in 150 s; restarting the hdc "
+              "server and waiting again", flush=True)
+        subprocess.run(["hdc", "kill", "-r"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30, check=False)
+        if not wait_for_boot(device, target, 150):
+            record_reboot_failure(target, diagnostics)
+            raise RuntimeError("Emulator did not finish rebooting")
+    device.run("file", "recv", EGL_PATH, diagnostics / "libEGL.installed.so")
+    require_hash(diagnostics / "libEGL.installed.so", hashlib.sha256(patched_egl).hexdigest())
+    if patched_input is not None:
+        verified = diagnostics / "libarkweb-input.installed.so"
+        device.run("file", "recv", INPUT_BRIDGE_PATH, verified)
+        require_hash(verified, INPUT_BRIDGE_PATCHED_SHA)
+    require_guest_hash(device, ENGINE_PATH, ENGINE_PATCHED_SHA)
+    (diagnostics / "renderer-startup.json").write_text(json.dumps({
+        "library": ENGINE_PATH, "original_sha256": ENGINE_SHA,
+        "installed_sha256": ENGINE_PATCHED_SHA, "startup_timeout_ms": 1000,
+    }, indent=2) + "\n")
+    print("ArkWeb renderer IPC startup deadline: 1000 ms (verified emulator patch)", flush=True)
+    print(f"ArkWeb ready: {installed}", flush=True)
+
+
+def wait_for_boot(device, target, seconds):
+    """Whether the guest reports a finished boot within `seconds`, reconnecting hdc as it goes."""
+    deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         subprocess.run(["hdc", "tconn", target], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=10)
+                       stderr=subprocess.DEVNULL, timeout=10, check=False)
         try:
             if device.shell("param get bootevent.boot.completed") == "true":
-                device.run("file", "recv", EGL_PATH, diagnostics / "libEGL.installed.so")
-                require_hash(diagnostics / "libEGL.installed.so",
-                             hashlib.sha256(patched_egl).hexdigest())
-                if patched_input is not None:
-                    verified = diagnostics / "libarkweb-input.installed.so"
-                    device.run("file", "recv", INPUT_BRIDGE_PATH, verified)
-                    require_hash(verified, INPUT_BRIDGE_PATCHED_SHA)
-                print(f"ArkWeb ready: {installed}", flush=True)
-                return
+                return True
         except (RuntimeError, subprocess.SubprocessError):
             pass
         time.sleep(3)
-    raise RuntimeError("Emulator did not finish rebooting")
+    return False
+
+
+def record_reboot_failure(target, diagnostics):
+    """What the runner can still see of a guest that never came back, for the uploaded report."""
+    probes = [["hdc", "list", "targets", "-v"], ["hdc", "-t", target, "shell", "uptime"],
+              ["pgrep", "-a", "qemu-system"]]
+    lines = []
+    for probe in probes:
+        try:
+            out = subprocess.run(probe, text=True, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, timeout=15, check=False).stdout
+        except (OSError, subprocess.SubprocessError) as e:
+            out = str(e)
+        lines.append(f"$ {' '.join(probe)}\n{out.strip()}\n")
+    (diagnostics / "reboot-timeout.txt").write_text("\n".join(lines))
 
 
 def main():

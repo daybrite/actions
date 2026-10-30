@@ -16,6 +16,38 @@ spec.loader.exec_module(arkweb)
 
 
 class RuntimeGuards(unittest.TestCase):
+    def test_unknown_engine_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported ArkWeb engine"):
+            arkweb.patch_engine_startup(b"different browser build")
+
+    def test_installed_engine_must_match_the_expected_hash(self):
+        device = arkweb.Device("fixture")
+        for response in ("", "bad-hash  /fixture.so", "sha256sum: file not found"):
+            with self.subTest(response=response), patch.object(device, "shell", return_value=response):
+                with self.assertRaisesRegex(ValueError, "Unexpected installed SHA256"):
+                    arkweb.require_guest_hash(device, "/fixture.so", arkweb.ENGINE_PATCHED_SHA)
+        with patch.object(device, "shell", return_value=arkweb.ENGINE_PATCHED_SHA + "  /fixture.so"):
+            arkweb.require_guest_hash(device, "/fixture.so", arkweb.ENGINE_PATCHED_SHA)
+
+    @unittest.skipUnless(os.environ.get("ARKWEB_TEST_ENGINE"), "optional original pinned engine")
+    def test_real_engine_patch_is_bounded_idempotent_and_rejects_corruption(self):
+        original = Path(os.environ["ARKWEB_TEST_ENGINE"]).read_bytes()
+        self.assertEqual(arkweb.hashlib.sha256(original).hexdigest(), arkweb.ENGINE_SHA)
+        patched = arkweb.patch_engine_startup(original)
+        self.assertEqual(len(patched), len(original))
+        self.assertEqual(arkweb.patch_engine_startup(patched), patched)
+        restored = bytearray(patched)
+        for offset, before, after in arkweb.ENGINE_STARTUP_PATCHES:
+            self.assertEqual(patched[offset:offset + len(after)], after)
+            self.assertEqual(len(before), len(after))
+            restored[offset:offset + len(before)] = before
+        self.assertEqual(restored, original)
+        for data in (original, patched):
+            corrupt = bytearray(data)
+            corrupt[-1] ^= 1
+            with self.assertRaisesRegex(ValueError, "Unsupported ArkWeb engine"):
+                arkweb.patch_engine_startup(corrupt)
+
     def test_unknown_input_bridge_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unsupported ArkWeb input bridge"):
             arkweb.patch_input_bridge(b"different emulator build")
@@ -120,6 +152,23 @@ class RuntimeGuards(unittest.TestCase):
     def test_unknown_sandbox_layout_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Missing renderer/GPU"):
             arkweb.patch_sandbox({}, [])
+
+    def test_a_reboot_that_never_finishes_gives_up_at_its_deadline(self):
+        device = arkweb.Device("test")
+        with patch.object(arkweb.subprocess, "run"), \
+             patch.object(device, "shell", side_effect=RuntimeError("offline")), \
+             patch.object(arkweb.time, "sleep"):
+            self.assertFalse(arkweb.wait_for_boot(device, "test", 0))
+
+    def test_a_failed_reboot_leaves_what_the_runner_saw(self):
+        seen = subprocess.CompletedProcess([], 0, stdout="127.0.0.1:55555 Offline\n")
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(arkweb.subprocess, "run", return_value=seen):
+            arkweb.record_reboot_failure("127.0.0.1:55555", Path(directory))
+            report = (Path(directory) / "reboot-timeout.txt").read_text()
+        self.assertIn("$ hdc list targets -v", report)
+        self.assertIn("$ pgrep -a qemu-system", report)
+        self.assertIn("Offline", report)
 
 
 

@@ -71,6 +71,16 @@ would advertise only capabilities supported by the selected EGL implementation.
 
 These are image workarounds; no WebView Rust or ArkTS changes were needed.
 
+## Renderer startup timing
+
+The pinned browser also has a 100 ms deadline for receiving a renderer's IPC
+connection from the system application manager. Showcase reproduced a startup
+failure when that reply arrived after 128 ms. The installer extends this deadline
+to one second in the exact verified emulator binary and checks the installed hash
+after reboot. See [Renderer IPC startup deadline](RENDERER-STARTUP.md) for the
+trace, instruction changes, and validation. This changes only the disposable
+emulator's extracted library; the signed HAP and cache remain original.
+
 ## Shared workflow behavior
 
 `dayapp.yml` automatically invokes `setup-harmony-webview` after a fresh OpenHarmony

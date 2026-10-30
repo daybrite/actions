@@ -262,10 +262,30 @@ runs:
       with:
         gradle-version: 9.6.1
         add-job-summary: never
+    # `day build` goes through cargo-ndk, which picks the NDK's compilers itself. A bare
+    # `cargo clippy --target aarch64-linux-android` (daylib.yml's cross-check) does not, so a build
+    # script that compiles C (ring, through day-part-http's reqwest) would look for an unversioned
+    # `aarch64-linux-android-clang` on PATH that the NDK never ships. The API level is Day's floor
+    # (ANDROID_MIN_SDK, crates/day-cli/src/mobile.rs).
     - name: Android NDK env
       if: steps.canonical-target.outputs.target == 'android-material'
       shell: bash
-      run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      run: |
+        set -euo pipefail
+        NDK="$ANDROID_NDK_LATEST_HOME"
+        echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+        case "$RUNNER_OS" in
+          Linux) HOST=linux-x86_64; CMD=; EXE= ;;
+          macOS) HOST=darwin-x86_64; CMD=; EXE= ;;
+          Windows) HOST=windows-x86_64; CMD=.cmd; EXE=.exe ;;
+          *) echo "::error::setup-day-deps: no Android NDK host for runner OS '$RUNNER_OS'"; exit 1 ;;
+        esac
+        BIN="$NDK/toolchains/llvm/prebuilt/$HOST/bin"
+        for TRIPLE in aarch64-linux-android x86_64-linux-android; do
+          VAR="${TRIPLE//-/_}"
+          echo "CC_$VAR=$BIN/${TRIPLE}24-clang$CMD" >> "$GITHUB_ENV"
+          echo "AR_$VAR=$BIN/llvm-ar$EXE" >> "$GITHUB_ENV"
+        done
     - name: cargo-ndk (android)
       if: steps.canonical-target.outputs.target == 'android-material'
       uses: taiki-e/install-action@v2
