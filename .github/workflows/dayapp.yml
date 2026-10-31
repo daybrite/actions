@@ -2232,6 +2232,23 @@ jobs:
         continue-on-error: ${{ inputs.tolerate-failures == true && matrix.tier == 'extra' }}
         run: bash "$RUNNER_TEMP/run-dayscripts.sh"
 
+      # The emulators refuse to start without room for their data disk, and by this point the
+      # job's own builds (cargo, gradle, debug AND release on a push) have filled most of the
+      # runner. The headroom left differs by runner image: Stanza-Redux's phone leg on 2026-10-30
+      # reached the boot with 1.8 GB of a 72 GB root free and the emulator stopped with "Your
+      # device does not have enough disk space", while the same job passed on the images before
+      # and after. The image's preinstalled toolchains that no Day job uses (.NET, Haskell,
+      # CodeQL, Swift, Docker's images) are many gigabytes of that disk; removing them before the
+      # boot gives the emulator its room whatever the image ships. The Android SDK, the hosted
+      # Python and Node and everything this job built stay.
+      - name: Free disk space for the emulator
+        if: steps.scripts.outputs.found == 'true' && runner.os == 'Linux' && (matrix.target == 'android-material' || matrix.target == 'harmony-arkui')
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift /usr/local/share/boost
+          docker system prune -af >/dev/null 2>&1 || true
+          df -h /
       - name: Enable KVM group perms (android / harmony emulator)
         # Make /dev/kvm world-accessible so the emulators can open it (`day devices boot -t harmony-arkui` auto-selects `-accel kvm` when /dev/kvm exists).
         if: steps.scripts.outputs.found == 'true' && (matrix.target == 'android-material' || matrix.target == 'harmony-arkui')
