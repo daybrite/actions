@@ -116,7 +116,7 @@ class PlanTests(unittest.TestCase):
             version = "0.1.0"
             edition = "2024"
             [dependencies]
-            day-part-fixture = { path = "..", version = "0.1" }
+            day-part-fixture = { path = "..", version = "0.*" }
             [workspace]
         ''')
         write(self.root, 'tools/src/main.rs', 'fn main() {}')
