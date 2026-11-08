@@ -1,11 +1,21 @@
 # Copyright © The Daybrite Project
 # SPDX-License-Identifier: MPL-2.0
 
-name: Check Day crate names
-description: Reject retired Day package names and Rust imports in maintained sources.
+name: Check Day project and crate names
+description: Check reserved project names and reject retired Day package names and Rust imports.
+inputs:
+  project-path:
+    description: Additional generated project to inspect, including ignored or nested Git files.
+    default: ""
 runs:
   using: composite
   steps:
+    - shell: bash
+      env:
+        AUDIT_SCRIPT: ${{ github.action_path }}/check-project-names.py
+        PROJECT_PATH: ${{ inputs.project-path }}
+        GH_TOKEN: ${{ github.token }}
+      run: python3 "$AUDIT_SCRIPT" --root "$GITHUB_WORKSPACE" --project-path "$PROJECT_PATH"
     - shell: bash
       env:
         AUDIT_SCRIPT: ${{ github.action_path }}/check-crate-names.py

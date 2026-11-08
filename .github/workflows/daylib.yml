@@ -14,8 +14,8 @@
 # The caller keeps only what GitHub requires of it: the triggers (`on:`, with its own nightly
 # cron) and the permission grant. Everything else comes from what the repository already says:
 #
-#   plan         resolves Day once for the run and reads the manifests (plan-lib): the toolkit
-#                features of the crates and the demo's Day.toml targets.
+#   plan         checks project names, resolves Day once, and reads the manifests (plan-lib):
+#                the toolkit features of the crates and the demo's Day.toml targets.
 #   host         clippy and test on Linux, macOS and Windows, plus clippy with each toolkit
 #                feature on the OS it draws on, with that toolkit's libraries installed.
 #   cross-check  clippy for every mobile and web target the demo declares (iOS, Android,
@@ -178,6 +178,8 @@ jobs:
       publish-paths: ${{ steps.plan.outputs.publish-paths }}
     steps:
       - uses: actions/checkout@v7
+      - name: Check Day project and crate names
+        uses: daybrite/actions/.github/actions/check-crate-names@v1
       - uses: dtolnay/rust-toolchain@stable
       # One resolution for the run, so a day push landing mid-run does not split the legs: every
       # later job is handed this run's mode, or under "main" the exact day commit.
@@ -185,7 +187,6 @@ jobs:
         uses: daybrite/actions/.github/actions/day-deps@v1
         with:
           day-deps: ${{ inputs.day-main && 'main' || inputs.day-deps }}
-      - uses: daybrite/actions/.github/actions/check-crate-names@v1
       - id: plan
         uses: daybrite/actions/.github/actions/plan-lib@v1
         with:

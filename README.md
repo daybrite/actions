@@ -56,6 +56,21 @@ set `project-path: demo`.
 The examples below change the calling job's `with:` block unless they show a complete job.
 See [dayapp.yml](.github/workflows/dayapp.yml) for every input, default, and signing secret.
 
+### Project names
+
+Before installing toolchains, `dayapp` and `daylib` check repository names, Cargo package
+definitions (including nested workspaces), and app names and titles in `Day.toml` and flavor
+manifests. The `day-` and `Day-` prefixes are reserved for repositories under `daybrite` and
+GitHub forks of those repositories. Independent packages and crates should use `dayext-`.
+See the [contribution guide](https://daybrite.dev/contributing/) for the naming policy.
+
+The check uses GitHub's fork ancestry, including forks of forks. A `repository` URL in
+`Cargo.toml` does not establish an exemption. Dependency declarations and `Cargo.lock` may
+refer to Day crates. Files ignored by Git are excluded; projects created by `setup-command`
+are checked again immediately after generation, including ignored project sources.
+If reserved names are present and GitHub ancestry cannot be verified, the check fails with
+instructions to retry. It uses the workflow token's repository metadata access.
+
 ## Tests and screenshots
 
 Use Rust tests for application logic and DayScript for interactions with the running app.
@@ -151,12 +166,55 @@ Set `day-deps: published` or `day-deps: main` to make that choice explicit. Use 
 keep the manifest and lockfile unchanged, or a full Day commit SHA to pin Day within a `main`
 build. The workflow resolves dependencies once for all platform jobs.
 
-To check compatibility with published Day releases nightly, add this under `on:`:
+To check compatibility with published Day releases nightly, add a schedule under `on:`.
+Use `America/New_York` so it stays at the same Eastern time through daylight-saving changes:
 
 ```yaml
 schedule:
-  - cron: "0 7 * * *"
+  - cron: "30 1 * * *"
+    timezone: America/New_York
 ```
+
+### Overnight CI slots
+
+Daybrite's daily CI starts between 22:00 and 06:00 Eastern to leave the limited macOS runner
+pool available for daytime development. Repositories starting with lowercase `day` start on
+the hour; `Day` apps start on the half-hour. Other apps use half-hour slots too. Each workflow
+runs once per night, including `day`'s doctor verification, Day-Rise, and Day-Showcase.
+Push, pull-request, and manual triggers are unchanged.
+
+The allocation below uses recent successful job durations to separate the larger macOS
+workloads. Small workflows share slots. Check the existing allocation before adding a schedule;
+the workflows in each repository define the actual triggers.
+
+| Eastern time | Repositories / workflows |
+| --- | --- |
+| 22:00 | day (CI) |
+| 22:30 | Day-Rise, Day-Travel |
+| 23:00 | day-lite, day-sync, day-vscode |
+| 23:30 | Day-Showcase |
+| 00:00 | day-piece-camera, day-piece-selfupdate |
+| 00:30 | Stanza-Redux |
+| 01:00 | day-part-zeroconf, day-piece-map, day-plugins |
+| 01:30 | Day-Hub, Games-Fair |
+| 02:00 | day-piece-webview |
+| 02:30 | Day-News |
+| 03:00 | day-part-speech, day-piece-lottie, day-piece-media |
+| 03:30 | Day-Yaak, App-Fair |
+| 04:00 | day (doctor verification) |
+| 04:30 | Day-Sketch, Day-Skies |
+| 05:00 | day-persistence, day-webdav |
+| 05:30 | Day-Trader, Day-Tunes |
+| 06:00 | day-part-auth, day-piece-break, day-piece-charts |
+
+These are requested start times, not reservations. GitHub can delay scheduled runs, and long
+jobs can overlap later slots. During the spring daylight-saving transition, GitHub advances
+schedules in the skipped hour to the next valid time. See GitHub's
+[schedule documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+
+This allocation covers the checkouts under the shared `daybrite/` source directory, including
+App-Fair, Games-Fair, and Stanza-Redux. Day-Yaak's inherited sponsor-maintenance workflow is not
+CI and is gated to the upstream repository; it keeps its existing schedule.
 
 ## GitHub releases
 
@@ -400,6 +458,7 @@ on:
         default: false
   schedule:
     - cron: "0 6 * * *"
+      timezone: America/New_York
 
 permissions:
   contents: read
@@ -489,6 +548,7 @@ outputs.
 
 | Action | Purpose |
 |---|---|
+| [check-crate-names](.github/actions/check-crate-names/action.yml) | Enforce reserved project names and reject retired Day crate names and imports. |
 | [setup-day-deps](.github/actions/setup-day-deps/action.yml) | Install a target's libraries, SDKs, and optional packaging tools. |
 | [setup-day-cli](.github/actions/setup-day-cli/action.yml) | Install a released CLI, build one from Git, or download a run artifact; export `DAY_BIN`. |
 | [day-deps](.github/actions/day-deps/action.yml) | Select published, main, or locked Day dependencies before Cargo commands. |
