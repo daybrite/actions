@@ -168,7 +168,7 @@ trap 'echo cleanup >> "$EVENT_LOG"' EXIT
                        LOCALES_IN='', THEMES_IN='', LAUNCH_ENV_IN=launch_env, SCRIPTS_ONCE_IN=once,
                        CAPTURE_SIZE_IN='', GRANTS_IN=grants, COMBO=target, DEVICE_SLUG='',
                        HELP_FLAGS=(help_flags if help_flags is not None
-                                   else '' if legacy else '--locales'),
+                                   else '' if legacy else '--locales --skip-build'),
                        LAUNCH_EXIT='7' if fail else '0')
             generator = next(s['run'] for s in STEPS if s.get('id') == 'scripts')
             subprocess.run(['bash', '-c', generator], cwd=root, env=env, check=True,
@@ -188,7 +188,30 @@ trap 'echo cleanup >> "$EVENT_LOG"' EXIT
         self.run_fixture()
 
     def test_cleanup_preserves_failed_launch_status(self):
-        self.run_fixture(fail=True)
+        launches = self.run_fixture(fail=True)
+        self.assertEqual(len(launches), 1)
+        self.assertNotIn('--skip-build', launches[0])
+
+    def test_build_once_while_preserving_separate_native_launches(self):
+        for target, once in [('ios-uikit', ''), ('macos-appkit', 'two.yaml'),
+                             ('android-material', 'one.yaml two.yaml')]:
+            with self.subTest(target=target, once=once):
+                launches = self.run_fixture(target=target, once=once)
+                self.assertEqual(len(launches), 2)
+                self.assertNotIn('--skip-build', launches[0])
+                self.assertIn('--skip-build', launches[1])
+                self.assertEqual([a[a.index('--script') + 1] for a in launches],
+                                 ['one.yaml', 'two.yaml'])
+
+    def test_reuse_carries_over_to_once_only_web_launch(self):
+        launches = self.run_fixture(target='web-dom', once='two.yaml')
+        self.assertNotIn('--skip-build', launches[0])
+        self.assertIn('--skip-build', launches[1])
+
+    def test_cli_without_skip_build_keeps_building_each_launch(self):
+        launches = self.run_fixture(help_flags='--locales')
+        self.assertEqual(len(launches), 2)
+        self.assertTrue(all('--skip-build' not in args for args in launches))
 
     def test_legacy_runner_also_sources_setup(self):
         self.run_fixture(legacy=True)

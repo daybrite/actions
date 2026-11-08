@@ -2027,6 +2027,13 @@ jobs:
           # verbatim so `day-version: latest` keeps working. DELETE this branch when the
           # first release carrying --locales ships and `latest` resolves to it.
           if $DAY_BIN launch --help 2>/dev/null | grep -q -- --locales; then
+            # Each script still gets a separate launch, but its binary is unchanged. Rebuilding
+            # between scripts repeats Cargo and Xcode (including dSYM generation) for no new
+            # source. Build the first launch, then reuse it; keep older CLIs working too.
+            REUSEFLAG=""
+            if $DAY_BIN launch --help 2>/dev/null | grep -q -- --skip-build; then
+              REUSEFLAG="--skip-build"
+            fi
             # Computed before the heredoc: quotes nested inside \${var:+…} would be eaten by
             # quote removal during expansion, splitting a two-locale list into two arguments.
             LOCFLAG=""
@@ -2066,17 +2073,22 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           cd "$PWD"
+          reuse_build=""
           run_one() {
             local flags=()
+            [ -z "\$reuse_build" ] || flags+=("\$reuse_build")
             for s in "\$@"; do flags+=(--script "\$s"); done
             $DAY_BIN launch --target $COMBO "\${flags[@]}"$THEMEFLAG$LOCFLAG$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
+            reuse_build="$REUSEFLAG"
           }
           # Same launch without the theme/locale cross (inputs.scripts-once): one run in the
           # app's own appearance and language.
           run_once() {
             local flags=()
+            [ -z "\$reuse_build" ] || flags+=("\$reuse_build")
             for s in "\$@"; do flags+=(--script "\$s"); done
             $DAY_BIN launch --target $COMBO "\${flags[@]}"$DEVFLAG$CAPFLAG$GRANTFLAG$ENVS
+            reuse_build="$REUSEFLAG"
           }
           EOF
             if [ "$COMBO" = web-dom ]; then

@@ -103,6 +103,11 @@ with:
 The walkthrough runs four times per device: once for each theme and locale pair. Its
 `screenshot:` steps capture the UI. Use `locales: all` to cover every locale the app ships.
 
+Native scripts each launch the app separately. The first scripted launch builds it; later
+launches reuse that binary with `--skip-build`, including `scripts-once` runs. This preserves
+cold-start checks without repeating Cargo and Xcode builds. Older CLIs without that flag keep
+the previous build-per-launch behavior.
+
 | Input | Use it to… |
 |---|---|
 | `scripts: none` | Build and package without running DayScript. |
