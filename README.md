@@ -180,46 +180,21 @@ schedule:
     timezone: America/New_York
 ```
 
-### Overnight CI slots
+### Overnight CI scheduling
 
 Daybrite's daily CI starts between 22:00 and 06:00 Eastern to leave the limited macOS runner
 pool available for daytime development. Repositories starting with lowercase `day` start on
 the hour; `Day` apps start on the half-hour. Other apps use half-hour slots too. Each workflow
-runs once per night, including `day`'s doctor verification, Day-Rise, and Day-Showcase.
+runs once per night.
 Push, pull-request, and manual triggers are unchanged.
 
-The allocation below uses recent successful job durations to separate the larger macOS
-workloads. Small workflows share slots. Check the existing allocation before adding a schedule;
-the workflows in each repository define the actual triggers.
+Stagger larger macOS workloads based on recent job durations. Each repository's workflow
+defines its schedule.
 
-| Eastern time | Repositories / workflows |
-| --- | --- |
-| 22:00 | day (CI) |
-| 22:30 | Day-Rise, Day-Travel |
-| 23:00 | day-lite, day-sync, day-vscode |
-| 23:30 | Day-Showcase |
-| 00:00 | day-piece-camera, day-piece-selfupdate |
-| 00:30 | Stanza-Redux |
-| 01:00 | day-part-zeroconf, day-piece-map, day-plugins |
-| 01:30 | Day-Hub, Games-Fair |
-| 02:00 | day-piece-webview |
-| 02:30 | Day-News |
-| 03:00 | day-part-speech, day-piece-lottie, day-piece-media |
-| 03:30 | Day-Yaak, App-Fair |
-| 04:00 | day (doctor verification) |
-| 04:30 | Day-Sketch, Day-Skies |
-| 05:00 | day-persistence, day-webdav |
-| 05:30 | Day-Trader, Day-Tunes |
-| 06:00 | day-part-auth, day-piece-break, day-piece-charts |
-
-These are requested start times, not reservations. GitHub can delay scheduled runs, and long
+Scheduled times are requested start times, not reservations. GitHub can delay runs, and long
 jobs can overlap later slots. During the spring daylight-saving transition, GitHub advances
 schedules in the skipped hour to the next valid time. See GitHub's
 [schedule documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
-
-This allocation covers the checkouts under the shared `daybrite/` source directory, including
-App-Fair, Games-Fair, and Stanza-Redux. Day-Yaak's inherited sponsor-maintenance workflow is not
-CI and is gated to the upstream repository; it keeps its existing schedule.
 
 ## GitHub releases
 
