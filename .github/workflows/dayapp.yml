@@ -2911,7 +2911,12 @@ jobs:
           rm -f "$RUNNER_TEMP/stage/entitlements.plist"
           ln -sfn /Applications "$RUNNER_TEMP/stage/Applications"
           DMG="$RUNNER_TEMP/dist/$DMGNAME"
-          hdiutil create -quiet -volname "$TITLE" -srcfolder "$RUNNER_TEMP/stage" -ov -format UDZO "$DMG"
+          # Size the volume ourselves, as `day pack` does: hdiutil's own estimate for -srcfolder
+          # has come up short on hosted runners ("No space left on device" inside the volume).
+          # A fifth more than du reports, plus 16 MiB; UDZO compresses the slack away.
+          used_kb="$(du -sk "$RUNNER_TEMP/stage" | cut -f1)"
+          hdiutil create -quiet -volname "$TITLE" -srcfolder "$RUNNER_TEMP/stage" \
+            -size "$(( used_kb + used_kb / 5 + 16384 ))k" -ov -format UDZO "$DMG"
           codesign --force --timestamp --keychain "$KEYCHAIN" -s "$SIGN_ID" -i "$APPID.dmg" "$DMG"
           hdiutil verify "$DMG"
           echo "DMG=$DMG" >> "$GITHUB_ENV"
