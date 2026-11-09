@@ -181,29 +181,11 @@ runs:
         echo "cli=${CLI_IN:-v$VERSION}" >> "$GITHUB_OUTPUT"
         echo "building against day $VERSION from crates.io" >> "$GITHUB_STEP_SUMMARY"
 
-    # "main": `day patch` needs a CLI that knows `--main`. The newest release's binary takes
-    # seconds to install, which matters on the cross-target legs of a piece's own CI, where every
-    # push to day would otherwise build the CLI from source once per runner image; a release that
-    # predates the flag falls back to the CLI of the commit being patched to (cached per commit).
-    # Only the table comes from it: a caller builds with whatever CLI it installs itself.
-    - name: Set up a day CLI for day patch
+    # The patch algorithm must match the source being tested. Merely recognizing --main
+    # is insufficient: older CLIs omit nested demo workspaces and silently mix releases
+    # with the selected Git revision. Cache this CLI by revision through setup-day-cli.
+    - name: Set up the selected Day CLI for dependency resolution
       if: steps.pick.outputs.mode == 'main'
-      uses: daybrite/actions/.github/actions/setup-day-cli@v1
-      with:
-        version: latest
-        git: ${{ inputs.day-git }}
-    - name: Check that it knows day patch --main
-      id: can-patch
-      if: steps.pick.outputs.mode == 'main'
-      shell: bash
-      run: |
-        if "$DAY_BIN" patch --help 2>/dev/null | grep -q -- '--main'; then
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "The newest release's CLI predates day patch --main; building the CLI of the commit instead."
-        fi
-    - name: Set up the day CLI of the commit (for day patch)
-      if: steps.pick.outputs.mode == 'main' && steps.can-patch.outputs.ok != 'true'
       uses: daybrite/actions/.github/actions/setup-day-cli@v1
       with:
         version: ${{ steps.pick.outputs.rev }}

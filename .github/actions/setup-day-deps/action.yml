@@ -448,6 +448,14 @@ runs:
             # the copy fails the whole pack. An empty directory is what that GTK has to offer.
             GTK4_MODULES="$(pkg-config --variable=libdir gtk4)/gtk-4.0"
             [ -d "$GTK4_MODULES" ] || sudo mkdir -p "$GTK4_MODULES"
+            # Dependencies such as day-piece-media request this plugin to bundle the
+            # dynamically loaded GStreamer elements and scanner, beyond GTK's ldd closure.
+            GST_PLUGIN="$RUNNER_TEMP/linuxdeploy-plugin-gstreamer.sh"
+            curl -fsSL --retry 5 --retry-all-errors -o "$GST_PLUGIN" \
+              "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gstreamer/432af639725bc8b99df12351e86bb2e8a6b3585f/linuxdeploy-plugin-gstreamer.sh"
+            chmod +x "$GST_PLUGIN"
+            sudo apt-get install -y --no-install-recommends patchelf
+            echo "DAY_LINUXDEPLOY_PLUGIN_GSTREAMER=$GST_PLUGIN" >> "$GITHUB_ENV"
             ;;
         esac
         chmod +x "$RUNNER_TEMP/linuxdeploy" "$PLUGIN"
