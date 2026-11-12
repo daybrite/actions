@@ -169,6 +169,10 @@ runs:
         EXTRAS: ${{ inputs.extras }}
       run: |
         set -euo pipefail
+        # A runner's apt mirror sometimes stops answering mid-download. Without a timeout apt waits
+        # on it until the job's own limit; with one it gives up on the request and tries again.
+        printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+          | sudo tee /etc/apt/apt.conf.d/80-day-ci-timeouts >/dev/null
         sudo apt-get update
         # dbus is not optional even for a build-only job: GTK's file dialogs are portal-backed and
         # a runner has no session bus, so `day launch` starts a private one with `dbus-run-session`
@@ -221,6 +225,10 @@ runs:
           harmony-arkui) PKGS="qemu-system-x86 qemu-utils" ;;
           web-dom) PKGS="fonts-noto-cjk imagemagick" ;;
         esac
+        # A runner's apt mirror sometimes stops answering mid-download. Without a timeout apt waits
+        # on it until the job's own limit; with one it gives up on the request and tries again.
+        printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+          | sudo tee /etc/apt/apt.conf.d/80-day-ci-timeouts >/dev/null
         sudo apt-get update
         # shellcheck disable=SC2086 # deliberately word-split package lists
         sudo apt-get install -y --no-install-recommends $PKGS
@@ -239,6 +247,10 @@ runs:
         # shellcheck disable=SC2086 # a deliberately word-split package list
         case "$RUNNER_OS" in
           Linux)
+            # A runner's apt mirror sometimes stops answering mid-download. Without a timeout apt waits
+            # on it until the job's own limit; with one it gives up on the request and tries again.
+            printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+              | sudo tee /etc/apt/apt.conf.d/80-day-ci-timeouts >/dev/null
             sudo apt-get update
             sudo apt-get install -y $PACKAGES
             ;;

@@ -11,6 +11,10 @@ runs:
       shell: bash
       run: |
         if ! command -v debugfs >/dev/null; then
+          # A runner's apt mirror sometimes stops answering mid-download. Without a timeout apt waits
+          # on it until the job's own limit; with one it gives up on the request and tries again.
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+            | sudo tee /etc/apt/apt.conf.d/80-day-ci-timeouts >/dev/null
           sudo apt-get update
           sudo apt-get install -y e2fsprogs
         fi
