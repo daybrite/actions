@@ -2472,7 +2472,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/webdriver" && cd "$RUNNER_TEMP/webdriver"
           npm init -y >/dev/null
           npm install playwright >/dev/null
-          npx playwright install --with-deps chromium
+          # The install fetches system packages and the browser, and a runner's name lookups
+          # fail now and then: try again before calling it a failure.
+          for attempt in 1 2 3; do
+            if npx playwright install --with-deps chromium; then break; fi
+            if [[ $attempt == 3 ]]; then exit 1; fi
+            echo "::warning::playwright install failed (attempt $attempt); retrying"
+            sleep $((attempt * 20))
+          done
           {
             echo "DAY_WEB_DRIVER=node $DRIVER"
             echo "DAY_WEB_DRIVER_PLAYWRIGHT=$RUNNER_TEMP/webdriver"

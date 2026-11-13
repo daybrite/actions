@@ -251,6 +251,44 @@ class UploadActionTests(unittest.TestCase):
         self.assertIn("no lanes for linux-gtk", result.stdout)
         self.assertEqual(calls, [])
 
+    def lane_tools(self, with_fastlane):
+        """A PATH of stub tools: `gem` installs a recording fastlane into GEM_HOME, and `sudo` fails."""
+        tools = self.root / "tools"
+        tools.mkdir()
+        for name in ("bash", "base64", "rm", "tr", "cat", "mkdir", "chmod"):
+            (tools / name).symlink_to(next(Path(d) / name for d in ("/bin", "/usr/bin") if (Path(d) / name).exists()))
+        fastlane = '#!/bin/sh\necho "fastlane $* GEM_HOME=${GEM_HOME:-}" >> "$RUNNER_TEMP/lane-calls"\n'
+        (tools / "gem").write_text(
+            '#!/bin/sh\necho "gem $* GEM_HOME=${GEM_HOME:-}" >> "$RUNNER_TEMP/lane-calls"\n'
+            f'mkdir -p "$GEM_HOME/bin"\ncat > "$GEM_HOME/bin/fastlane" <<\'EOF\'\n{fastlane}EOF\nchmod +x "$GEM_HOME/bin/fastlane"\n'
+        )
+        (tools / "sudo").write_text('#!/bin/sh\necho "sudo $*" >> "$RUNNER_TEMP/lane-calls"\nexit 1\n')
+        if with_fastlane:
+            (tools / "fastlane").write_text(fastlane)
+        for stub in ("gem", "sudo", "fastlane"):
+            if (tools / stub).exists():
+                (tools / stub).chmod(0o755)
+        return str(tools)
+
+    def run_lane(self, with_fastlane):
+        result, _ = self.run_step(
+            "Run the lane (${{ inputs.lane }})", cwd=self.project, PATH=self.lane_tools(with_fastlane),
+            LANE="android release", TARGET="android-material", PACKAGE="/w/app.aab",
+            ASC_KEY_PATH="", ASC_KEY_B64="", PLAY_JSON_KEY_PATH="", PLAY_JSON_KEY="",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return (self.root / "lane-calls").read_text().splitlines()
+
+    def test_fastlane_is_installed_as_the_runner_user_when_the_image_lacks_it(self):
+        gems = self.root / "gems"
+        self.assertEqual(self.run_lane(with_fastlane=False), [
+            f"gem install fastlane --no-document GEM_HOME={gems}",
+            f"fastlane android release GEM_HOME={gems}",
+        ])
+
+    def test_a_runner_s_own_fastlane_is_used_as_it_is(self):
+        self.assertEqual(self.run_lane(with_fastlane=True), ["fastlane android release GEM_HOME="])
+
 
 class DecideStepTests(unittest.TestCase):
     """The stores job's decision, run over a scratch checkout."""

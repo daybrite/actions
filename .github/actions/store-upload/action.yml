@@ -245,8 +245,14 @@ runs:
           bundle install
           bundle exec fastlane "${lane[@]}"
         else
-          # macOS runners ship fastlane; ubuntu does not.
-          command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+          # macOS runners ship fastlane; ubuntu-26.04 does not. Install it as the runner user into
+          # RUNNER_TEMP: a `sudo gem install` lands in root's gem directory, which the runner
+          # user's RubyGems does not search there, so its binstub cannot find the gem.
+          if ! command -v fastlane >/dev/null; then
+            export GEM_HOME="$RUNNER_TEMP/gems"
+            export PATH="$GEM_HOME/bin:$PATH"
+            gem install fastlane --no-document
+          fi
           fastlane "${lane[@]}"
         fi
         rm -f "$RUNNER_TEMP/asc.p8" "$RUNNER_TEMP/play-key.json"
