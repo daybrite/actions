@@ -222,9 +222,11 @@ jobs:
         run: cargo fmt --all -- --check
       # A hung test fails the row instead of holding the release for the job's six-hour limit.
       # The bound is on the cargo step alone, since a slow package mirror can stretch the
-      # toolkit install above.
+      # toolkit install above. It leaves room for a cold build on the slowest runner: day-sync's
+      # Windows row takes 24 minutes when it passes and was cut off at 30 with its tests still
+      # running after a 28-minute compile (2026-11-17).
       - name: clippy and test
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         env:
           TOOLKIT: ${{ matrix.features }}

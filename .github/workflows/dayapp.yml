@@ -2531,10 +2531,22 @@ jobs:
           echo "bundled libraries: $(find "$RUNNER_TEMP/squashfs-root/usr/lib" -name '*.so*' 2>/dev/null | wc -l)"
           # Then the launch. `timeout` returns 124 when it had to kill a still-running app, which
           # is the PASSING outcome here; any other non-zero is the app dying on its own.
+          # The app's own status is written to a file from inside the X session. `xvfb-run`
+          # exits with a code of its own when its cleanup fails (5: "problem while cleaning up
+          # temporary directory"), which would otherwise be read as the app dying.
           set +e
-          xvfb-run -a timeout 20s "$APP" > "$RUNNER_TEMP/appimage-run.log" 2>&1
-          code=$?
+          APP="$APP" STATUS="$RUNNER_TEMP/appimage-run.status" xvfb-run -a bash -c \
+            'timeout 20s "$APP"; echo "$?" > "$STATUS"' > "$RUNNER_TEMP/appimage-run.log" 2>&1
+          wrapper=$?
           set -e
+          if [ -s "$RUNNER_TEMP/appimage-run.status" ]; then
+            code="$(cat "$RUNNER_TEMP/appimage-run.status")"
+          else
+            # The app never ran: the X server did not start.
+            echo "::error::xvfb-run failed before the AppImage ran (exit $wrapper)"
+            tail -40 "$RUNNER_TEMP/appimage-run.log"
+            exit 1
+          fi
           if [ "$code" != 124 ] && [ "$code" != 0 ]; then
             echo "::error::the AppImage exited $code instead of staying up"
             tail -40 "$RUNNER_TEMP/appimage-run.log"
@@ -4497,6 +4509,8 @@ jobs:
           DAYSITE_THEME: ${{ steps.theme.outputs.repository != '' && format('{0}/site-theme', github.workspace) || '' }}
           DAYSITE_PUBLIC_DIR: ${{ github.workspace }}/daysite/public
           DAYSITE_OUT_DIR: ${{ github.workspace }}/daysite/dist
+          # The site's feed (rss.xml) reads the release notes from GitHub while it builds.
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f scripts/build-site.mjs ]; then
             node scripts/build-site.mjs build
