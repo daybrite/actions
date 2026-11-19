@@ -152,7 +152,10 @@ runs:
         if [ "$CACHE_HIT" = true ] && [ -x "$BIN" ]; then
           echo "Using the day CLI cached for $REV."
         else
-          cargo install day-cli --locked --git "$GIT_URL" --rev "$REV" --root "$ROOT"
+          # A runner image's Rust can trail the release the day CLI requires, and images roll
+          # out over days, so a source build takes the current stable rather than the image's.
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo +stable install day-cli --locked --git "$GIT_URL" --rev "$REV" --root "$ROOT"
         fi
         if [ "$RUNNER_OS" = Windows ]; then
           printf '%s\n' "$RUNNER_TEMP\\day-cli-cache\\bin" >> "$GITHUB_PATH"
@@ -237,9 +240,11 @@ runs:
           "$BIN" version
           exit 0
         elif [[ "$V" =~ ^[0-9a-fA-F]{40}$ ]]; then
-          cargo install day-cli --locked --git "$GIT_URL" --rev "$V"
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo +stable install day-cli --locked --git "$GIT_URL" --rev "$V"
         else
-          cargo install day-cli --locked --git "$GIT_URL" --branch "$V"
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo +stable install day-cli --locked --git "$GIT_URL" --branch "$V"
         fi
         # An installed CLI is on PATH; export DAY_BIN anyway so every caller can use one spelling.
         echo "DAY_BIN=day" >> "$GITHUB_ENV"
