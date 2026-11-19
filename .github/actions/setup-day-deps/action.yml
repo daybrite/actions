@@ -153,7 +153,11 @@ runs:
           | sudo tee /etc/apt/apt.conf.d/99day-archives >/dev/null
         SET="$(printf '%s|%s|%s|%s' "$TARGET" "$EXTRAS" "$PACK" "$PACKAGES" | sha256sum | cut -c1-16)"
         echo "path=$DIR/*.deb" >> "$GITHUB_OUTPUT"
-        echo "key=day-apt-v1-${ImageOS:-linux}-${ImageVersion:-unknown}-${RUNNER_ARCH}-${TARGET}-${SET}" >> "$GITHUB_OUTPUT"
+        # The image version comes last so that `restore-keys` can fall back to the archives saved
+        # under the previous image. A new image used to mean an empty cache, and every package
+        # came from the mirror on exactly the runs most likely to meet a mirror outage.
+        echo "prefix=day-apt-v2-${ImageOS:-linux}-${RUNNER_ARCH}-${TARGET}-${SET}-" >> "$GITHUB_OUTPUT"
+        echo "key=day-apt-v2-${ImageOS:-linux}-${RUNNER_ARCH}-${TARGET}-${SET}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
     - name: Restore the apt package cache
       id: apt-restore
       if: runner.os == 'Linux'
@@ -161,6 +165,7 @@ runs:
       with:
         path: ${{ steps.apt-cache.outputs.path }}
         key: ${{ steps.apt-cache.outputs.key }}
+        restore-keys: ${{ steps.apt-cache.outputs.prefix }}
 
     - name: Toolkit deps (apt)
       if: steps.canonical-target.outputs.target == 'linux-gtk' || steps.canonical-target.outputs.target == 'linux-qt'
@@ -169,11 +174,9 @@ runs:
         EXTRAS: ${{ inputs.extras }}
       run: |
         set -euo pipefail
-        # A runner's apt mirror sometimes stops answering mid-download. Without a timeout apt waits
-        # on it until the job's own limit; with one it gives up on the request and tries again.
-        printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
-          | sudo tee /etc/apt/apt.conf.d/80-day-ci-timeouts >/dev/null
-        sudo apt-get update
+        # The index is consulted below (`apt-cache show`), so refresh it here; a refresh that fails
+        # leaves the image's own indexes in place, and apt-install.sh refreshes again and retries.
+        sudo apt-get update || true
         # dbus is not optional even for a build-only job: GTK's file dialogs are portal-backed and
         # a runner has no session bus, so `day launch` starts a private one with `dbus-run-session`
         # (it ships in this package). Without a bus GTK reaches the portal through a NULL
@@ -210,7 +213,7 @@ runs:
           PKGS="$PKGS xvfb imagemagick fonts-noto-cjk xclip libpulse0"
         fi
         # shellcheck disable=SC2086 # deliberately word-split package lists
-        sudo apt-get install -y --no-install-recommends $BASE $PKGS
+        "$GITHUB_ACTION_PATH/apt-install.sh" --no-install-recommends $BASE $PKGS
 
     # What the harmony/web WALKTHROUGHS need beyond a build: the Oniro emulator is a QEMU
     # x86_64 guest (`day devices boot -t harmony-arkui`), and the headless web browser renders the
@@ -225,13 +228,8 @@ runs:
           harmony-arkui) PKGS="qemu-system-x86 qemu-utils" ;;
           web-dom) PKGS="fonts-noto-cjk imagemagick" ;;
         esac
-        # A runner's apt mirror sometimes stops answering mid-download. Without a timeout apt waits
-        # on it until the job's own limit; with one it gives up on the request and tries again.
-        printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
-          | sudo tee /etc/apt/apt.conf.d/80-day-ci-timeouts >/dev/null
-        sudo apt-get update
         # shellcheck disable=SC2086 # deliberately word-split package lists
-        sudo apt-get install -y --no-install-recommends $PKGS
+        "$GITHUB_ACTION_PATH/apt-install.sh" --no-install-recommends $PKGS
 
     # --- the caller's own packages (inputs.packages) --------------------------------------------
     # After the toolkit's, so a package can extend what those installed.
@@ -247,12 +245,7 @@ runs:
         # shellcheck disable=SC2086 # a deliberately word-split package list
         case "$RUNNER_OS" in
           Linux)
-            # A runner's apt mirror sometimes stops answering mid-download. Without a timeout apt waits
-            # on it until the job's own limit; with one it gives up on the request and tries again.
-            printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
-              | sudo tee /etc/apt/apt.conf.d/80-day-ci-timeouts >/dev/null
-            sudo apt-get update
-            sudo apt-get install -y $PACKAGES
+            "$GITHUB_ACTION_PATH/apt-install.sh" $PACKAGES
             ;;
           macOS) brew install $PACKAGES ;;
           # Chocolatey edits the MACHINE PATH, which later steps do not see (see the NSIS step);
@@ -422,7 +415,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+        "$GITHUB_ACTION_PATH/apt-install.sh" --no-install-recommends flatpak flatpak-builder
         flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
     - name: linuxdeploy tooling (linux pack)
       if: inputs.pack == 'true' && (steps.canonical-target.outputs.target == 'linux-gtk' || steps.canonical-target.outputs.target == 'linux-qt')
@@ -436,7 +429,7 @@ runs:
         # on when missing.
         sudo apt-get install -y --no-install-recommends fuse3 libfuse2t64 || \
           sudo apt-get install -y --no-install-recommends fuse libfuse2 || true
-        sudo apt-get install -y --no-install-recommends dpkg-dev
+        "$GITHUB_ACTION_PATH/apt-install.sh" --no-install-recommends dpkg-dev
         curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/linuxdeploy" \
           https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
         # The two plugins are NOT distributed the same way: qt ships an AppImage on a rolling
@@ -466,7 +459,7 @@ runs:
             curl -fsSL --retry 5 --retry-all-errors -o "$GST_PLUGIN" \
               "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gstreamer/432af639725bc8b99df12351e86bb2e8a6b3585f/linuxdeploy-plugin-gstreamer.sh"
             chmod +x "$GST_PLUGIN"
-            sudo apt-get install -y --no-install-recommends patchelf
+            "$GITHUB_ACTION_PATH/apt-install.sh" --no-install-recommends patchelf
             echo "DAY_LINUXDEPLOY_PLUGIN_GSTREAMER=$GST_PLUGIN" >> "$GITHUB_ENV"
             ;;
         esac
@@ -558,6 +551,9 @@ runs:
       if: runner.os == 'Linux' && steps.apt-restore.outputs.cache-hit != 'true'
       shell: bash
       run: |
+        # Drop archives the index no longer offers, so a cache that falls back across image
+        # versions does not grow with every superseded package.
+        sudo apt-get autoclean -y >/dev/null 2>&1 || true
         # The archives only: `partial/` is apt's own (mode 700, user _apt), and unreadable here.
         if compgen -G "/var/cache/day-apt/*.deb" >/dev/null; then
           echo "any=true" >> "$GITHUB_OUTPUT"
