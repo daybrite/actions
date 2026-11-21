@@ -119,6 +119,22 @@ the previous build-per-launch behavior.
 | `script-setup` | Start a local test service or configure emulator ports before scripts run. |
 | `grant-permissions` | Grant device permissions before launch, such as `android-material: camera microphone`. |
 
+### Android Maps key
+
+Apps using Google Maps on Android can pass the optional `DAY_GOOGLE_MAPS_API_KEY` secret
+to `dayapp`. It is exposed only to the Android `target-setup` command, where the app can
+write an ignored Android resource without printing the value. It is not a signing key;
+the build jobs still receive no signing material. The secret is unavailable on fork pull
+requests, so apps must explicitly handle that case or require it for map captures.
+
+```yaml
+secrets:
+  DAY_GOOGLE_MAPS_API_KEY: ${{ secrets.DAY_GOOGLE_MAPS_API_KEY }}
+with:
+  target-setup: |
+    android-material: python3 scripts/configure_google_maps.py
+```
+
 ### Device profiles
 
 Mobile targets use a portrait phone and a landscape tablet by default. Set `ios-devices`,

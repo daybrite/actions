@@ -827,9 +827,12 @@ on:
         type: boolean
         required: false
         default: false
-    # Optional release-signing secrets — the same names daybrite/day's ci.yml uses. All optional:
-    # absent secrets degrade pack to the dev tier. Forward them all with `secrets: inherit`.
+    # Optional application service and release-signing secrets. Absent signing secrets
+    # degrade pack to the dev tier. Forward named secrets or use `secrets: inherit`.
     secrets:
+      # Application service credential, not signing material. Exposed only to the
+      # Android target-setup step so the caller can create its ignored Maps resource.
+      DAY_GOOGLE_MAPS_API_KEY: { required: false }
       DAY_UPDATE_PRIVATE_KEY:
         required: false
       # The Developer ID used to sign and notarize the macOS .dmg, consumed ONLY by `sign-macos`.
@@ -1774,6 +1777,7 @@ jobs:
         if: matrix.setup != ''
         env:
           TARGET_SETUP: ${{ matrix.setup }}
+          DAY_GOOGLE_MAPS_API_KEY: ${{ matrix.target == 'android-material' && secrets.DAY_GOOGLE_MAPS_API_KEY || '' }}
         run: bash -eo pipefail -c "$TARGET_SETUP"
 
       # --- validate the environment, then build ---------------------------------------------

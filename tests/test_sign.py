@@ -35,7 +35,7 @@ def condition(job):
 
 class ShapeTests(unittest.TestCase):
     def test_the_build_leg_holds_no_signing_material(self):
-        """The job that runs the app's code and dayscripts holds no key for any platform: not
+        """The job that runs the app's code and dayscripts holds no signing key: not
         an Apple certificate (imported there once, automatic signing minted a development
         certificate per run until the account was full), not the Android upload keystore, not
         the HarmonyOS material. It packs every store package unsigned for the sign job."""
@@ -44,7 +44,10 @@ class ShapeTests(unittest.TestCase):
         self.assertNotIn("Import the Apple signing certificate", build)
         for step in JOBS["build"]["steps"]:
             self.assertNotIn("import-codesign-certs", str(step.get("uses", "")))
-            self.assertNotIn("secrets.DAY_", str(step.get("env", {})), step.get("name"))
+            # The optional Android Maps service key is not signing material. No other
+            # secret is allowed into a build step, and this one has a separate scope check.
+            env = str(step.get("env", {})).replace("secrets.DAY_GOOGLE_MAPS_API_KEY", "")
+            self.assertNotIn("secrets.DAY_", env, step.get("name"))
         env = str(JOBS["build"].get("env", {}))
         for name in ("DAY_ANDROID_", "DAY_OHOS_", "DAY_KS_PASS", "DAY_KEY_PASS", "DAY_APPLE_", "DAY_IOS_PROFILE"):
             self.assertNotIn(name, env, name)
@@ -54,6 +57,16 @@ class ShapeTests(unittest.TestCase):
         # dev tier (a dev-signed .apk installs; an unsigned one does not).
         self.assertIn('case " ${{ needs.preflight.outputs.sign-targets }} " in', pack)
         self.assertIn('*" ${{ matrix.target }} "*) NO_SIGN="--no-sign"', pack)
+
+    def test_maps_key_only_reaches_android_target_setup(self):
+        found = []
+        for step in JOBS["build"]["steps"]:
+            if "secrets.DAY_GOOGLE_MAPS_API_KEY" in str(step):
+                found.append(step)
+        self.assertEqual([s["name"] for s in found], ["Target setup (${{ matrix.target }})"])
+        self.assertEqual(found[0]["env"]["DAY_GOOGLE_MAPS_API_KEY"],
+                         "${{ matrix.target == 'android-material' && secrets.DAY_GOOGLE_MAPS_API_KEY || '' }}")
+        self.assertNotIn("DAY_GOOGLE_MAPS_API_KEY", str(JOBS["build"].get("env", {})))
 
     def test_preflight_plans_a_sign_row_only_where_the_material_exists(self):
         """Presence crosses into preflight as booleans from the base64 blobs alone: a short
