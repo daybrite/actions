@@ -61,7 +61,9 @@ See [dayapp.yml](.github/workflows/dayapp.yml) for every input, default, and sig
 Before installing toolchains, `dayapp` and `daylib` check repository names, Cargo package
 definitions (including nested workspaces), and app names and titles in `Day.toml` and flavor
 manifests. The `day-` and `Day-` prefixes are reserved for repositories under `daybrite` and
-GitHub forks of those repositories. Independent packages and crates should use `dayext-`.
+GitHub forks of those repositories. The `Day-Plan/Day-Plan` repository has an exception for
+the exact name `Day-Plan`, including its lowercase Cargo spelling `day-plan`.
+Independent packages and crates should use `dayext-`.
 See the [contribution guide](https://daybrite.dev/contributing/) for the naming policy.
 
 The check uses GitHub's fork ancestry, including forks of forks. A `repository` URL in

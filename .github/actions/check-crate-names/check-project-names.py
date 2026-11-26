@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright © The Daybrite Project
 # SPDX-License-Identifier: MPL-2.0
-"""Reserve Day project names for the daybrite organization and its GitHub forks."""
+"""Check reserved Day prefixes in repository, app and crate names."""
 
 import argparse
 import json
@@ -36,9 +36,14 @@ def daybrite_repository(value):
     return repository_name(value).split("/", 1)[0].casefold() == "daybrite"
 
 
-def reserved(value):
+def reserved(value, repository):
     # Repository names are case-insensitive on GitHub; cover Day- app names as well.
-    return isinstance(value, str) and value.casefold().startswith("day-")
+    if not isinstance(value, str):
+        return False
+    name = value.casefold()
+    if name == "day-plan" and repository.casefold() == "day-plan/day-plan":
+        return False
+    return name.startswith("day-")
 
 
 def github_repository(repository):
@@ -127,7 +132,7 @@ def manifests(root, project_path=""):
 def project_names(root, repository, project_path=""):
     names = []
     repo = repository_name(repository).split("/", 1)[1]
-    if reserved(repo):
+    if reserved(repo, repository):
         names.append(f"Repository {repository!r}")
     for path in manifests(root, project_path):
         location = str(path.relative_to(root))
@@ -144,7 +149,7 @@ def project_names(root, repository, project_path=""):
             app = data.get("app", {})
             entries = [(f"app.{key}", app.get(key)) for key in ("name", "title")]
         for field, name in entries:
-            if reserved(name):
+            if reserved(name, repository):
                 names.append(f"{location}: {field} = {name!r}")
     return names
 
@@ -155,8 +160,8 @@ def check(root, repository, project_path="", fetch=github_repository):
     names = project_names(root.resolve(), repository, project_path)
     if not names or permitted_repository(repository, fetch):
         return []
-    return [f"{name} uses a reserved Day prefix. Only daybrite repositories and their "
-            "GitHub forks may use 'day-' or 'Day-'." for name in names]
+    return [f"{name} uses a Day prefix reserved for daybrite repositories and their GitHub forks."
+            for name in names]
 
 
 def main():
@@ -173,7 +178,7 @@ def main():
         print(f"::error::{message}", file=sys.stderr)
     if errors:
         return 1
-    print("Day project naming: organization, fork ancestry, or unreserved names verified")
+    print("Day project naming: all project names permitted")
     return 0
 
 

@@ -50,6 +50,21 @@ class ProjectNamesTests(unittest.TestCase):
         self.assertEqual(self.check("Daybrite/Day-Example"), [])
         self.fetch.assert_not_called()
 
+    def test_day_plan_exception_is_scoped_to_its_repository_and_name(self):
+        self.write("Cargo.toml", '[package]\nname = "day-plan"\n')
+        self.write("Day.toml", '[app]\ntitle = "Day-Plan"\n')
+        self.assertEqual(self.check("Day-Plan/Day-Plan"), [])
+        self.assertEqual(self.check("day-plan/DAY-PLAN"), [])
+        self.fetch.assert_not_called()
+
+        self.assertEqual(len(self.check("someone/Day-Plan")), 3)
+        self.assertEqual(len(self.check("Day-Plan/another")), 2)
+
+        self.write("crates/tools/Cargo.toml", '[package]\nname = "day-plan-tools"\n')
+        errors = self.check("Day-Plan/Day-Plan")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("day-plan-tools", errors[0])
+
     def test_unreserved_projects_can_depend_on_day_without_network_access(self):
         self.write("Cargo.toml", '''[package]
 name = "dayext-piece-example"
