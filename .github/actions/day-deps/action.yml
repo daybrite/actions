@@ -21,6 +21,7 @@ description: >-
 inputs:
   day-deps:
     description: >-
+      "release" (unchanged checked-in crates.io lock and matching released CLI),
       "published", "main", "locked" (leave the manifest and lock alone), a 40-hex day commit
       (main, with day pinned to it), or "auto" (default): "published" for a scheduled run, a
       version tag and a manual run, "main" for anything else.
@@ -47,20 +48,20 @@ inputs:
 
 outputs:
   mode:
-    description: What `day-deps` resolved to for this run, "published", "main" or "locked".
+    description: What `day-deps` resolved to for this run, "published", "main", "release" or "locked".
     value: ${{ steps.pick.outputs.mode }}
   rev:
     description: The day commit a "main" run builds against; empty otherwise.
     value: ${{ steps.pick.outputs.rev }}
   version:
-    description: The day release a "published" run resolved (`0.6.1`); empty otherwise.
-    value: ${{ steps.published.outputs.version }}
+    description: The Day release read from the lock in "published" or "release" mode; empty otherwise.
+    value: ${{ steps.release.outputs.version || steps.published.outputs.version }}
   cli:
     description: >-
       The day CLI to install for the build, as setup-day-cli's `version`: the release binary
-      (`v0.6.1`) under "published", the day commit under "main", `main` under "locked", unless
-      `day-version` named one.
-    value: ${{ steps.pick.outputs.cli || steps.published.outputs.cli }}
+      (`v0.6.1`) under "published" or "release", the day commit under "main", `main` under "locked", unless
+      `day-version` named one. Release mode requires it to match the locked version.
+    value: ${{ steps.release.outputs.cli || steps.pick.outputs.cli || steps.published.outputs.cli }}
 
 runs:
   using: composite
@@ -84,9 +85,9 @@ runs:
               push) if [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+ ]]; then MODE=published; else MODE=main; fi ;;
               *) MODE=main ;;
             esac ;;
-          published|main|locked) MODE="$DEPS_IN" ;;
+          published|main|locked|release) MODE="$DEPS_IN" ;;
           *)
-            [[ "$DEPS_IN" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::day-deps must be auto, published, main, locked, or a full 40-hex day commit (got '$DEPS_IN')"; exit 1; }
+            [[ "$DEPS_IN" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::day-deps must be auto, published, main, locked, release, or a full 40-hex day commit (got '$DEPS_IN')"; exit 1; }
             MODE=main
             REV="$DEPS_IN" ;;
         esac
@@ -100,7 +101,7 @@ runs:
           case "$MODE" in
             main) CLI="$REV" ;;
             locked) CLI=main ;;
-            published) CLI="" ;;
+            published|release) CLI="" ;;
           esac
         fi
         {
@@ -122,7 +123,18 @@ runs:
     #
     # Under "main" the fresh lock is left to `day patch` below, which resolves under its table: a
     # graph that asks for a day release crates.io does not have yet resolves only there.
+    - name: Validate the release's crates.io lock
+      id: release
+      if: steps.pick.outputs.mode == 'release'
+      shell: bash
+      env:
+        PROJECT: ${{ inputs.path }}
+        CLI_IN: ${{ inputs.day-version }}
+        ACTION_DIR: ${{ github.action_path }}
+      run: python3 "$ACTION_DIR/release.py" "$PROJECT" --cli "$CLI_IN"
+
     - name: Prepare Cargo.lock
+      if: steps.pick.outputs.mode != 'release'
       shell: bash
       working-directory: ${{ inputs.path }}
       env:

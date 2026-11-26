@@ -81,7 +81,9 @@ on:
         required: true
       day-deps:
         description: >-
-          Which day the project's Day dependencies resolve to. "published": the newest release
+          Which day the project's Day dependencies resolve to. "release": the checked-in
+          crates.io-only Cargo.lock, validated with --locked and never updated or regenerated;
+          the CLI is the published version matching the locked framework. "published": the newest release
           on crates.io its version requirements accept (the lock's day crates are updated to
           it). "main": the head of each Day repository's default branch, through `day patch
           --main` (a full 40-hex day commit instead pins day itself to that commit). "locked":
@@ -1791,6 +1793,13 @@ jobs:
       - name: Doctor (${{ matrix.toolkit }})
         run: $DAY_BIN doctor --toolkit ${{ matrix.toolkit }}
 
+      - name: Check the release lock before building
+        if: needs.preflight.outputs.day-deps == 'release'
+        working-directory: ${{ inputs.project-path }}
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code HEAD -- Cargo.lock
+
       - name: Build (${{ matrix.target }})
         id: build
         working-directory: ${{ inputs.project-path }}
@@ -1880,6 +1889,12 @@ jobs:
           esac
           $DAY_BIN pack --target ${{ matrix.target }} --no-version-in-name --format json $NO_SIGN
 
+      - name: Verify the release lock was preserved
+        id: release-lock
+        if: needs.preflight.outputs.day-deps == 'release'
+        working-directory: ${{ inputs.project-path }}
+        run: git diff --exit-code HEAD -- Cargo.lock
+
       - name: Prepare additional package assets
         if: inputs.post-pack-command != '' && matrix.primary && matrix.flavor == '' && steps.pack.outcome == 'success'
         working-directory: ${{ inputs.project-path }}
@@ -1924,7 +1939,7 @@ jobs:
         # before it — lint, doctor — skips it, and skipping this too keeps the log honest), and
         # pack must not have failed. A skipped pack still uploads: that is web-dom, which stages a
         # zip of the dist instead of packing.
-        if: always() && matrix.primary && matrix.tier == 'primary' && steps.build.outcome == 'success' && steps.pack.outcome != 'failure'
+        if: always() && matrix.primary && matrix.tier == 'primary' && steps.build.outcome == 'success' && steps.pack.outcome != 'failure' && (needs.preflight.outputs.day-deps != 'release' || steps.release-lock.outcome == 'success')
         uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}${{ matrix.dist_artifact }}

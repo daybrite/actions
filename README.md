@@ -185,6 +185,21 @@ The default `day-deps: auto` chooses dependencies by event and matches the CLI t
 | Branch push or pull request | Default branches of Day and its pieces and parts |
 | Version tag, scheduled run, or manual run | Newest published versions allowed by the project's requirements |
 
+App Fair apps select `day-deps: release` on tag refs (including manual tag runs and
+`release` events). This requires a checked-in, unchanged crates.io-only `Cargo.lock`, validates
+it with `cargo metadata --locked`, rejects Git/local source overrides, and uses the published
+Day CLI matching the locked framework. Missing or stale locks fail; release mode never runs
+`cargo update` or regenerates the lock. First-party crates inside the app workspace are allowed.
+
+```yaml
+day-deps: ${{ startsWith(github.ref, 'refs/tags/') && 'release' || inputs.day-main && 'main' || 'auto' }}
+```
+
+Prepare release locks in a clean checkout without `.cargo` overrides, validate the app against
+that graph, and include the lock in the release commit before tagging. Development builds may
+rewrite their working lock; do not accidentally replace the release lock with a local-patch lock.
+A newly required crate must be published to crates.io before preparing the app's release lock.
+
 Set `day-deps: published` or `day-deps: main` to make that choice explicit. Use `locked` to
 keep the manifest and lockfile unchanged, or a full Day commit SHA to pin Day within a `main`
 build. The workflow resolves dependencies once for all platform jobs.
@@ -549,7 +564,7 @@ outputs.
 | [check-crate-names](.github/actions/check-crate-names/action.yml) | Enforce reserved project names and reject retired Day crate names and imports. |
 | [setup-day-deps](.github/actions/setup-day-deps/action.yml) | Install a target's libraries, SDKs, and optional packaging tools. |
 | [setup-day-cli](.github/actions/setup-day-cli/action.yml) | Install a released CLI, build one from Git, or download a run artifact; export `DAY_BIN`. |
-| [day-deps](.github/actions/day-deps/action.yml) | Select published, main, or locked Day dependencies before Cargo commands. |
+| [day-deps](.github/actions/day-deps/action.yml) | Select release, published, main, or locked Day dependencies before Cargo commands. |
 | [sign-package](.github/actions/sign-package/action.yml) | Sign an existing iOS, Android, HarmonyOS, or Mac App Store package. |
 | [store-upload](.github/actions/store-upload/action.yml) | Stage a listing and run a fastlane lane with a signed package. |
 | [publish-crates](.github/actions/publish-crates/action.yml) | Publish workspace crates through Trusted Publishing. |
