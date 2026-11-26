@@ -1,0 +1,41 @@
+# Copyright © The Daybrite Project
+# SPDX-License-Identifier: MPL-2.0
+
+name: Deploy the uploaded Pages artifact
+description: Retry deployment creation once if Pages cannot see a newly uploaded artifact.
+inputs:
+  artifact-name:
+    description: Name of the Pages artifact uploaded in this run.
+    required: true
+outputs:
+  page_url:
+    description: URL returned by the Pages deployment.
+    value: ${{ steps.first.outputs.page_url || steps.retry.outputs.page_url }}
+runs:
+  using: composite
+  steps:
+    - id: first
+      uses: actions/deploy-pages@v5
+      continue-on-error: true
+      with:
+        artifact_name: ${{ inputs.artifact-name }}
+    # deploy-pages emits page_url after creation and before polling. Preserve a
+    # failed deployment's result. Only retry a failure before it returned a URL.
+    - name: Check whether to retry deployment creation
+      if: ${{ steps.first.outcome == 'failure' }}
+      shell: bash
+      env:
+        PAGE_URL: ${{ steps.first.outputs.page_url }}
+      run: |
+        if [[ -n "$PAGE_URL" ]]; then
+          echo "::error::Pages deployment failed after creation: $PAGE_URL"
+          exit 1
+        fi
+        echo "::notice::Pages returned no deployment URL. Retrying the same artifact in 30 seconds."
+        sleep 30
+    - name: Retry deployment creation
+      id: retry
+      if: ${{ success() && steps.first.outcome == 'failure' }}
+      uses: actions/deploy-pages@v5
+      with:
+        artifact_name: ${{ inputs.artifact-name }}

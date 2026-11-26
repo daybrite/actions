@@ -4046,9 +4046,9 @@ jobs:
       # is not a commit (Day-Trader, Day-Showcase, 2026-09-26).
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v5
+        uses: daybrite/actions/.github/actions/deploy-pages@v1
         with:
-          artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
+          artifact-name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
 
   # --- Project website (daysite) -------------------------------------------------------------
   # When the repository has website/site.toml, this job replaces the bare root deploy above: it
@@ -4429,6 +4429,7 @@ jobs:
       # Absent when web-dom is not a target — the site simply has no such button.
       - name: Download the web-dom dist
         id: webdist
+        if: ${{ inputs.deploy-web || contains(fromJSON(needs.preflight.outputs.pack-matrix).include.*.target, 'web-dom') }}
         continue-on-error: ${{ !inputs.deploy-web }}
         uses: actions/download-artifact@v7
         with:
@@ -4578,6 +4579,6 @@ jobs:
       # is not a commit (Day-Trader, Day-Showcase, 2026-09-26).
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v5
+        uses: daybrite/actions/.github/actions/deploy-pages@v1
         with:
-          artifact_name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
+          artifact-name: github-pages-${{ inputs.artifact-prefix }}${{ github.run_attempt }}
