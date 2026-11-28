@@ -20,6 +20,12 @@ GUIDANCE = (
     "for independent repositories and apps. See https://daybrite.dev/contributing/"
 )
 GENERATED = {".git", "target", "build", "node_modules", ".venv", ".cache"}
+# Projects outside the organization that keep a Day name: the repository, and the exact names it
+# may define. Both sides are lowercase, as GitHub and Cargo compare them.
+EXCEPTIONS = {
+    "day-plan/day-plan": {"day-plan"},
+    "appfair/day-piece-appfair": {"day-piece-appfair", "day-piece-appfair-demo"},
+}
 
 
 class AuditError(Exception):
@@ -41,7 +47,7 @@ def reserved(value, repository):
     if not isinstance(value, str):
         return False
     name = value.casefold()
-    if name == "day-plan" and repository.casefold() == "day-plan/day-plan":
+    if name in EXCEPTIONS.get(repository.casefold(), ()):
         return False
     return name.startswith("day-")
 

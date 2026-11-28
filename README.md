@@ -62,7 +62,9 @@ Before installing toolchains, `dayapp` and `daylib` check repository names, Carg
 definitions (including nested workspaces), and app names and titles in `Day.toml` and flavor
 manifests. The `day-` and `Day-` prefixes are reserved for repositories under `daybrite` and
 GitHub forks of those repositories. The `Day-Plan/Day-Plan` repository has an exception for
-the exact name `Day-Plan`, including its lowercase Cargo spelling `day-plan`.
+the exact name `Day-Plan`, including its lowercase Cargo spelling `day-plan`. The
+`appfair/day-piece-appfair` repository has one for `day-piece-appfair` and for its demo app's
+package, `day-piece-appfair-demo`.
 Independent packages and crates should use `dayext-`.
 See the [contribution guide](https://daybrite.dev/contributing/) for the naming policy.
 
